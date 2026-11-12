@@ -1,0 +1,4 @@
+/target/
+/stand/.state/
+*.tar
+/.superpowers/
