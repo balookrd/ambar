@@ -1,0 +1,126 @@
+[
+{
+  "name": "spike2",
+  "node-id": 1,
+  "role": "Secondary",
+  "suspended": false,
+  "suspended-user": false,
+  "suspended-no-data": false,
+  "suspended-fencing": false,
+  "suspended-quorum": false,
+  "force-io-failures": false,
+  "write-ordering": "flush",
+  "devices": [
+    {
+      "volume": 0,
+      "minor": 1001,
+      "disk-state": "Inconsistent",
+      "client": false,
+      "open": false,
+      "quorum": true,
+      "size": 1048508,
+      "read": 0,
+      "written": 51228,
+      "al-writes": 5,
+      "bm-writes": 8,
+      "upper-pending": 0,
+      "lower-pending": 1
+    } ],
+  "connections": [
+    {
+      "peer-node-id": 0,
+      "name": "lima-dv-1",
+      "connection-state": "Connected", 
+      "congested": false,
+      "peer-role": "Secondary",
+      "tls": false,
+      "ap-in-flight": 0,
+      "rs-in-flight": 0,
+      "paths": [
+        {
+          "this_host": {
+            "address": "192.168.104.3",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "remote_host": {
+            "address": "192.168.104.1",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "established": true
+        } ],
+      "peer_devices": [
+        {
+          "volume": 0,
+          "replication-state": "SyncTarget",
+          "peer-disk-state": "UpToDate",
+          "peer-client": false,
+          "resync-suspended": "no",
+          "received": 33064,
+          "sent": 0,
+          "out-of-sync": 4100,
+          "pending": 0,
+          "unacked": 0,
+          "has-sync-details": true,
+          "has-online-verify-details": false,
+          "percent-in-sync": 99.61,
+          "rs-total": 76784,
+          "rs-dt-start-ms": 9980,
+          "rs-paused-ms": 0,
+          "rs-dt0-ms": 9980,
+          "rs-db0-sectors": 25136,
+          "rs-dt1-ms": 6964,
+          "rs-db1-sectors": 9360,
+          "rs-failed": 0,
+          "rs-same-csum": 0,
+          "want": 0.43,
+          "db0/dt0 [MiB/s]": 1.23,
+          "db1/dt1 [MiB/s]": 0.66,
+          "estimated-seconds-to-finish": 6,
+          "db/dt [MiB/s]": 3.36,
+          "percent-resync-done": 89.32
+        } ]
+    },
+    {
+      "peer-node-id": 2,
+      "name": "lima-dv-3",
+      "connection-state": "Connected", 
+      "congested": false,
+      "peer-role": "Primary",
+      "tls": false,
+      "ap-in-flight": 0,
+      "rs-in-flight": 0,
+      "paths": [
+        {
+          "this_host": {
+            "address": "192.168.104.3",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "remote_host": {
+            "address": "192.168.104.4",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "established": true
+        } ],
+      "peer_devices": [
+        {
+          "volume": 0,
+          "replication-state": "Established",
+          "peer-disk-state": "Diskless",
+          "peer-client": true,
+          "resync-suspended": "dependency",
+          "received": 18168,
+          "sent": 0,
+          "out-of-sync": 0,
+          "pending": 0,
+          "unacked": 1,
+          "has-sync-details": false,
+          "has-online-verify-details": false,
+          "percent-in-sync": 100.00
+        } ]
+    } ]
+}
+]

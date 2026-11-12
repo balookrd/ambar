@@ -1,0 +1,112 @@
+[
+{
+  "name": "spike2",
+  "node-id": 0,
+  "role": "Secondary",
+  "suspended": false,
+  "suspended-user": false,
+  "suspended-no-data": false,
+  "suspended-fencing": false,
+  "suspended-quorum": false,
+  "force-io-failures": false,
+  "write-ordering": "flush",
+  "devices": [
+    {
+      "volume": 0,
+      "minor": 1001,
+      "disk-state": "UpToDate",
+      "client": false,
+      "open": false,
+      "quorum": true,
+      "size": 1048508,
+      "read": 537,
+      "written": 1506232,
+      "al-writes": 5,
+      "bm-writes": 8,
+      "upper-pending": 0,
+      "lower-pending": 1
+    } ],
+  "connections": [
+    {
+      "peer-node-id": 1,
+      "name": "lima-dv-2",
+      "connection-state": "Connecting", 
+      "congested": false,
+      "peer-role": "Unknown",
+      "tls": false,
+      "ap-in-flight": 0,
+      "rs-in-flight": 0,
+      "paths": [
+        {
+          "this_host": {
+            "address": "192.168.104.1",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "remote_host": {
+            "address": "192.168.104.3",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "established": false
+        } ],
+      "peer_devices": [
+        {
+          "volume": 0,
+          "replication-state": "Off",
+          "peer-disk-state": "DUnknown",
+          "peer-client": false,
+          "resync-suspended": "no",
+          "received": 0,
+          "sent": 0,
+          "out-of-sync": 16520,
+          "pending": 0,
+          "unacked": 0,
+          "has-sync-details": false,
+          "has-online-verify-details": false,
+          "percent-in-sync": 98.42
+        } ]
+    },
+    {
+      "peer-node-id": 2,
+      "name": "lima-dv-3",
+      "connection-state": "Connected", 
+      "congested": false,
+      "peer-role": "Primary",
+      "tls": false,
+      "ap-in-flight": 0,
+      "rs-in-flight": 0,
+      "paths": [
+        {
+          "this_host": {
+            "address": "192.168.104.1",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "remote_host": {
+            "address": "192.168.104.4",
+            "port": 7001,
+            "family": "ipv4"
+          },
+          "established": true
+        } ],
+      "peer_devices": [
+        {
+          "volume": 0,
+          "replication-state": "Established",
+          "peer-disk-state": "Diskless",
+          "peer-client": true,
+          "resync-suspended": "no",
+          "received": 423960,
+          "sent": 497,
+          "out-of-sync": 0,
+          "pending": 0,
+          "unacked": 0,
+          "has-sync-details": false,
+          "has-online-verify-details": false,
+          "percent-in-sync": 100.00
+        } ]
+    } ]
+}
+]
+
