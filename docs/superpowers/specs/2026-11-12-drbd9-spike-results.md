@@ -27,6 +27,20 @@
 | 5 | `on-no-quorum`: `io-error` или `suspend-io` | выбран `io-error` (по одному прогону каждого режима). `io-error`: изолированный узел через 10–11 с получает `EIO` от `fsync`. `io-error`: если том размонтирован до возврата сети, `umount` проходит и узел уходит в `Secondary`. `suspend-io`: `sync` висит в `D` до возврата сети (77 с). `suspend-io`: `SIGKILL` не действует, `umount` → `target is busy`, устройство открыто, узел остаётся `Primary`; освободить том на изолированном узле не удалось. `StandAlone` после возврата сети зависит от роли узла в этот момент, не от политики: в шаге 6 (`Secondary`) его нет, в опыте E1 (`io-error`, том не размонтирован, `Primary`) обе связи `dv-1` перешли в `StandAlone` с `I shall become SyncTarget, but I am primary!`. Восстановление в E1: размонтирование и `drbdadm adjust` на трёх узлах. Подтверждённые записи на месте во всех опытах. `suspend-io` — значение по умолчанию в 9.3.4 | «Параметры ресурса DRBD»: `io-error` закреплён, строка в `.res` обязательна, описание ext4 по наблюдению; абзац о выборе разделён на политику и роль при возврате; «Поведение при отказах», строка «Узел с подом изолирован по `lan0`»: время, текст `dmesg`, `StandAlone` при возврате в роли `Primary`; абзац о split-brain: пометка `[проверить: …]`; «Монтирование»: код ошибки при открытии на втором узле |
 | 6 | `drbdadm` и `drbdsetup` работают из контейнера | подтверждено предыдущей задачей: в поде `drbdadm --version` → `DRBD_KERNEL_VERSION=9.3.4`, `DRBDADM_VERSION=9.35.0`; в этой проверке все команды `drbdadm`/`drbdsetup` (`create-md`, `up`, `adjust`, `new-current-uuid`, `status --json`, `secondary`, `down`) выполнялись в поде `toolbox` | «Утилиты DRBD»: пометка о версии `drbd-utils` заменена на «проверено с 9.35.0» |
 
+## Итог по опытам C1–C3
+
+По одному прогону на каждый случай. Подробности, команды и выводы — в
+разделах «Опыт C1», «Опыт C2», «Опыт C3» в конце протокола.
+
+| Опыт | Вопрос | Результат |
+|---|---|---|
+| C1, вариант A | Устаревшая копия `dv-2` и узел без диска `dv-3` (не перезапускался) поднимаются при выключенной новейшей копии `dv-1`: получают ли кворум, принимают ли запись | нет: `quorum:no` на обоих; `mount` и `drbdadm primary` отклонены на обоих (`dv-3`: `Need access to UpToDate data`, `dv-2`: `No quorum`, `1 of 2 nodes visible, need 2 for quorum`); `dv-3` понизил `dv-2` до `Consistent` (`Downgrading joining peer's disk as its data is older`). После возврата `dv-1` — `SyncSource`, split-brain нет; на томе 9349 при ACKED 9348 |
+| C1, вариант B | То же, но `dv-3` тоже перезапущен и не помнит новых данных | нет: `quorum:no` на обоих, хотя `dv-3` видит `dv-2` как `UpToDate`; `mount`/`primary` отклонены с `No quorum` (`dv-3`: `no UpToDate peer with quorum`). После возврата `dv-1` — `SyncSource`, split-brain нет; на томе 12852 при ACKED 12851 |
+| C1, `quorum-minimum-redundancy` | Знают ли опцию drbd-utils 9.35.0 / модуль 9.3.4 | опция есть (`drbdsetup help resource-options`, `--show-defaults`: `quorum-minimum-redundancy off; # default`); шаг 5 не выполнялся, потому что ни A, ни B не дали повысить устаревшую копию |
+| C2, прогон 1 | Изолированный `Primary` с `EIO`, пиры не продвинулись: восстанавливаются ли связи сами | да, через ~2 с после снятия правил `nft`, `dv-1` остаётся `Primary` и становится `SyncSource` (8 КиБ); ext4 на `dv-1` остаётся с прерванным журналом (`EIO` на запись и чтение) до `umount` + `mount` |
+| C2, прогон 2 | Пиры продвинулись (запись на `dv-2`); помогает ли `adjust` без размонтирования | нет: `adjust` на трёх узлах (`rc=0`) приводит к новой попытке соединения с тем же `I shall become SyncTarget, but I am primary!` и снова к `StandAlone`; после `umount` на `dv-1` (авто-`Secondary`) `adjust` на трёх узлах соединил всех за ~2 с |
+| C3 | Как выглядит настоящий split-brain (`quorum off`, запись на двух сторонах) | ядро: `uuid_compare()=split-brain-auto-recover by rule=bitmap-both` и `Split-Brain detected but unresolved, dropping connection!`; в `drbdsetup status --json` и `events2` отдельного признака нет — те же `StandAlone`, что в E1; разрешено `disconnect` + `connect --discard-my-data` на `dv-1` и `connect` на двух других узлах; данные `dv-1`, подтверждённые писателем после изоляции, отброшены |
+
 ## Отклонения от брифа
 
 | Место в брифе | Что сказано | Что наблюдалось и что сделано |
@@ -41,6 +55,10 @@
 | Шаг 7, повтор шага 6 | без отличий | после проверки `umount` добавлены `kill -9` зависшего `sync` и `drbdadm secondary`, чтобы проверить, освобождается ли устройство |
 | `clean.sh` первой версии | — | `pkill -x watch.sh` не находил `watch.sh` (имя процесса `bash`), два `watch.sh` оставались на `dv-1` и `dv-3`; шаблоны заменены на `pkill -f '^bash /usr/local/bin/(probe\|watch)\.sh'`, в `watch.sh` шаблон поиска писателя тоже закреплён `^` |
 | После ревью | — | добавлены опыты E1 (`io-error`, узел `Primary` при возврате сети) и E2 (принудительная остановка `dv-2`) |
+| C1, команды DRBD при двух выключенных ВМ | через контейнер toolbox без API | добавлен `stand/spike/ctr.sh <узел> <команда>`: находит контейнер `k3s crictl ps --name toolbox --state running -q` и выполняет команду через `k3s crictl exec -i … bash -s`; проверен до выключения ВМ; в опытах C1–C3 все команды `drbdadm`/`drbdsetup` шли через него |
+| C1, вариант B, `limactl start --tty=false dv-3` при двух выключенных ВМ | запуск ВМ | команда не завершилась за 300 с (`timeout 300`, `rc=124`), Lima ждала `User session to be ready for SSH`; ВМ при этом работала. Причина по `systemctl list-jobs` в госте: `k3s.service start running`, `multi-user.target` и `cloud-final.service` в `waiting`, файла `/run/lima-ssh-ready` нет — запуск k3s на одном узле из трёх ждёт кворума etcd и держит загрузку. После `limactl start dv-2` (два узла из трёх) оба узла дошли до `running` |
+| C3, `drbdadm disconnect spike` на жертве | первый шаг разрешения | ядро отвечает `State change failed: Can not disconnect a StandAlone device (-9)`, `drbdadm` возвращает `rc=0` |
+| C3, `drbdadm connect spike` на выживших | соединить с жертвой | `rc=10`, `Failure: (125) Device has a net-config (use disconnect first)` для уже соединённого пира; соединение с `StandAlone`-пиром при этом поднялось |
 
 ## Протокол
 
@@ -1727,3 +1745,1236 @@ no-spike-table
 `crictl ctr k3s k3s-killall.sh k3s-uninstall.sh kubectl lima-guestagent`, в
 `/var/tmp` только `cloud-init` и каталог `systemd-private-…`; `probe.sh`,
 `watch.sh`, `fsync-bench.sh`, файлы `acked*`, `probe*.log`, `watch*.log` удалены.
+
+### Опыт C1. Устаревшая копия и узел без диска после последовательных отказов
+
+Вопрос: при двух копиях и узле без диска может ли кластер подняться на
+устаревшей копии, принять запись и потерять подтверждённые данные.
+
+Ресурс `spike2` (`dv-1` и `dv-2` — копии, `dv-3` — узел без диска), по одному
+прогону на вариант. Команды DRBD выполнялись через `stand/spike/ctr.sh`
+(контейнер toolbox через `k3s crictl exec`, без API). Метки `14:…` — время
+контейнера (UTC), на узлах +08.
+
+```bash
+stand/spike/ctr.sh dv-3 'hostname; drbdadm --version | grep KERNEL_VERSION=; drbdsetup status'
+```
+
+```text
+lima-dv-3
+DRBD_KERNEL_VERSION=9.3.4
+# No currently configured DRBD found.
+```
+
+#### Подготовка (оба варианта одинаково)
+
+```bash
+stand/spike/res.sh spike2 1001 7001 dv-3 io-error
+stand/spike/ctr.sh dv-1 "drbdadm new-current-uuid --clear-bitmap spike2/0"
+stand/spike/ctr.sh dv-3 "mkfs.ext4 -q /dev/drbd1001"
+vm dv-3 "mkdir -p /mnt/spike2 && mount /dev/drbd1001 /mnt/spike2"
+# probe.sh /mnt/spike2 /var/tmp/acked2 и watch.sh /var/tmp/acked2 на dv-3, как в шаге 8
+```
+
+После `new-current-uuid` на трёх узлах `UpToDate`/`UpToDate`/`Diskless`, на
+`dv-3` после `mount` — `role:Primary disk:Diskless client:yes open:yes`.
+
+#### Вариант A, шаг 1. Принудительная остановка `dv-2`, запись продолжается
+
+```bash
+vm dv-3 "date +%T.%3N; cat /var/tmp/acked2"; limactl stop --force dv-2; vm dv-3 "date +%T.%3N"
+sleep 25; vm dv-3 "date +%T.%3N; cat /var/tmp/acked2"
+```
+
+```text
+22:30:46.167
+1908
+stop rc=0
+22:30:46.426
+22:31:11.660
+6717
+```
+
+`watch2.log` на `dv-3` (повторы свёрнуты):
+
+```text
+22:30:46.046 acked=1896 probe=alive:S
+22:30:46.558 acked=1919 probe=alive:S
+...
+22:30:57.314 acked=1919 probe=alive:S
+22:30:57.825 acked=2017 probe=alive:S
+```
+
+Запись стояла 11.3 с между выборками (22:30:46.558 → 22:30:57.825), в E2 —
+5.1 с. `dmesg -T` на `dv-1`:
+
+```text
+[Thu Nov 12 22:30:56 2026] drbd spike2 lima-dv-2: PingAck did not arrive in time.
+[Thu Nov 12 22:30:56 2026] drbd spike2/0 drbd1001: Would lose quorum, but using tiebreaker logic to keep
+[Thu Nov 12 22:30:56 2026] drbd spike2 lima-dv-2: conn( Connected -> NetworkFailure ) peer( Secondary -> Unknown )
+[Thu Nov 12 22:30:57 2026] drbd spike2/0 drbd1001 lima-dv-3: received new current UUID: B64703DC5853FA4D weak_nodes=FFFFFFFFFFFFFFFE
+```
+
+`dv-3`:
+
+```text
+[Thu Nov 12 22:30:57 2026] drbd spike2 lima-dv-2: PingAck did not arrive in time.
+[Thu Nov 12 22:30:57 2026] drbd spike2/0 drbd1001: sending new current UUID: B64703DC5853FA4D
+[Thu Nov 12 22:30:57 2026] drbd spike2/0 drbd1001: rotated data generation confirmed durable in a quorate partition (gen B64703DC5853FA4D)
+```
+
+Остановка писателя, сверка и `umount` на `dv-3`:
+
+```text
+22:31:19.423
+probe-stopped
+acked2=9348
+9349
+lines=9349 bad=0
+umount rc=0
+22:31:20.459
+```
+
+ACKED = 9348, на томе последнее число 9349, 9349 строк без пропусков.
+Идентификаторы поколений на `dv-1` (`drbdadm get-gi spike2/0`, первая строка —
+к `dv-2`, вторая — к `dv-3`):
+
+```text
+B64703DC5853FA4C:08136E27BB72DA48:8755DFAC880D4BBA:858046A0E44F38C2:1:1:0:0:0:0:0:0:0:0:0:1:1
+B64703DC5853FA4C:0000000000000000:8755DFAC880D4BBA:858046A0E44F38C2:1:1:0:0:0:0:0:0:0:0:0:0:0
+```
+
+#### Вариант A, шаг 2. Выключена новейшая копия, поднята устаревшая
+
+```bash
+vm dv-3 "date +%T.%3N"; limactl stop --force dv-1; vm dv-3 "date +%T.%3N"
+sleep 15; stand/spike/ctr.sh dv-3 "drbdsetup status spike2 --verbose"
+kc get nodes
+```
+
+```text
+22:31:54.196
+stop rc=0
+22:31:54.373
+spike2 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1001 disk:Diskless client:yes backing_dev:none quorum:no open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+kc: no running node with a reachable API server among: dv-1 dv-2 dv-3
+```
+
+`dmesg -T` на `dv-3`:
+
+```text
+[Thu Nov 12 22:32:01 2026] drbd spike2 lima-dv-1: PingAck did not arrive in time.
+[Thu Nov 12 22:32:01 2026] drbd spike2 lima-dv-1: conn( Connected -> NetworkFailure ) peer( Secondary -> Unknown )
+[Thu Nov 12 22:32:01 2026] drbd spike2/0 drbd1001: quorum( yes -> no )
+```
+
+Образец `stand/spike/samples/diskless-alone-no-quorum.json`.
+
+Запуск `dv-2` (22:32:21 → `READY` в 22:32:43; API ответил сразу, в etcd
+два узла из трёх), модуль, loop, `drbdadm up`:
+
+```bash
+limactl start --tty=false dv-2
+stand/spike/ctr.sh dv-2 "/opt/duovol/load-module.sh"
+vm dv-2 "mkdir -p /dev/duovol; f=/var/lib/rancher/duovol/volumes/spike2.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/duovol/spike2"
+stand/spike/ctr.sh dv-2 "drbdadm up spike2; …опрос drbdsetup status…"
+```
+
+```text
+loaded drbd 9.3.4 for kernel 6.12.116+deb13-arm64
+/dev/loop0 /var/lib/rancher/duovol/volumes/spike2.img   1
+22:32:52.201
+extent 255 beyond end of bitmap! (32768 >= 32768)
+extent 255 beyond end of bitmap! (32768 >= 32768)
+Marked additional 0 KB as out-of-sync based on AL.
+up rc=0
+14:32:52.594 spike2 role:Secondary disk:UpToDate quorum:no open:no lima-dv-1 connection:Connecting lima-dv-3 connection:Connecting
+14:32:53.605 spike2 role:Secondary disk:UpToDate quorum:no open:no lima-dv-1 connection:Connecting lima-dv-3 role:Secondary peer-disk:Diskless peer-client:yes
+```
+
+Строки `extent 255 beyond end of bitmap!` печатает `drbdadm up` после
+принудительной остановки узла с копией [проверить: какая утилита
+(`drbdmeta apply-al`) и что они значат для битовой карты на одного пира].
+
+`drbdsetup status spike2 --verbose` в 22:33:11–12:
+
+```text
+== dv-2
+spike2 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1001 disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no
+      open:no blocked:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+== dv-3
+spike2 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1001 disk:Diskless client:yes backing_dev:none quorum:no open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Consistent resync-suspended:no
+```
+
+`dv-2` сам о себе пишет `disk:UpToDate`, хотя его данные старше: текущий UUID
+`08136E27BB72DA48` — тот, что на `dv-1` стал битовой картой к `dv-2`.
+`dmesg -T` на `dv-2`:
+
+```text
+[Thu Nov 12 22:32:52 2026] drbd spike2/0 drbd1001: disk( Attaching -> UpToDate ) [attach]
+[Thu Nov 12 22:32:52 2026] drbd spike2/0 drbd1001: attached to current UUID: 08136E27BB72DA48
+[Thu Nov 12 22:32:53 2026] drbd spike2/0 drbd1001 lima-dv-3: self 08136E27BB72DA48:0000000000000000:8755DFAC880D4BBA:858046A0E44F38C2 bits:0 flags:0
+[Thu Nov 12 22:32:53 2026] drbd spike2/0 drbd1001 lima-dv-3: peer's exposed UUID: B64703DC5853FA4D
+[Thu Nov 12 22:32:53 2026] drbd spike2 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+```
+
+`dv-3`:
+
+```text
+[Thu Nov 12 22:32:53 2026] drbd spike2/0 drbd1001 lima-dv-2: my exposed UUID: B64703DC5853FA4D
+[Thu Nov 12 22:32:53 2026] drbd spike2/0 drbd1001 lima-dv-2: peer 08136E27BB72DA48:0000000000000000:8755DFAC880D4BBA:858046A0E44F38C2 bits:0 flags:20
+[Thu Nov 12 22:32:53 2026] drbd spike2/0 drbd1001 lima-dv-2: Downgrading joining peer's disk as its data is older
+[Thu Nov 12 22:32:53 2026] drbd spike2 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Thu Nov 12 22:32:53 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( DUnknown -> Outdated ) repl( Off -> Established ) [remote]
+[Thu Nov 12 22:32:53 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( Outdated -> Consistent ) [peer-state]
+```
+
+Образцы: `stale-diskful-no-quorum.json` (`dv-2`), `diskless-stale-peer.json`
+(`dv-3`).
+
+Попытки открыть том:
+
+```bash
+vm dv-3 "timeout 30 mount /dev/drbd1001 /mnt/spike2; echo mount rc=\$?"
+vm dv-2 "timeout 30 mount /dev/drbd1001 /mnt/spike2; echo mount rc=\$?"
+vm dv-2 "timeout 30 mount -o ro,noload /dev/drbd1001 /mnt/spike2; echo ro-mount rc=\$?"
+stand/spike/ctr.sh dv-3 "timeout 30 drbdadm primary spike2; echo primary rc=\$?"
+stand/spike/ctr.sh dv-2 "timeout 30 drbdadm primary spike2; echo primary rc=\$?"
+```
+
+```text
+== mount dv-3
+mount: /mnt/spike2: fsconfig() failed: /dev/drbd1001: Can't open blockdev.
+mount rc=32
+[Thu Nov 12 22:33:26 2026] drbd spike2: Auto-promote failed: Need access to UpToDate data (-2)
+== mount dv-2
+mount: /mnt/spike2: fsconfig() failed: /dev/drbd1001: Can't open blockdev.
+mount rc=32
+[Thu Nov 12 22:33:27 2026] drbd spike2: 1 of 2 nodes visible, need 2 for quorum
+[Thu Nov 12 22:33:27 2026] drbd spike2: Auto-promote failed: No quorum (-25)
+== ro mount dv-2
+ro-mount rc=32
+== primary dv-3
+spike2: State change failed: (-2) Need access to UpToDate data
+primary rc=17
+== primary dv-2
+spike2: State change failed: (-25) No quorum
+additional info from kernel:
+1 of 2 nodes visible, need 2 for quorum
+primary rc=11
+```
+
+`mount` на `dv-3` ждал 5.3 с (22:33:21.191 → 22:33:26.455) и вернул ошибку; на
+`dv-2` ошибка сразу. Монтирование не удалось ни на одном узле, сравнивать
+журнал и писать нечего. `primary --force` не выполнялся.
+
+#### Вариант A, шаг 3. Возврат новейшей копии `dv-1`
+
+`limactl start --tty=false dv-1` (22:33:51 → 22:34:06), модуль, loop,
+`drbdadm up spike2` в 22:34:07.7. Опрос `drbdsetup status spike2` на `dv-1`:
+
+```text
+14:34:08.119 spike2 role:Secondary disk:UpToDate open:no lima-dv-2 connection:Connecting lima-dv-3 connection:Connecting
+14:34:09.134 spike2 role:Secondary disk:UpToDate open:no lima-dv-2 role:Secondary replication:SyncSource peer-disk:Inconsistent done:4.02 lima-dv-3 role:Secondary peer-disk:Diskless peer-client:yes
+...
+14:34:19.263 spike2 role:Secondary disk:UpToDate open:no lima-dv-2 role:Secondary replication:SyncSource peer-disk:Inconsistent done:97.94 lima-dv-3 role:Secondary peer-disk:Diskless peer-client:yes
+14:34:19.771 spike2 role:Secondary disk:UpToDate open:no lima-dv-2 role:Secondary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:Diskless peer-client:yes
+```
+
+`dmesg -T` на `dv-1`:
+
+```text
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001: disk( Attaching -> UpToDate ) quorum( no -> yes ) [attach]
+[Thu Nov 12 22:34:08 2026] drbd spike2: Restored quorum from before reboot
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-2: self B64703DC5853FA4C:08136E27BB72DA48:8755DFAC880D4BBA:858046A0E44F38C2 bits:4112 flags:2020
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-2: peer 08136E27BB72DA48:0000000000000000:8755DFAC880D4BBA:858046A0E44F38C2 bits:261120 flags:2020
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-2: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( Outdated -> Inconsistent ) repl( WFBitMapS -> SyncSource ) replication( yes -> no ) [receive-bitmap]
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-2: Began resync as SyncSource (will sync 1044480 KB [261120 bits set]).
+[Thu Nov 12 22:34:19 2026] drbd spike2/0 drbd1001 lima-dv-2: Resync done (total 11 sec; paused 0 sec; 94952 K/sec)
+[Thu Nov 12 22:34:19 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+```
+
+`dv-2`:
+
+```text
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-1: self 08136E27BB72DA48:0000000000000000:8755DFAC880D4BBA:858046A0E44F38C2 bits:261120 flags:2020
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-1: uuid_compare()=target-use-bitmap by rule=bitmap-peer
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001: disk( UpToDate -> Outdated ) quorum( no -> yes ) [remote]
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001: disk( Outdated -> Inconsistent ) [receive-bitmap]
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-1: Began resync as SyncTarget (will sync 1044480 KB [261120 bits set]).
+[Thu Nov 12 22:34:19 2026] drbd spike2/0 drbd1001 lima-dv-1: Resync done (total 10 sec; paused 0 sec; 104448 K/sec)
+[Thu Nov 12 22:34:19 2026] drbd spike2/0 drbd1001: disk( Inconsistent -> UpToDate ) [resync-finished]
+```
+
+`dv-3`:
+
+```text
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( Consistent -> Outdated ) [peer-state]
+[Thu Nov 12 22:34:08 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( Outdated -> Inconsistent ) resync-susp( no -> peer ) replication( yes -> no ) [peer-state]
+[Thu Nov 12 22:34:19 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( Inconsistent -> UpToDate ) resync-susp( peer -> no ) [peer-state]
+```
+
+`grep -i split` по этим строкам пуст, `StandAlone` нет. Досылка на `dv-2`
+полная: 261120 бит (1044480 КиБ из 1048508), хотя у `dv-1` к `dv-2` было
+отмечено 4112 бит. Битовая карта `dv-2` к `dv-1` при соединении с `dv-3` в
+22:32:53 была `bits:0`, при соединении с `dv-1` в 22:34:08 — `bits:261120`;
+в `dmesg` `dv-2` между этими моментами строк про битовую карту нет [проверить:
+откуда 261120 бит; 261120 = 255 × 1024, то есть 255 экстентов по 4 МиБ — то
+же число 255, что в `extent 255 beyond end of bitmap!`]. В E2 после такой же
+принудительной остановки досылка была 16520 КиБ.
+
+Сверка после досылки (`mount` на `dv-3`):
+
+```text
+mount rc=0
+9349
+lines=9349 bad=0
+9348
+umount rc=0
+```
+
+Конечное состояние: `dv-1` и `dv-2` `UpToDate`, `dv-3` `Diskless`, все
+`Connected`.
+
+#### Вариант B. Узел без диска тоже перезапущен
+
+Стенд очищен `stand/spike/clean.sh`, `spike2` создан заново, шаг 1 повторён:
+
+```text
+22:35:49.903
+4084
+stop rc=0
+22:35:50.094
+22:36:15.227
+12653
+...
+22:36:15.761
+probe-stopped
+acked2=12851
+12852
+lines=12852 bad=0
+umount rc=0
+```
+
+Пауза записи: 12 одинаковых выборок подряд с `22:35:50.088 acked=4104`
+(~6 с). На `dv-1` `Would lose quorum, but using tiebreaker logic to keep` в
+22:35:55, `dv-3` отправил `new current UUID: 68AF08C76065A51B`. ACKED =
+12851, на томе 12852, 12852 строки без пропусков. `get-gi` на `dv-1`:
+`68AF08C76065A51A:64E7A32F4872D668:4A6BD55C8286E678:F2449244D2A5ECDA:…`.
+
+Отключения и запуск:
+
+```bash
+limactl stop --force dv-1        # 22:36:27
+limactl stop --force dv-3        # 22:36:30, все три ВМ Stopped
+timeout 300 limactl start --tty=false dv-3
+limactl start --tty=false dv-2
+```
+
+```text
+time="2026-11-12T22:36:38+08:00" level=info msg="( 2/5) User session to be ready for SSH (essential)"
+start dv-3 rc=124
+time="2026-11-12T22:41:57+08:00" level=info msg="READY. Run `limactl shell dv-2` to open the shell."
+start dv-2 rc=0
+```
+
+Почему `dv-3` не дошёл до `READY` (снято через `ssh -F ~/.lima/dv-3/ssh.config
+lima-dv-3` в 22:39:56):
+
+```text
+ 22:39:56 up 3 min,  1 user,  load average: 0.19, 0.08, 0.02
+starting
+JOB UNIT                TYPE  STATE
+132 cloud-init.target   start waiting
+141 cloud-final.service start waiting
+124 k3s.service         start running
+16  multi-user.target   start waiting
+15  graphical.target    start waiting
+```
+
+В 22:42:13 на обоих узлах `systemctl is-system-running` → `running`, контейнер
+toolbox запущен, модуль не загружен (`lsmod | grep -c ^drbd` → `0`).
+
+DRBD на `dv-3` (узел без диска, после перезагрузки):
+
+```text
+22:42:15.346
+up rc=0
+spike2 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1001 disk:Diskless client:yes backing_dev:none quorum:no open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+  …
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+```
+
+DRBD на `dv-2` (22:42:26.464; снова `extent 255 beyond end of bitmap!` дважды и
+`Marked additional 0 KB as out-of-sync based on AL.`), состояние в 22:42:33–34:
+
+```text
+== dv-2
+  volume:0 minor:1001 disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+== dv-3
+  volume:0 minor:1001 disk:Diskless client:yes backing_dev:none quorum:no open:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+```
+
+`dmesg -T` на `dv-3`:
+
+```text
+[Thu Nov 12 22:42:27 2026] drbd spike2/0 drbd1001 lima-dv-2: my exposed UUID: 0000000000000000
+[Thu Nov 12 22:42:27 2026] drbd spike2/0 drbd1001 lima-dv-2: peer 64E7A32F4872D668:0000000000000000:4A6BD55C8286E678:F2449244D2A5ECDA bits:0 flags:20
+[Thu Nov 12 22:42:27 2026] drbd spike2/0 drbd1001: Setting exposed data uuid: 64E7A32F4872D668
+[Thu Nov 12 22:42:27 2026] drbd spike2 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Thu Nov 12 22:42:27 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( DUnknown -> UpToDate ) repl( Off -> Established ) [remote]
+```
+
+В отличие от варианта A, узел без диска после перезагрузки не знает о более
+новом поколении и принимает UUID устаревшей копии как свой. Образец
+`diskless-rebooted-stale-peer.json` (`dv-3`).
+
+Попытки открыть том:
+
+```text
+== mount dv-3
+mount rc=32
+ro-mount rc=32
+[Thu Nov 12 22:42:43 2026] drbd spike2: no UpToDate peer with quorum
+[Thu Nov 12 22:42:43 2026] drbd spike2: Auto-promote failed: No quorum (-25)
+== mount dv-2
+mount rc=32
+ro-mount rc=32
+[Thu Nov 12 22:42:43 2026] drbd spike2: 1 of 2 nodes visible, need 2 for quorum
+[Thu Nov 12 22:42:43 2026] drbd spike2: Auto-promote failed: No quorum (-25)
+== primary dv-3
+spike2: State change failed: (-25) No quorum
+additional info from kernel:
+no UpToDate peer with quorum
+primary rc=11
+== primary dv-2
+spike2: State change failed: (-25) No quorum
+additional info from kernel:
+1 of 2 nodes visible, need 2 for quorum
+primary rc=11
+```
+
+Возврат `dv-1` (22:42:53 → 22:43:08, `drbdadm up` в 22:43:09.5):
+
+```text
+[Thu Nov 12 22:43:10 2026] drbd spike2/0 drbd1001: disk( Attaching -> UpToDate ) quorum( no -> yes ) [attach]
+[Thu Nov 12 22:43:10 2026] drbd spike2: Restored quorum from before reboot
+[Thu Nov 12 22:43:10 2026] drbd spike2/0 drbd1001 lima-dv-2: self 68AF08C76065A51A:64E7A32F4872D668:4A6BD55C8286E678:F2449244D2A5ECDA bits:4115 flags:2020
+[Thu Nov 12 22:43:10 2026] drbd spike2/0 drbd1001 lima-dv-2: peer 64E7A32F4872D668:0000000000000000:4A6BD55C8286E678:F2449244D2A5ECDA bits:261120 flags:2020
+[Thu Nov 12 22:43:10 2026] drbd spike2/0 drbd1001 lima-dv-2: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Thu Nov 12 22:43:10 2026] drbd spike2/0 drbd1001 lima-dv-2: Began resync as SyncSource (will sync 1044480 KB [261120 bits set]).
+[Thu Nov 12 22:43:10 2026] drbd spike2/0 drbd1001 lima-dv-3: peer's exposed UUID: 64E7A32F4872D668
+[Thu Nov 12 22:43:21 2026] drbd spike2/0 drbd1001 lima-dv-2: Resync done (total 10 sec; paused 0 sec; 104448 K/sec)
+```
+
+На `dv-3` при соединении с `dv-1`: `my exposed UUID: 64E7A32F4872D668` →
+`Setting exposed data uuid: 68AF08C76065A51A`, `pdsk( UpToDate -> Outdated )`
+и `Outdated -> Inconsistent` для `dv-2`. `grep -i split` пуст. Сверка:
+
+```text
+12851
+mount rc=0
+12852
+lines=12852 bad=0
+umount rc=0
+```
+
+#### `quorum-minimum-redundancy`
+
+```bash
+stand/spike/ctr.sh dv-1 'drbdsetup help resource-options 2>&1 | grep -i -E -A3 "redundancy|--quorum"'
+```
+
+```text
+    [--quorum={off|majority|all}|(1 ... 32)] [--on-no-quorum={io-error|suspend-io}]
+    [--quorum-minimum-redundancy={off|majority|all}|(1 ... 32)]
+    [--on-suspended-primary-outdated={disconnect|force-secondary}]
+    [--drbd8-api-compatibility={yes|no}]
+```
+
+`drbdsetup show spike --show-defaults` (в опыте C3) печатает
+`quorum-minimum-redundancy	off; # default`. Шаг 5 брифа не выполнялся: ни
+в варианте A, ни в варианте B устаревшую копию не удалось повысить.
+
+| Наблюдение C1 (по одному прогону на вариант) | Вариант A (`dv-3` не перезапускался) | Вариант B (`dv-3` перезапущен) |
+|---|---|---|
+| Кворум у {устаревшая копия + узел без диска} | нет на обоих (`quorum:no`) | нет на обоих (`quorum:no`) |
+| Как узел без диска видит устаревшую копию | `Consistent` (`Downgrading joining peer's disk as its data is older`) | `UpToDate` (`my exposed UUID: 0000000000000000`, принял UUID копии) |
+| Как устаревшая копия видит себя | `disk:UpToDate` | `disk:UpToDate` |
+| `mount` rw / `mount -o ro,noload` / `drbdadm primary` на узле без диска | отказ: `Need access to UpToDate data (-2)` | отказ: `No quorum (-25)`, `no UpToDate peer with quorum` |
+| То же на устаревшей копии | отказ: `No quorum (-25)`, `1 of 2 nodes visible, need 2 for quorum` | отказ, те же сообщения |
+| Новая запись принята | нет (том не открылся) | нет (том не открылся) |
+| Возврат `dv-1` | `Restored quorum from before reboot`, `SyncSource`, досылка 1044480 КиБ за 10–11 с, split-brain нет | то же, досылка 1044480 КиБ за 10 с |
+| На томе / ACKED | 9349 / 9348 | 12852 / 12851 |
+| Пауза записи при принудительной остановке `dv-2` | 11.3 с между выборками | ~6 с (12 выборок) |
+
+#### Что из этого следует для агента
+
+- Состоянию диска узла о самом себе верить нельзя: устаревшая копия после
+  перезапуска пишет `disk:UpToDate` (`stale-diskful-no-quorum.json`, строка
+  `disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no` на `dv-2`).
+  Признак того, что открывать том можно, — поле `quorum` и результат
+  `primary`/`mount`, а не `disk-state`.
+- Узел без диска после перезагрузки показывает устаревшую копию как
+  `peer-disk:UpToDate` (`diskless-rebooted-stale-peer.json`). Выбор узла для
+  пода по `peer-disk-state` на узле без диска может указать на устаревшую
+  копию; в этом прогоне повышение всё равно отклонено по кворуму
+  (`no UpToDate peer with quorum`).
+- При двух копиях и узле без диска «устаревшая копия + узел без диска» не
+  получают кворум ни в одном из двух вариантов (`1 of 2 nodes visible, need 2
+  for quorum`). Ошибка `mount` в этом случае — `Can't open blockdev`
+  (`rc=32`), причина видна только в `dmesg` (`Auto-promote failed: …`) или в
+  выводе `drbdadm primary` (`rc=11` для `No quorum`, `rc=17` для `Need access
+  to UpToDate data`).
+- Узел с новейшей копией, загруженный в одиночку, получает кворум при attach
+  (`Restored quorum from before reboot`, `quorum( no -> yes ) [attach]` до
+  соединения с кем-либо). Можно ли открыть том на таком узле, пока остальные
+  выключены, не проверялось [проверить].
+- После принудительной остановки узла с копией досылка при его возврате в
+  обоих вариантах полная (261120 бит, 10–11 с на 1 ГиБ на этом стенде), а не
+  по битовой карте, как в E2 (16520 КиБ) [проверить: причина]. Время возврата
+  копии на больших томах надо закладывать по полной досылке, пока причина не
+  найдена.
+- Одиночная ВМ стенда с k3s-server не завершает загрузку, пока нет кворума
+  etcd (`k3s.service start running`, `multi-user.target start waiting`).
+  Toolbox и модуль DRBD на таком узле недоступны, пока не поднят второй
+  узел.
+
+### Опыт C2. Изолированный `Primary`: пиры не продвинулись; `adjust` до размонтирования
+
+Ресурс `spike` из трёх копий (`res.sh spike 1000 7000 - io-error`, затем
+`new-current-uuid --clear-bitmap`, `mkfs.ext4`), том смонтирован на `dv-1`,
+писатель и `watch.sh` на `dv-1`. Изоляция — те же правила `nft`, что в шаге 6
+(файл `/var/tmp/nft-spike.nft`, таблица `inet spike`). Два прогона, по одному
+на случай.
+
+#### Прогон 1. Пиры не продвинулись, том на `dv-1` не размонтирован
+
+```bash
+vm dv-1 "date +%T.%3N; nft -f /var/tmp/nft-spike.nft; date +%T.%3N"
+sleep 20
+vm dv-1 "date +%T.%3N; cat /var/tmp/acked; cat /var/tmp/probe.log; ps -eo pid,stat,args | grep '[p]robe\.sh' || echo probe-gone; findmnt -o TARGET,OPTIONS /mnt/spike"
+```
+
+```text
+22:44:45.687
+22:44:45.691
+22:45:05.852
+5072
+sync: error syncing '/mnt/spike/log': Input/output error
+write 5073 failed
+probe-gone
+TARGET     OPTIONS
+/mnt/spike rw,relatime
+spike role:Primary
+  disk:UpToDate quorum:no open:yes
+  lima-dv-2 connection:Connecting
+  lima-dv-3 connection:Connecting
+```
+
+`watch.log`: `22:44:45.698 acked=5072 probe=alive:S` → `22:44:56.427
+acked=5072 probe=gone`. Том больше нигде не монтировался.
+
+Снятие правил в 22:45:13.36 и опрос `drbdsetup status spike` на трёх узлах
+75 с (показаны смены состояния):
+
+```text
+22:45:13 dv-1: spike role:Primary disk:UpToDate quorum:no open:yes lima-dv-2 connection:Connecting lima-dv-3 connection:Connecting
+22:45:15 dv-1: spike role:Primary disk:UpToDate open:yes lima-dv-2 role:Secondary replication:SyncSource peer-disk:Inconsistent lima-dv-3 role:Secondary peer-disk:UpToDate
+22:45:16 dv-1: spike role:Primary disk:UpToDate open:yes lima-dv-2 role:Secondary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:UpToDate
+22:45:13 dv-2: spike role:Secondary disk:UpToDate open:no lima-dv-1 connection:Connecting lima-dv-3 role:Secondary peer-disk:UpToDate
+22:45:16 dv-2: spike role:Secondary disk:UpToDate open:no lima-dv-1 role:Primary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:UpToDate
+22:45:14 dv-3: spike role:Secondary disk:UpToDate open:no lima-dv-1 connection:Connecting lima-dv-2 role:Secondary peer-disk:UpToDate
+22:45:16 dv-3: spike role:Secondary disk:UpToDate open:no lima-dv-1 role:Primary peer-disk:UpToDate lima-dv-2 role:Secondary peer-disk:UpToDate
+...
+22:46:27 dv-1: spike role:Primary disk:UpToDate open:yes lima-dv-2 role:Secondary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:UpToDate
+```
+
+`dmesg -T` на `dv-1` (без строк `Preparing`/`Committing`):
+
+```text
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-3: self 8DD686239630F7AC:0000000000000000:0000000000000000:0000000000000000 bits:2 flags:2520
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-3: peer 8DD686239630F7AC:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:120
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-3: uuid_compare()=no-sync by rule=reconnected
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-3: strategy = source-use-bitmap to reconcile equal-UUID peers holding out-of-sync bits
+[Thu Nov 12 22:45:15 2026] drbd spike lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000: quorum( no -> yes ) [connected]
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000: new current UUID: F5A9EE4B634046E1 weak: FFFFFFFFFFFFFFFA
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-3: Began resync as SyncSource (will sync 8 KB [2 bits set]).
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-2: self F5A9EE4B634046E1:8DD686239630F7AC:0000000000000000:0000000000000000 bits:2 flags:2120
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-2: peer 8DD686239630F7AC:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:120
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-2: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Thu Nov 12 22:45:15 2026] drbd spike/0 drbd1000 lima-dv-2: Began resync as SyncSource (will sync 8 KB [2 bits set]).
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000 lima-dv-3: Resync done (total 1 sec; paused 0 sec; 8 K/sec)
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000 lima-dv-2: Resync done (total 1 sec; paused 0 sec; 8 K/sec)
+```
+
+`dv-3` (выдержка):
+
+```text
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000 lima-dv-1: uuid_compare()=no-sync by rule=reconnected
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000 lima-dv-1: strategy = target-use-bitmap to reconcile equal-UUID peers holding out-of-sync bits
+[Thu Nov 12 22:45:16 2026] drbd spike lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Primary ) [remote]
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000 lima-dv-1: not adopting new current UUID F5A9EE4B634046E1 on Outdated disk
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000: Multiple UpToDate peers have different current UUIDs
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000: lima-dv-2: 8DD686239630F7AC lima-dv-1: F5A9EE4B634046E1
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000 lima-dv-1: Began resync as SyncTarget (will sync 8 KB [2 bits set]).
+[Thu Nov 12 22:45:16 2026] drbd spike/0 drbd1000: disk( Inconsistent -> UpToDate ) [resync-finished]
+```
+
+`dv-2`: `disk( UpToDate -> Outdated ) [far-away]`, `uuid_compare()=target-use-bitmap
+by rule=bitmap-peer`, `Began resync as SyncTarget (will sync 8 KB [2 bits set])`,
+`disk( Inconsistent -> UpToDate ) [resync-finished]`. `StandAlone` и
+`Split-Brain` нет.
+
+Состояние тома на `dv-1` после переподключения (22:46:51, том не
+перемонтировался):
+
+```bash
+vm dv-1 "cat /var/tmp/acked; tail -1 /mnt/spike/log; …; echo x >> /mnt/spike/log; sync /mnt/spike/log; touch /mnt/spike/t2; findmnt -o TARGET,OPTIONS /mnt/spike; dmesg -T | grep -i ext4 | tail -3"
+```
+
+```text
+5072
+5073
+tail: error reading '/mnt/spike/log': Input/output error
+append rc=1
+awk: cannot open "/mnt/spike/log" (Input/output error)
+fsync rc=1
+touch: cannot touch '/mnt/spike/t2': Input/output error
+TARGET     OPTIONS
+/mnt/spike rw,relatime
+[Thu Nov 12 22:46:51 2026] EXT4-fs error (device drbd1000): ext4_journal_check_start:84: comm tail: Detected aborted journal
+[Thu Nov 12 22:46:51 2026] EXT4-fs (drbd1000): Remounting filesystem read-only
+```
+
+`tail -1` первым выводом показал `5073` из кэша страниц, затем ошибку
+чтения. DRBD-устройство после переподключения пишется (три копии
+`UpToDate`, `quorum` есть), но ext4 на `dv-1` после `EIO` остаётся с
+прерванным журналом. Перемонтирование:
+
+```text
+umount rc=0
+spike role:Secondary
+  disk:UpToDate open:no
+  lima-dv-2 role:Secondary
+    peer-disk:UpToDate
+  lima-dv-3 role:Secondary
+    peer-disk:UpToDate
+mount rc=0
+5072
+lines=5072 bad=0
+write+fsync rc=0
+[Thu Nov 12 22:46:52 2026] EXT4-fs (drbd1000): warning: mounting fs with errors, running e2fsck is recommended
+[Thu Nov 12 22:46:52 2026] EXT4-fs (drbd1000): recovery complete
+umount rc=0
+```
+
+ACKED = 5072, на томе 5072 строки без пропусков; 5073 на томе нет. Запись
+`99999` с `fsync` после перемонтирования прошла (`write+fsync rc=0`).
+
+#### Прогон 2. Пиры продвинулись, `adjust` до и после размонтирования
+
+Перед прогоном: `e2fsck -fy /dev/drbd1000` на `dv-1` (`rc=0`), `mount`,
+журнал писателя удалён, писатель и `watch.sh` запущены заново.
+
+```text
+22:47:12.379
+22:47:12.383
+22:47:32.551
+2997
+sync: error syncing '/mnt/spike/log': Input/output error
+write 2998 failed
+probe-gone
+22:47:12.740 acked=2997 probe=alive:S
+22:47:23.540 acked=2997 probe=gone
+```
+
+Запись на `dv-2` (пиры продвигаются):
+
+```bash
+vm dv-2 "mount /dev/drbd1000 /mnt/spike; tail -1 /mnt/spike/log; for i in 1 2 3 4 5; do echo dv2-\$i >> /mnt/spike/log && sync /mnt/spike/log && echo ok-\$i; done; wc -l < /mnt/spike/log"
+```
+
+```text
+22:47:41.583
+mount rc=0
+2997
+ok-1
+...
+ok-5
+3002
+```
+
+Снятие правил в 22:47:41.86:
+
+```text
+22:47:41 dv-1: spike role:Primary disk:UpToDate quorum:no open:yes lima-dv-2 connection:Connecting lima-dv-3 connection:Connecting
+22:47:43 dv-1: spike role:Primary disk:UpToDate quorum:no open:yes lima-dv-2 connection:Connecting lima-dv-3 connection:StandAlone
+22:47:45 dv-1: spike role:Primary disk:UpToDate quorum:no open:yes lima-dv-2 connection:StandAlone lima-dv-3 connection:StandAlone
+22:47:45 dv-2: spike role:Primary disk:UpToDate open:yes lima-dv-1 connection:StandAlone lima-dv-3 role:Secondary peer-disk:UpToDate
+22:47:42 dv-3: spike role:Secondary disk:UpToDate open:no lima-dv-1 connection:StandAlone lima-dv-2 role:Primary peer-disk:UpToDate
+```
+
+```text
+[Thu Nov 12 22:47:43 2026] drbd spike/0 drbd1000 lima-dv-3: I shall become SyncTarget, but I am primary!
+[Thu Nov 12 22:47:43 2026] drbd spike lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Thu Nov 12 22:47:45 2026] drbd spike/0 drbd1000 lima-dv-2: I shall become SyncTarget, but I am primary!
+[Thu Nov 12 22:47:45 2026] drbd spike lima-dv-2: conn( Disconnecting -> StandAlone ) [disconnected]
+```
+
+Это та же картина, что в E1. `adjust` на трёх узлах при смонтированном томе
+(`findmnt` → `/mnt/spike rw,relatime`) и `Primary` на `dv-1`:
+
+```bash
+for n in dv-1 dv-2 dv-3; do stand/spike/ctr.sh $n "date +%T.%3N; timeout 30 drbdadm adjust spike; echo adjust rc=\$?"; done
+```
+
+```text
+14:48:22.447
+adjust rc=0
+14:48:22.866
+adjust rc=0
+14:48:23.294
+adjust rc=0
+22:48:23 dv-1: spike role:Primary disk:UpToDate quorum:no open:yes lima-dv-2 connection:StandAlone lima-dv-3 connection:Connecting
+22:48:24 dv-1: spike role:Primary disk:UpToDate quorum:no open:yes lima-dv-2 connection:StandAlone lima-dv-3 connection:StandAlone
+...
+22:48:47 dv-1: spike role:Primary disk:UpToDate quorum:no open:yes lima-dv-2 connection:StandAlone lima-dv-3 connection:StandAlone
+```
+
+`dmesg -T` на `dv-1`:
+
+```text
+[Thu Nov 12 22:48:22 2026] drbd spike lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Thu Nov 12 22:48:22 2026] drbd spike lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Thu Nov 12 22:48:23 2026] drbd spike/0 drbd1000 lima-dv-2: self F5A9EE4B634046E0:0000000000000000:8DD686239630F7AC:0000000000000000 bits:3 flags:2520
+[Thu Nov 12 22:48:23 2026] drbd spike/0 drbd1000 lima-dv-2: peer 12DD86498ABEABEF:F5A9EE4B634046E0:0000000000000000:0000000000000000 bits:25 flags:2120
+[Thu Nov 12 22:48:23 2026] drbd spike/0 drbd1000 lima-dv-2: uuid_compare()=target-use-bitmap by rule=bitmap-peer
+[Thu Nov 12 22:48:23 2026] drbd spike/0 drbd1000 lima-dv-2: I shall become SyncTarget, but I am primary!
+[Thu Nov 12 22:48:23 2026] drbd spike: Aborting cluster-wide state change 343269666 (16ms) rv = -27
+[Thu Nov 12 22:48:23 2026] drbd spike lima-dv-2: conn( Disconnecting -> StandAlone ) [disconnected]
+[Thu Nov 12 22:48:23 2026] drbd spike/0 drbd1000 lima-dv-3: I shall become SyncTarget, but I am primary!
+[Thu Nov 12 22:48:23 2026] drbd spike lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+```
+
+`dv-2`:
+
+```text
+[Thu Nov 12 22:48:23 2026] drbd spike lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Thu Nov 12 22:48:23 2026] drbd spike: State change failed: Multiple primaries not allowed by config (-1)
+[Thu Nov 12 22:48:23 2026] drbd spike/0 drbd1000 lima-dv-1: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Thu Nov 12 22:48:23 2026] drbd spike lima-dv-1: conn( Disconnecting -> StandAlone ) [disconnected]
+```
+
+`adjust` при смонтированном томе: связи переходят в `Unconnected` →
+`Connecting`, соединение устанавливается, ядро отказывает с тем же
+сообщением и через ~1 с связи снова `StandAlone`. Ошибки `adjust` не
+возвращает (`rc=0`).
+
+Размонтирование на `dv-1` и `adjust` на трёх узлах:
+
+```text
+22:48:59.537
+umount rc=0
+not-mounted
+Secondary
+spike role:Secondary
+  disk:UpToDate quorum:no open:no
+  lima-dv-2 connection:StandAlone
+  lima-dv-3 connection:StandAlone
+14:49:00.430
+adjust rc=0
+14:49:00.881
+adjust rc=0
+14:49:01.539
+adjust rc=0
+22:49:01 dv-1: spike role:Secondary disk:UpToDate open:no lima-dv-2 role:Primary peer-disk:UpToDate lima-dv-3 connection:Connecting
+22:49:02 dv-1: spike role:Secondary disk:UpToDate open:no lima-dv-2 role:Primary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:UpToDate
+22:49:02 dv-2: spike role:Primary disk:UpToDate open:yes lima-dv-1 role:Secondary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:UpToDate
+22:49:02 dv-3: spike role:Secondary disk:UpToDate open:no lima-dv-1 role:Secondary peer-disk:UpToDate lima-dv-2 role:Primary peer-disk:UpToDate
+```
+
+`drbdadm secondary` не понадобился: `umount` перевёл узел в `Secondary`
+(`role( Primary -> Secondary ) [umount:23450 auto-demote]`). `dmesg -T` на
+`dv-1`:
+
+```text
+[Thu Nov 12 22:49:01 2026] drbd spike/0 drbd1000 lima-dv-2: uuid_compare()=target-use-bitmap by rule=bitmap-peer
+[Thu Nov 12 22:49:01 2026] drbd spike lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Primary ) [connected]
+[Thu Nov 12 22:49:01 2026] drbd spike/0 drbd1000: disk( UpToDate -> Outdated ) quorum( no -> yes ) [connected]
+[Thu Nov 12 22:49:01 2026] drbd spike/0 drbd1000: disk( Outdated -> Inconsistent ) [receive-bitmap]
+[Thu Nov 12 22:49:01 2026] drbd spike/0 drbd1000 lima-dv-2: Began resync as SyncTarget (will sync 100 KB [25 bits set]).
+[Thu Nov 12 22:49:01 2026] drbd spike/0 drbd1000: disk( Inconsistent -> UpToDate ) [resync-finished]
+[Thu Nov 12 22:49:02 2026] drbd spike/0 drbd1000 lima-dv-3: uuid_compare()=no-sync by rule=reconnected
+[Thu Nov 12 22:49:02 2026] drbd spike lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+```
+
+Сверка на `dv-2` (ACKED на `dv-1` = 2997):
+
+```text
+3002
+2995 2996 2997 dv2-1 dv2-2 dv2-3 dv2-4 dv2-5
+first2997 bad=0
+umount rc=0
+```
+
+| Наблюдение C2 (по одному прогону) | Прогон 1: пиры не продвинулись | Прогон 2: пиры продвинулись |
+|---|---|---|
+| Связи после снятия правил при `Primary` на `dv-1` | восстановились сами за ~2 с (22:45:13.4 → 22:45:15–16), `dv-1` — `SyncSource`, 8 КиБ | `StandAlone` через 2–4 с, `I shall become SyncTarget, but I am primary!` |
+| Новый текущий UUID | `dv-1` при соединении: `new current UUID: F5A9EE4B634046E1` | — |
+| `adjust` на трёх узлах при смонтированном томе | не выполнялся | `rc=0`, попытка соединения, тот же отказ, снова `StandAlone` через ~1 с |
+| `adjust` на трёх узлах после `umount` на `dv-1` | не понадобился | соединение и досылка 100 КиБ на `dv-1` за ~2 с |
+| ext4 на `dv-1` после переподключения | `Detected aborted journal`, `EIO` на чтение и запись до `umount` + `mount`; после — `mounting fs with errors`, запись проходит | том размонтирован до `adjust` |
+| На томе / ACKED | 5072 / 5072 | 2997 подтверждённых + 5 записей `dv-2` / 2997 |
+
+#### Что из этого следует для агента
+
+- После `EIO` на изолированном узле ext4 на этом узле не возвращается в
+  рабочее состояние сам, даже если DRBD переподключился и все копии
+  `UpToDate` (прогон 1: `Detected aborted journal`, `Remounting filesystem
+  read-only` при `quorum` уже восстановленном). Агенту нужен `umount` на
+  этом узле в обоих случаях; после повторного `mount` ядро пишет `mounting fs
+  with errors, running e2fsck is recommended`.
+- Если пиры не продвинулись, связи изолированного `Primary` восстанавливаются
+  без вмешательства (прогон 1, `uuid_compare()=no-sync by rule=reconnected` и
+  `source-use-bitmap`); `StandAlone` появляется только когда другая сторона
+  записала данные (прогон 2, `target-use-bitmap` + `I shall become
+  SyncTarget, but I am primary!`).
+- `drbdadm adjust` при смонтированном томе и роли `Primary` возвращает `rc=0`,
+  но связи снова уходят в `StandAlone` (прогон 2, 22:48:23). Код возврата
+  `adjust` не говорит, восстановилась ли связь; проверять надо
+  `connection-state` после него. Порядок, который сработал: `umount` (узел
+  сам уходит в `Secondary`), затем `adjust` на трёх узлах.
+
+### Опыт C3. Настоящий split-brain в DRBD 9.3.4
+
+Цель: получить настоящий split-brain на ресурсе с выключенным кворумом и
+сравнить его признаки со `StandAlone` из E1. Один прогон.
+
+Ресурс `spike` создан `res.sh spike 1000 7000 - io-error`, затем в `.res` на
+трёх узлах строка `options` заменена на `options { quorum off; auto-promote
+yes; }`:
+
+```bash
+vm <узел> "sed -i 's/quorum majority; on-no-quorum io-error;/quorum off;/' /var/lib/rancher/duovol/res/spike.res"
+stand/spike/ctr.sh <узел> "drbdadm dump spike >/dev/null && echo dump ok; drbdadm adjust spike; echo adjust rc=\$?; drbdsetup show spike --show-defaults | grep -E '^\s+quorum|on-no-quorum'"
+```
+
+```text
+    options { quorum off; auto-promote yes; }
+dump ok
+adjust rc=0
+        quorum          	off; # default
+        on-no-quorum    	suspend-io; # default
+        quorum-minimum-redundancy	off; # default
+```
+
+Вывод одинаков на трёх узлах. Затем `new-current-uuid --clear-bitmap`
+(14:50:11 UTC), три `UpToDate`, `mkfs.ext4`, `mount` на `dv-1`, писатель и
+`watch.sh` на `dv-1`.
+
+Изоляция `dv-1` и запись на обеих сторонах:
+
+```text
+22:50:46.119
+22:50:46.129
+22:51:06.318
+6380
+  26962 S    bash /usr/local/bin/probe.sh /mnt/spike /var/tmp/acked
+     21 22:50:46.465 acked=896 probe=alive:S
+spike role:Primary
+  disk:UpToDate open:yes
+  lima-dv-2 connection:Connecting
+  lima-dv-3 connection:Connecting
+[Thu Nov 12 22:50:56 2026] drbd spike lima-dv-2: PingAck did not arrive in time.
+[Thu Nov 12 22:50:56 2026] drbd spike lima-dv-3: PingAck did not arrive in time.
+[Thu Nov 12 22:50:56 2026] drbd spike/0 drbd1000: new current UUID: 3BB88FDA87BA31F1 weak: FFFFFFFFFFFFFFFE
+```
+
+С `quorum off` изолированный `dv-1` после паузы (21 одинаковая выборка с
+22:50:46.465, ~10.5 с) продолжает подтверждать записи. Затем:
+
+```bash
+vm dv-2 "mount /dev/drbd1000 /mnt/spike; tail -1 /mnt/spike/log; wc -l < /mnt/spike/log; for i in 1 2 3 4 5; do echo dv2-\$i >> /mnt/spike/log && sync /mnt/spike/log && echo ok-\$i; done; echo dv2-file > /mnt/spike/dv2-only && sync /mnt/spike/dv2-only && echo dv2-only ok; wc -l < /mnt/spike/log"
+vm dv-1 "pkill -f '^bash /usr/local/bin/probe\.sh'; sleep 1; echo acked=\$(cat /var/tmp/acked); tail -1 /mnt/spike/log; wc -l < /mnt/spike/log; echo dv1-file > /mnt/spike/dv1-only && sync /mnt/spike/dv1-only && echo dv1-only ok"
+vm dv-1 "umount /mnt/spike"; vm dv-2 "umount /mnt/spike"
+```
+
+```text
+22:51:17.013
+mount rc=0
+896
+896
+ok-1
+...
+ok-5
+dv2-only ok
+901
+22:51:17.609
+acked=15875
+15876
+15876
+dv1-only ok
+22:51:19.186
+umount rc=0
+22:51:19.743
+umount rc=0
+```
+
+После `umount` обе стороны `Secondary`. На `dv-2` том открылся с журналом до
+896 — это последнее подтверждение до изоляции; `dv-1` после изоляции
+подтвердил ещё 897–15875.
+
+Перед снятием правил на трёх узлах запущен `timeout 45 drbdsetup events2
+--timestamps spike`. Снятие правил в 22:51:35.45, опрос:
+
+```text
+22:51:35 dv-1: spike role:Secondary disk:UpToDate open:no lima-dv-2 connection:Connecting lima-dv-3 connection:Connecting
+22:51:37 dv-1: spike role:Secondary disk:UpToDate open:no lima-dv-2 connection:Connecting lima-dv-3 connection:StandAlone
+22:51:38 dv-1: spike role:Secondary disk:UpToDate open:no lima-dv-2 connection:StandAlone lima-dv-3 connection:StandAlone
+22:51:37 dv-2: spike role:Secondary disk:UpToDate open:no lima-dv-1 connection:StandAlone lima-dv-3 role:Secondary peer-disk:UpToDate
+22:51:38 dv-3: spike role:Secondary disk:UpToDate open:no lima-dv-1 connection:StandAlone lima-dv-2 role:Secondary peer-disk:UpToDate
+```
+
+`dmesg -T` на `dv-1` (без потоков и `Feature flags`):
+
+```text
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Thu Nov 12 22:51:37 2026] drbd spike: Preparing cluster-wide state change 3474031710: 0->2 role( Secondary ) conn( Connected )
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-3: drbd_sync_handshake:
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-3: self 3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000 bits:4126 flags:2120
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-3: peer 1A2099DE875E62C8:56D2FD426ECBD8AC:56D2FD426ECBD8AC:0000000000000000 bits:35 flags:2120
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-3: uuid_compare()=split-brain-auto-recover by rule=bitmap-both
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-3: Split-Brain detected but unresolved, dropping connection!
+[Thu Nov 12 22:51:37 2026] drbd spike: Aborting cluster-wide state change 3474031710 (16ms) rv = -27
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-3: conn( Connecting -> Disconnecting ) [connect-failed]
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-3: Connection closed
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Thu Nov 12 22:51:37 2026] drbd spike: Preparing cluster-wide state change 709506331: 0->1 role( Secondary ) conn( Connected )
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-2: drbd_sync_handshake:
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-2: self 3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000 bits:4126 flags:2120
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-2: peer 1A2099DE875E62C8:56D2FD426ECBD8AC:56D2FD426ECBD8AC:0000000000000000 bits:35 flags:2120
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-2: uuid_compare()=split-brain-auto-recover by rule=bitmap-both
+[Thu Nov 12 22:51:37 2026] drbd spike/0 drbd1000 lima-dv-2: Split-Brain detected but unresolved, dropping connection!
+[Thu Nov 12 22:51:37 2026] drbd spike: Aborting cluster-wide state change 709506331 (28ms) rv = -27
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-2: conn( Connecting -> Disconnecting ) [connect-failed]
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-2: Connection closed
+[Thu Nov 12 22:51:37 2026] drbd spike lima-dv-2: conn( Disconnecting -> StandAlone ) [disconnected]
+```
+
+`dv-2`:
+
+```text
+[Thu Nov 12 22:51:38 2026] drbd spike/0 drbd1000 lima-dv-1: self 1A2099DE875E62C8:56D2FD426ECBD8AC:56D2FD426ECBD8AC:0000000000000000 bits:35 flags:2120
+[Thu Nov 12 22:51:38 2026] drbd spike/0 drbd1000 lima-dv-1: peer 3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000 bits:4126 flags:2120
+[Thu Nov 12 22:51:38 2026] drbd spike/0 drbd1000 lima-dv-1: uuid_compare()=split-brain-auto-recover by rule=bitmap-both
+[Thu Nov 12 22:51:38 2026] drbd spike/0 drbd1000 lima-dv-1: Split-Brain detected but unresolved, dropping connection!
+[Thu Nov 12 22:51:38 2026] drbd spike lima-dv-1: Aborting remote state change 709506331
+[Thu Nov 12 22:51:38 2026] drbd spike lima-dv-1: conn( Connecting -> Disconnecting ) [receive-disconnect]
+[Thu Nov 12 22:51:38 2026] drbd spike lima-dv-1: Connection closed
+[Thu Nov 12 22:51:38 2026] drbd spike lima-dv-1: conn( Disconnecting -> StandAlone ) [disconnected]
+```
+
+`dv-3` печатает те же строки для `lima-dv-1` в 22:51:37: у `dv-3` данные
+`dv-2` (`self 1A2099DE875E62C8:…`), поэтому с `dv-1` у него тоже split-brain.
+`dmesg -T | grep -i split` на `dv-1` и `dv-2` находит кроме этих строк ещё
+`drbd spike2 lima-dv-3: Cluster is now split` (22:44:03 на `dv-1`, 22:44:06 на
+`dv-2`) и `drbd spike lima-dv-3: Cluster is now split` (22:49:44, 22:49:47) —
+это моменты `stand/spike/clean.sh` (`drbdsetup down` на `dv-3`), а не
+split-brain.
+
+Сравнение с E1 по ядру:
+
+| Признак | E1 (`StandAlone` из-за роли) | C3 (split-brain) |
+|---|---|---|
+| `uuid_compare()` на отказавшей стороне | `target-use-bitmap by rule=bitmap-peer` | `split-brain-auto-recover by rule=bitmap-both` |
+| Строка отказа | `I shall become SyncTarget, but I am primary!` | `Split-Brain detected but unresolved, dropping connection!` |
+| UUID при рукопожатии | у одной стороны текущий UUID другой стороны стоит в истории (`peer 199B…:3FED…`, `self 3FED…`) | обе стороны имеют разные текущие UUID с общим UUID битовой карты `56D2FD426ECBD8AC` |
+| Роль узла | `Primary`, том смонтирован | обе стороны `Secondary` |
+
+`events2 --timestamps` на `dv-1` с 14:51:31 UTC (на `dv-2` и `dv-3` та же
+последовательность для соединения с `lima-dv-1`):
+
+```text
+2026-11-12T14:51:37.226272+00:00 change path name:spike peer-node-id:2 conn-name:lima-dv-3 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.4:7000 established:yes
+2026-11-12T14:51:37.245370+00:00 change peer-device name:spike peer-node-id:2 conn-name:lima-dv-3 volume:0
+2026-11-12T14:51:37.245722+00:00 change connection name:spike peer-node-id:2 conn-name:lima-dv-3 connection:Disconnecting
+2026-11-12T14:51:37.261134+00:00 change path name:spike peer-node-id:2 conn-name:lima-dv-3 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.4:7000 established:no
+2026-11-12T14:51:37.263143+00:00 change connection name:spike peer-node-id:2 conn-name:lima-dv-3 connection:StandAlone
+2026-11-12T14:51:37.800284+00:00 change path name:spike peer-node-id:1 conn-name:lima-dv-2 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.3:7000 established:yes
+2026-11-12T14:51:37.824457+00:00 change peer-device name:spike peer-node-id:1 conn-name:lima-dv-2 volume:0
+2026-11-12T14:51:37.835099+00:00 change connection name:spike peer-node-id:1 conn-name:lima-dv-2 connection:Disconnecting
+2026-11-12T14:51:37.857132+00:00 change path name:spike peer-node-id:1 conn-name:lima-dv-2 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.3:7000 established:no
+2026-11-12T14:51:37.857869+00:00 change connection name:spike peer-node-id:1 conn-name:lima-dv-2 connection:StandAlone
+```
+
+В `events2` нет поля или события со словом split-brain: только
+`established:yes` → `Disconnecting` → `StandAlone`. Захват `events2` в E1 не
+снимался, поэтому побайтовое сравнение событий с E1 не выполнено; по
+переходам `connection:` последовательность совпадает с `dmesg` E1
+(`Connecting -> Disconnecting -> StandAlone`). `events2 --now --statistics`
+на `dv-1` после split-brain:
+
+```text
+exists resource name:spike role:Secondary suspended:no force-io-failures:no write-ordering:flush may_promote:yes promotion_score:10101
+exists connection name:spike peer-node-id:2 conn-name:lima-dv-3 connection:StandAlone role:Unknown congested:no ap-in-flight:0 rs-in-flight:0
+exists connection name:spike peer-node-id:1 conn-name:lima-dv-2 connection:StandAlone role:Unknown congested:no ap-in-flight:0 rs-in-flight:0
+exists device name:spike volume:0 minor:1000 backing_dev:/dev/duovol/spike disk:UpToDate client:no open:no quorum:yes size:1048476 read:1005 written:1336772 al-writes:5 bm-writes:20 upper-pending:0 lower-pending:0 al-suspended:no blocked:no
+exists peer-device name:spike peer-node-id:2 conn-name:lima-dv-3 volume:0 replication:Off peer-disk:DUnknown peer-client:no resync-suspended:no received:0 sent:0 out-of-sync:16504 pending:0 unacked:0
+exists path name:spike peer-node-id:2 conn-name:lima-dv-3 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.4:7000 established:no
+exists peer-device name:spike peer-node-id:1 conn-name:lima-dv-2 volume:0 replication:Off peer-disk:DUnknown peer-client:no resync-suspended:no received:0 sent:0 out-of-sync:16504 pending:0 unacked:0
+exists path name:spike peer-node-id:1 conn-name:lima-dv-2 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.3:7000 established:no
+exists -
+```
+
+`drbdsetup status spike --verbose --statistics` и `drbdadm get-gi spike/0`
+(22:52:39–42):
+
+```text
+== dv-1
+spike node-id:0 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/duovol/spike quorum:yes
+      open:no
+      size:1048476 read:1005 written:1336772 al-writes:5 bm-writes:20 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:16504 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:16504 pending:0 unacked:0
+
+3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000:1:1:0:0:0:0:0:0:0:0:0:1:1
+3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000:1:1:0:0:0:0:0:0:0:0:0:1:1
+== dv-2
+spike node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/duovol/spike quorum:yes
+  lima-dv-1 node-id:0 connection:StandAlone role:Unknown tls:no congested:no
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:140 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+1A2099DE875E62C8:56D2FD426ECBD8AC:56D2FD426ECBD8AC:0000000000000000:1:1:0:0:0:0:0:0:0:0:0:1:1
+1A2099DE875E62C8:0000000000000000:56D2FD426ECBD8AC:0000000000000000:1:1:0:0:0:0:0:1:0:0:0:1:0
+```
+
+Вывод `dv-2` сокращён (строки статистики устройства опущены); `dv-3`
+совпадает с `dv-2` по состояниям. `quorum:yes` при `quorum off` — поле
+показывает `yes` всегда.
+
+Образцы: `split-brain-victim.json` (`dv-1`), `split-brain-survivor.json`
+(`dv-2`). Сравнение по полям с `standalone-primary.json` (E1, `dv-1`)
+скриптом, который раскладывает JSON в плоский словарь «путь → значение»:
+
+```text
+=== split-brain-victim.json vs standalone-primary.json
+keys only in split-brain-victim.json []
+keys only in E1 []
+  connections[lima-dv-2].peer_devices[0].out-of-sync: E1=8 SB=16504
+  connections[lima-dv-2].peer_devices[0].percent-in-sync: E1=100.0 SB=98.43
+  connections[lima-dv-3].peer_devices[0].out-of-sync: E1=12 SB=16504
+  connections[lima-dv-3].peer_devices[0].percent-in-sync: E1=100.0 SB=98.43
+  devices[0].bm-writes: E1=18 SB=20
+  devices[0].open: E1=True SB=False
+  devices[0].quorum: E1=False SB=True
+  devices[0].written: E1=1104748 SB=1336772
+  role: E1='Primary' SB='Secondary'
+```
+
+Набор ключей одинаков. Отличаются роль, `open`, `quorum` (следствие
+`quorum off` и `Secondary` в C3) и счётчики. Поля, которое отмечает
+split-brain, в `drbdsetup status --json` нет.
+
+#### Разрешение
+
+Жертва — `dv-1` (его записи 897–15876 и файл `dv1-only` отбрасываются).
+
+```bash
+stand/spike/ctr.sh dv-1 "drbdadm disconnect spike; echo disconnect rc=\$?; drbdadm connect --discard-my-data spike; echo connect rc=\$?"
+```
+
+```text
+14:53:03.825
+disconnect rc=0
+connect rc=0
+[Thu Nov 12 22:53:03 2026] drbd spike: State change failed: Can not disconnect a StandAlone device (-9)
+[Thu Nov 12 22:53:03 2026] drbd spike lima-dv-2: Failed: conn( StandAlone -> Disconnecting ) [disconnect]
+[Thu Nov 12 22:53:03 2026] drbd spike: State change failed: Can not disconnect a StandAlone device (-9)
+[Thu Nov 12 22:53:03 2026] drbd spike lima-dv-3: Failed: conn( StandAlone -> Disconnecting ) [disconnect]
+[Thu Nov 12 22:53:03 2026] drbd spike lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Thu Nov 12 22:53:03 2026] drbd spike lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Thu Nov 12 22:53:03 2026] drbd spike lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Thu Nov 12 22:53:03 2026] drbd spike lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+```
+
+20 с после этого: `dv-1` в `Connecting` к обоим, `dv-2` и `dv-3` держат
+`lima-dv-1 connection:StandAlone`, в их `dmesg` новых строк нет. Одной
+команды на жертве недостаточно. Затем на выживших:
+
+```bash
+for n in dv-2 dv-3; do stand/spike/ctr.sh $n "drbdadm connect spike; echo connect rc=\$?"; done
+```
+
+```text
+14:53:33.958
+spike: Failure: (125) Device has a net-config (use disconnect first)
+Command 'drbdsetup connect spike 2' terminated with exit code 10
+connect rc=10
+14:53:34.369
+spike: Failure: (125) Device has a net-config (use disconnect first)
+Command 'drbdsetup connect spike 1' terminated with exit code 10
+connect rc=10
+22:53:34 dv-1: spike role:Secondary disk:UpToDate open:no lima-dv-2 role:Secondary peer-disk:UpToDate lima-dv-3 connection:Connecting
+22:53:35 dv-1: spike role:Secondary disk:UpToDate open:no lima-dv-2 role:Secondary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:UpToDate
+22:53:34 dv-2: spike role:Secondary disk:UpToDate open:no lima-dv-1 role:Secondary peer-disk:UpToDate lima-dv-3 role:Secondary peer-disk:UpToDate
+22:53:35 dv-3: spike role:Secondary disk:UpToDate open:no lima-dv-1 role:Secondary peer-disk:UpToDate lima-dv-2 role:Secondary peer-disk:UpToDate
+```
+
+`drbdadm connect spike` вернул `rc=10` из-за соединения, которое уже
+`Connected` (`dv-2`→`dv-3`, `dv-3`→`dv-2`), а соединение с `lima-dv-1`
+перешло `StandAlone -> Unconnected` и поднялось. `dmesg -T` на `dv-1`:
+
+```text
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-2: self 3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000 bits:4126 flags:2121
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-2: peer 1A2099DE875E62C8:56D2FD426ECBD8AC:56D2FD426ECBD8AC:0000000000000000 bits:35 flags:2120
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-2: uuid_compare()=split-brain-auto-recover by rule=bitmap-both
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-2: Split-Brain detected, manually solved. Sync from peer node
+[Thu Nov 12 22:53:34 2026] drbd spike lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000: disk( UpToDate -> Outdated ) [connected]
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000: disk( Outdated -> Inconsistent ) [receive-bitmap]
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-2: Began resync as SyncTarget (will sync 16512 KB [4128 bits set]).
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-2: Resync done (total 1 sec; paused 0 sec; 16512 K/sec)
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000: disk( Inconsistent -> UpToDate ) [resync-finished]
+[Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-3: uuid_compare()=no-sync by rule=reconnected
+[Thu Nov 12 22:53:34 2026] drbd spike lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+```
+
+`dv-2`: `Split-Brain detected, manually solved. Sync from this node`,
+`Began resync as SyncSource (will sync 16512 KB [4128 bits set])`. В
+`flags:2121` у жертвы младший бит отличается от `flags:2120` до команды
+[проверить: что это флаг `discard-my-data`]. Проверка на `dv-1`:
+
+```text
+15875
+mount rc=0
+dv2-only
+log
+lost+found
+901
+dv2-4 dv2-5
+umount rc=0
+```
+
+На `dv-1` данные `dv-2`: 901 строка, последняя `dv2-5`, файла `dv1-only`
+нет. Записи 897–15875, которые писатель на `dv-1` получил как
+подтверждённые (ACKED на `dv-1` = 15875), отброшены. Это ожидаемый исход
+опыта с `quorum off`.
+
+| Наблюдение C3 (один прогон) | Значение |
+|---|---|
+| Запись на обеих сторонах при `quorum off` | `dv-1` подтвердил 897–15875 после изоляции, `dv-2` — `dv2-1`…`dv2-5` и `dv2-only` |
+| Сообщение ядра | `uuid_compare()=split-brain-auto-recover by rule=bitmap-both`, затем `Split-Brain detected but unresolved, dropping connection!` |
+| Состояние после | на жертве обе связи `StandAlone`, на выживших — связь с жертвой `StandAlone`; все `Secondary`, `disk:UpToDate` |
+| Отличие от E1 в `status --json` / `events2` | отдельного поля или события нет; набор ключей JSON совпадает |
+| Время от снятия правил до `StandAlone` | ~2 с (22:51:35.45 → 22:51:37–38) |
+| Разрешение | на жертве `disconnect` (ядро: `Can not disconnect a StandAlone device`, `rc=0`) + `connect --discard-my-data`; на двух других узлах `connect` (`rc=10` из-за уже соединённого пира, связь с жертвой поднялась); досылка 16512 КиБ за 1 с |
+| Сообщение после разрешения | жертва: `Split-Brain detected, manually solved. Sync from peer node`; выживший: `… Sync from this node` |
+
+#### Что из этого следует для агента
+
+- Отличить настоящий split-brain от `StandAlone` из-за роли (E1) по
+  `drbdsetup status --json` и `events2` нельзя: ключи JSON совпадают, в
+  `events2` только `connection:Disconnecting` → `StandAlone`. Различие есть
+  только в сообщении ядра: `Split-Brain detected but unresolved, dropping
+  connection!` против `I shall become SyncTarget, but I am primary!` (и
+  `uuid_compare()=…by rule=bitmap-both` против `…by rule=bitmap-peer`).
+  Агенту нужен источник этих строк (`dmesg`/kmsg) или собственная проверка
+  UUID через `drbdadm get-gi`.
+- Поиск по `dmesg` словом `split` без привязки к формулировке даёт ложные
+  совпадения: `Cluster is now split` печатается при `drbdsetup down` на
+  пире (22:44:03, 22:49:44 на `dv-1`).
+- Признак split-brain по UUID: у сторон разные текущие UUID при общем UUID
+  битовой карты (`3BB88FDA87BA31F0:56D2FD426ECBD8AC` и
+  `1A2099DE875E62C8:56D2FD426ECBD8AC`); в E1 текущий UUID одной стороны был
+  в истории другой.
+- Разрешение требует действий на всех узлах с `StandAlone`-связью к жертве,
+  не только на жертве: после `connect --discard-my-data` на `dv-1` пиры 20 с
+  оставались `StandAlone`. Коды возврата `drbdadm` здесь не показывают
+  результат: `disconnect` даёт `rc=0` при отказе ядра, `connect` даёт `rc=10`
+  при успешно поднятой связи с жертвой; проверять надо `connection-state`.
+- Узел, который держал связь с выжившей стороной (`dv-3`), тоже переходит в
+  `StandAlone` к жертве с тем же сообщением split-brain, хотя сам записей не
+  принимал.
+- При `quorum off` поле `quorum` в статусе всегда `true` (`quorum:yes` на
+  изолированном `dv-1`), оно не говорит о возможности split-brain.
+
+### Очистка стенда после опытов C1–C3
+
+В `stand/spike/clean.sh` добавлено удаление `/var/tmp/nft-spike.nft` (файл
+правил изоляции из C2 и C3).
+
+```bash
+stand/spike/clean.sh
+stand/check.sh
+kc get nodes --no-headers
+for n in dv-1 dv-2 dv-3; do vm $n "cat /sys/module/drbd/version; ps -eo pid,comm,args | grep -E '[p]robe\.sh|[w]atch\.sh' || echo no probe/watch; echo loops=\$(losetup -l -n | wc -l); ls /dev/duovol; nft list tables | grep spike || echo no-spike-table; findmnt /mnt/spike /mnt/spike2 || echo no-mounts"; stand/spike/ctr.sh $n "drbdsetup status"; done
+```
+
+```text
+clean rc=0
+OK: stand is up
+lima-dv-1   Ready   control-plane,etcd   95m   v1.37.2+k3s1
+lima-dv-2   Ready   control-plane,etcd   94m   v1.37.2+k3s1
+lima-dv-3   Ready   control-plane,etcd   93m   v1.37.2+k3s1
+== dv-1
+9.3.4
+no probe/watch
+loops=0
+ls: cannot access '/dev/duovol': No such file or directory
+no-spike-table
+no-mounts
+# No currently configured DRBD found.
+```
+
+`dv-2` и `dv-3` дали тот же вывод. `/var/tmp` на трёх узлах после повторного
+`clean.sh`: `cloud-init` и каталог `systemd-private-…`.

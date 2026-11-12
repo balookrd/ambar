@@ -29,7 +29,7 @@ for n in "${NODES[@]}"; do
         if nft list table inet spike >/dev/null 2>&1; then nft delete table inet spike; fi
         rm -f /usr/local/bin/probe.sh /usr/local/bin/watch.sh /usr/local/bin/fsync-bench.sh
         rm -rf /var/tmp/acked /var/tmp/acked2 /var/tmp/probe.log /var/tmp/probe2.log \
-            /var/tmp/watch.log /var/tmp/watch2.log /var/tmp/local"
+            /var/tmp/watch.log /var/tmp/watch2.log /var/tmp/local /var/tmp/nft-spike.nft"
     tb "$n" "drbdsetup status"
     vm "$n" "losetup -l; ls -A $vol_dir $res_dir; nft list tables | grep -c 'inet spike' || true
         ps -eo pid,comm,args | grep -E '[p]robe\\.sh|[w]atch\\.sh' || echo 'no probe/watch processes'"
