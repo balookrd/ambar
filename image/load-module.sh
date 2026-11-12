@@ -4,6 +4,7 @@
 set -euo pipefail
 
 MODULES_DIR="${MODULES_DIR:-/opt/duovol/modules}"
+SYS_MODULE_DIR="${SYS_MODULE_DIR:-/sys/module}"
 
 kver="$(uname -r)"
 dir="$MODULES_DIR/$kver"
@@ -12,7 +13,7 @@ dir="$MODULES_DIR/$kver"
 # alone is not a finished state: a previous run may have died between the
 # two insmod calls.
 load_transport() {
-    [[ -d /sys/module/drbd_transport_tcp ]] && return 0
+    [[ -d "$SYS_MODULE_DIR/drbd_transport_tcp" ]] && return 0
     if [[ ! -f "$dir/drbd_transport_tcp.ko" ]]; then
         echo "no drbd_transport_tcp module for kernel $kver" >&2
         exit 1
@@ -20,8 +21,8 @@ load_transport() {
     insmod "$dir/drbd_transport_tcp.ko"
 }
 
-if [[ -d /sys/module/drbd ]]; then
-    loaded="$(cat /sys/module/drbd/version)"
+if [[ -d "$SYS_MODULE_DIR/drbd" ]]; then
+    loaded="$(cat "$SYS_MODULE_DIR/drbd/version")"
     case "$loaded" in
         9.*)
             load_transport
@@ -44,4 +45,4 @@ fi
 modprobe -a lru_cache libcrc32c
 insmod "$dir/drbd.ko" usermode_helper=disabled
 load_transport
-echo "loaded drbd $(cat /sys/module/drbd/version) for kernel $kver"
+echo "loaded drbd $(cat "$SYS_MODULE_DIR/drbd/version") for kernel $kver"
