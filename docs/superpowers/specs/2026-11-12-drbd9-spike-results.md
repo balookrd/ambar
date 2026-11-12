@@ -3,7 +3,10 @@
 Стенд: три ВМ Lima на маке, Debian 13 trixie arm64, ядро
 `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0. Каждое допущение взято
 из раздела «Что проверяется первым» спеки
-`2026-11-12-duovol-design.md`.
+`2026-11-12-sklad-design.md`.
+
+Опыты выполнены, когда проект и его пути назывались `duovol`; имена в выводах
+позже заменены на `sklad` (например, `/var/lib/rancher/sklad/...`, `sklad-spike`).
 
 ## Окружение
 
@@ -98,7 +101,7 @@ spike role:Secondary
 ```text
 spike node-id:0 role:Secondary suspended:no force-io-failures:no
     write-ordering:flush
-  volume:0 minor:1000 disk:Inconsistent backing_dev:/dev/duovol/spike quorum:yes
+  volume:0 minor:1000 disk:Inconsistent backing_dev:/dev/sklad/spike quorum:yes
       open:no
       size:1048476 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
       lower-pending:0 al-suspended:no blocked:no
@@ -114,7 +117,7 @@ spike node-id:0 role:Secondary suspended:no force-io-failures:no
 
 `size:1048476` в КиБ: из файла 1 ГиБ (1048576 КиБ) внутренние метаданные
 для двух пиров заняли 100 КиБ, из них 64 КиБ — битовая карта (вывод
-`create-md`). Остальные 36 КиБ по выводу утилит не разложены. Сгенерированный файл `/var/lib/rancher/duovol/res/spike.res`:
+`create-md`). Остальные 36 КиБ по выводу утилит не разложены. Сгенерированный файл `/var/lib/rancher/sklad/res/spike.res`:
 
 ```text
 resource spike {
@@ -123,17 +126,17 @@ resource spike {
     on lima-dv-1 {
         node-id 0;
         address ipv4 192.168.104.1:7000;
-        volume 0 { device minor 1000; disk /dev/duovol/spike; meta-disk internal; }
+        volume 0 { device minor 1000; disk /dev/sklad/spike; meta-disk internal; }
     }
     on lima-dv-2 {
         node-id 1;
         address ipv4 192.168.104.3:7000;
-        volume 0 { device minor 1000; disk /dev/duovol/spike; meta-disk internal; }
+        volume 0 { device minor 1000; disk /dev/sklad/spike; meta-disk internal; }
     }
     on lima-dv-3 {
         node-id 2;
         address ipv4 192.168.104.4:7000;
-        volume 0 { device minor 1000; disk /dev/duovol/spike; meta-disk internal; }
+        volume 0 { device minor 1000; disk /dev/sklad/spike; meta-disk internal; }
     }
     connection-mesh { hosts lima-dv-1 lima-dv-2 lima-dv-3; }
 }
@@ -148,7 +151,7 @@ vm dv-1 "losetup -l -O NAME,BACK-FILE,DIO | grep spike"
 ```
 
 ```text
-/dev/loop0 /var/lib/rancher/duovol/volumes/spike.img   1
+/dev/loop0 /var/lib/rancher/sklad/volumes/spike.img   1
 ```
 
 Пропуск начальной синхронизации:
@@ -596,7 +599,7 @@ umount-dv2 rc=0
 
 ```bash
 for n in dv-1 dv-2 dv-3; do
-  vm "$n" "sed -i 's/on-no-quorum io-error/on-no-quorum suspend-io/' /var/lib/rancher/duovol/res/spike.res"
+  vm "$n" "sed -i 's/on-no-quorum io-error/on-no-quorum suspend-io/' /var/lib/rancher/sklad/res/spike.res"
   tb "$n" "drbdadm adjust spike"; echo "$n adjust rc=$?"
 done
 tb dv-1 "drbdsetup show spike | grep on-no-quorum"
@@ -1024,9 +1027,9 @@ spike2 role:Secondary
 ```bash
 limactl start --tty=false dv-2
 kc wait --for=condition=Ready node --all --timeout=180s
-kc -n duovol-spike rollout status ds/toolbox --timeout=120s
-tb dv-2 "/opt/duovol/load-module.sh"
-vm dv-2 "mkdir -p /dev/duovol; for r in spike spike2; do f=/var/lib/rancher/duovol/volumes/\$r.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/duovol/\$r; done"
+kc -n sklad-spike rollout status ds/toolbox --timeout=120s
+tb dv-2 "/opt/sklad/load-module.sh"
+vm dv-2 "mkdir -p /dev/sklad; for r in spike spike2; do f=/var/lib/rancher/sklad/volumes/\$r.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/sklad/\$r; done"
 tb dv-2 "drbdadm up spike; drbdadm up spike2"
 ```
 
@@ -1043,8 +1046,8 @@ load rc=0
 9.3.4
 disabled
 NAME       BACK-FILE                                  DIO
-/dev/loop1 /var/lib/rancher/duovol/volumes/spike2.img   1
-/dev/loop0 /var/lib/rancher/duovol/volumes/spike.img    1
+/dev/loop1 /var/lib/rancher/sklad/volumes/spike2.img   1
+/dev/loop0 /var/lib/rancher/sklad/volumes/spike.img    1
 ```
 
 Адрес `dv-2` после перезапуска прежний (192.168.104.3). `drbdadm up` в
@@ -1174,7 +1177,7 @@ lima-dv-3   Ready   control-plane,etcd   39m   v1.37.2+k3s1
 
 ```bash
 stand/spike/res.sh spike 1000 7000 - io-error
-vm dv-1 "grep on-no-quorum /var/lib/rancher/duovol/res/spike.res"
+vm dv-1 "grep on-no-quorum /var/lib/rancher/sklad/res/spike.res"
 tb dv-1 "drbdadm new-current-uuid --clear-bitmap spike/0"; sleep 3
 tb dv-1 "drbdsetup show spike | grep on-no-quorum; drbdadm status spike"
 tb dv-1 "mkfs.ext4 -q /dev/drbd1000"
@@ -1290,7 +1293,7 @@ lines=1402 bad=0
 ```text
 == dv-1
 spike node-id:0 role:Primary suspended:no force-io-failures:no
-  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/duovol/spike quorum:no
+  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/sklad/spike quorum:no
       open:yes blocked:no
   lima-dv-2 node-id:1 connection:StandAlone role:Unknown tls:no congested:no
       ap-in-flight:0 rs-in-flight:0
@@ -1301,7 +1304,7 @@ spike node-id:0 role:Primary suspended:no force-io-failures:no
 
 == dv-2
 spike node-id:1 role:Primary suspended:no force-io-failures:no
-  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/duovol/spike quorum:yes
+  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/sklad/spike quorum:yes
       open:yes blocked:no
   lima-dv-1 node-id:0 connection:StandAlone role:Unknown tls:no congested:no
       ap-in-flight:0 rs-in-flight:0
@@ -1541,9 +1544,9 @@ umount rc=0
 
 ```bash
 stand/up.sh
-kc get node lima-dv-2; kc -n duovol-spike rollout status ds/toolbox --timeout=180s
-tb dv-2 "/opt/duovol/load-module.sh"
-vm dv-2 "mkdir -p /dev/duovol; for r in spike spike2; do f=/var/lib/rancher/duovol/volumes/\$r.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/duovol/\$r; done; losetup -l -O NAME,BACK-FILE,DIO"
+kc get node lima-dv-2; kc -n sklad-spike rollout status ds/toolbox --timeout=180s
+tb dv-2 "/opt/sklad/load-module.sh"
+vm dv-2 "mkdir -p /dev/sklad; for r in spike spike2; do f=/var/lib/rancher/sklad/volumes/\$r.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/sklad/\$r; done; losetup -l -O NAME,BACK-FILE,DIO"
 tb dv-2 "drbdadm up spike; drbdadm up spike2; for i in \$(seq 1 40); do …drbdsetup status… ; sleep 0.25; done" | uniq -f1
 ```
 
@@ -1556,8 +1559,8 @@ toolbox-g9ckc   1/1     Running   2 (16s ago)   29m   192.168.104.3   lima-dv-2 
 loaded drbd 9.3.4 for kernel 6.12.116+deb13-arm64
 load rc=0
 NAME       BACK-FILE                                  DIO
-/dev/loop1 /var/lib/rancher/duovol/volumes/spike2.img   1
-/dev/loop0 /var/lib/rancher/duovol/volumes/spike.img    1
+/dev/loop1 /var/lib/rancher/sklad/volumes/spike2.img   1
+/dev/loop0 /var/lib/rancher/sklad/volumes/spike.img    1
 21:59:20.971
 13:59:21.707 spike role:Secondary disk:UpToDate quorum:no open:no  | spike2 role:Secondary disk:UpToDate quorum:no open:no lima-dv-1 connection:Connecting lima-dv-3 connection:Connecting
 13:59:22.491 spike role:Secondary disk:UpToDate open:no  | spike2 role:Secondary disk:Inconsistent open:no lima-dv-1 role:Secondary replication:SyncTarget peer-disk:UpToDate done:55.93 lima-dv-3 role:Secondary peer-disk:Diskless peer-client:yes resync-suspended:dependency
@@ -1704,15 +1707,15 @@ NAME       BACK-FILE                                  DIO
 stand/spike/clean.sh
 stand/check.sh
 kc get nodes --no-headers
-for n in dv-1 dv-2 dv-3; do vm $n "cat /sys/module/drbd/version; ps -eo pid,comm,args | grep -E '[p]robe\.sh|[w]atch\.sh' || echo 'ps: no probe/watch'; losetup -l | wc -l; ls /dev/duovol; ls /usr/local/bin /var/tmp; nft list tables | grep spike || echo no-spike-table"; done
+for n in dv-1 dv-2 dv-3; do vm $n "cat /sys/module/drbd/version; ps -eo pid,comm,args | grep -E '[p]robe\.sh|[w]atch\.sh' || echo 'ps: no probe/watch'; losetup -l | wc -l; ls /dev/sklad; ls /usr/local/bin /var/tmp; nft list tables | grep spike || echo no-spike-table"; done
 ```
 
 ```text
 == dv-1
 # No currently configured DRBD found.
-/var/lib/rancher/duovol/res:
+/var/lib/rancher/sklad/res:
 
-/var/lib/rancher/duovol/volumes:
+/var/lib/rancher/sklad/volumes:
 0
 no probe/watch processes
 ...
@@ -1725,19 +1728,19 @@ lima-dv-3   Ready   control-plane,etcd   39m   v1.37.2+k3s1
 9.3.4
 ps: no probe/watch
 0
-ls: cannot access '/dev/duovol': No such file or directory
+ls: cannot access '/dev/sklad': No such file or directory
 no-spike-table
 == dv-2
 9.3.4
 ps: no probe/watch
 0
-ls: cannot access '/dev/duovol': No such file or directory
+ls: cannot access '/dev/sklad': No such file or directory
 no-spike-table
 == dv-3
 9.3.4
 ps: no probe/watch
 0
-ls: cannot access '/dev/duovol': No such file or directory
+ls: cannot access '/dev/sklad': No such file or directory
 no-spike-table
 ```
 
@@ -1883,14 +1886,14 @@ kc: no running node with a reachable API server among: dv-1 dv-2 dv-3
 
 ```bash
 limactl start --tty=false dv-2
-stand/spike/ctr.sh dv-2 "/opt/duovol/load-module.sh"
-vm dv-2 "mkdir -p /dev/duovol; f=/var/lib/rancher/duovol/volumes/spike2.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/duovol/spike2"
+stand/spike/ctr.sh dv-2 "/opt/sklad/load-module.sh"
+vm dv-2 "mkdir -p /dev/sklad; f=/var/lib/rancher/sklad/volumes/spike2.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/sklad/spike2"
 stand/spike/ctr.sh dv-2 "drbdadm up spike2; …опрос drbdsetup status…"
 ```
 
 ```text
 loaded drbd 9.3.4 for kernel 6.12.116+deb13-arm64
-/dev/loop0 /var/lib/rancher/duovol/volumes/spike2.img   1
+/dev/loop0 /var/lib/rancher/sklad/volumes/spike2.img   1
 22:32:52.201
 extent 255 beyond end of bitmap! (32768 >= 32768)
 extent 255 beyond end of bitmap! (32768 >= 32768)
@@ -1913,7 +1916,7 @@ up rc=0
 ```text
 == dv-2
 spike2 node-id:1 role:Secondary suspended:no force-io-failures:no
-  volume:0 minor:1001 disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no
+  volume:0 minor:1001 disk:UpToDate backing_dev:/dev/sklad/spike2 quorum:no
       open:no blocked:no
   lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
       ap-in-flight:0 rs-in-flight:0
@@ -2147,7 +2150,7 @@ DRBD на `dv-2` (22:42:26.464; снова `extent 255 beyond end of bitmap!` д
 
 ```text
 == dv-2
-  volume:0 minor:1001 disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no
+  volume:0 minor:1001 disk:UpToDate backing_dev:/dev/sklad/spike2 quorum:no
   lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
   lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
     volume:0 replication:Established peer-disk:Diskless peer-client:yes
@@ -2257,7 +2260,7 @@ stand/spike/ctr.sh dv-1 'drbdsetup help resource-options 2>&1 | grep -i -E -A3 "
 
 - Состоянию диска узла о самом себе верить нельзя: устаревшая копия после
   перезапуска пишет `disk:UpToDate` (`stale-diskful-no-quorum.json`, строка
-  `disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no` на `dv-2`). В
+  `disk:UpToDate backing_dev:/dev/sklad/spike2 quorum:no` на `dv-2`). В
   обоих прогонах `quorum:no` совпало с отказом `mount` и `drbdadm primary`.
   Обратное (`quorum:yes` на устаревшей копии означает, что открывать можно) не
   проверялось.
@@ -2618,7 +2621,7 @@ umount rc=0
 yes; }`:
 
 ```bash
-vm <узел> "sed -i 's/quorum majority; on-no-quorum io-error;/quorum off;/' /var/lib/rancher/duovol/res/spike.res"
+vm <узел> "sed -i 's/quorum majority; on-no-quorum io-error;/quorum off;/' /var/lib/rancher/sklad/res/spike.res"
 stand/spike/ctr.sh <узел> "drbdadm dump spike >/dev/null && echo dump ok; drbdadm adjust spike; echo adjust rc=\$?; drbdsetup show spike --show-defaults | grep -E '^\s+quorum|on-no-quorum'"
 ```
 
@@ -2786,7 +2789,7 @@ split-brain.
 exists resource name:spike role:Secondary suspended:no force-io-failures:no write-ordering:flush may_promote:yes promotion_score:10101
 exists connection name:spike peer-node-id:2 conn-name:lima-dv-3 connection:StandAlone role:Unknown congested:no ap-in-flight:0 rs-in-flight:0
 exists connection name:spike peer-node-id:1 conn-name:lima-dv-2 connection:StandAlone role:Unknown congested:no ap-in-flight:0 rs-in-flight:0
-exists device name:spike volume:0 minor:1000 backing_dev:/dev/duovol/spike disk:UpToDate client:no open:no quorum:yes size:1048476 read:1005 written:1336772 al-writes:5 bm-writes:20 upper-pending:0 lower-pending:0 al-suspended:no blocked:no
+exists device name:spike volume:0 minor:1000 backing_dev:/dev/sklad/spike disk:UpToDate client:no open:no quorum:yes size:1048476 read:1005 written:1336772 al-writes:5 bm-writes:20 upper-pending:0 lower-pending:0 al-suspended:no blocked:no
 exists peer-device name:spike peer-node-id:2 conn-name:lima-dv-3 volume:0 replication:Off peer-disk:DUnknown peer-client:no resync-suspended:no received:0 sent:0 out-of-sync:16504 pending:0 unacked:0
 exists path name:spike peer-node-id:2 conn-name:lima-dv-3 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.4:7000 established:no
 exists peer-device name:spike peer-node-id:1 conn-name:lima-dv-2 volume:0 replication:Off peer-disk:DUnknown peer-client:no resync-suspended:no received:0 sent:0 out-of-sync:16504 pending:0 unacked:0
@@ -2801,7 +2804,7 @@ exists -
 == dv-1
 spike node-id:0 role:Secondary suspended:no force-io-failures:no
     write-ordering:flush
-  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/duovol/spike quorum:yes
+  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/sklad/spike quorum:yes
       open:no
       size:1048476 read:1005 written:1336772 al-writes:5 bm-writes:20 upper-pending:0
       lower-pending:0 al-suspended:no blocked:no
@@ -2818,7 +2821,7 @@ spike node-id:0 role:Secondary suspended:no force-io-failures:no
 3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000:1:1:0:0:0:0:0:0:0:0:0:1:1
 == dv-2
 spike node-id:1 role:Secondary suspended:no force-io-failures:no
-  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/duovol/spike quorum:yes
+  volume:0 minor:1000 disk:UpToDate backing_dev:/dev/sklad/spike quorum:yes
   lima-dv-1 node-id:0 connection:StandAlone role:Unknown tls:no congested:no
     volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
         received:0 sent:0 out-of-sync:140 pending:0 unacked:0
@@ -3005,7 +3008,7 @@ split-brain в этом опыте не воспроизводился и не �
 stand/spike/clean.sh
 stand/check.sh
 kc get nodes --no-headers
-for n in dv-1 dv-2 dv-3; do vm $n "cat /sys/module/drbd/version; ps -eo pid,comm,args | grep -E '[p]robe\.sh|[w]atch\.sh' || echo no probe/watch; echo loops=\$(losetup -l -n | wc -l); ls /dev/duovol; nft list tables | grep spike || echo no-spike-table; findmnt /mnt/spike /mnt/spike2 || echo no-mounts"; stand/spike/ctr.sh $n "drbdsetup status"; done
+for n in dv-1 dv-2 dv-3; do vm $n "cat /sys/module/drbd/version; ps -eo pid,comm,args | grep -E '[p]robe\.sh|[w]atch\.sh' || echo no probe/watch; echo loops=\$(losetup -l -n | wc -l); ls /dev/sklad; nft list tables | grep spike || echo no-spike-table; findmnt /mnt/spike /mnt/spike2 || echo no-mounts"; stand/spike/ctr.sh $n "drbdsetup status"; done
 ```
 
 ```text
@@ -3018,7 +3021,7 @@ lima-dv-3   Ready   control-plane,etcd   93m   v1.37.2+k3s1
 9.3.4
 no probe/watch
 loops=0
-ls: cannot access '/dev/duovol': No such file or directory
+ls: cannot access '/dev/sklad': No such file or directory
 no-spike-table
 no-mounts
 # No currently configured DRBD found.

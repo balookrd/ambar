@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Installs a three-server k3s cluster on the stand, blacklists the in-tree drbd
-# module, imports the duovol-drbd image and starts the toolbox DaemonSet.
+# module, imports the sklad-drbd image and starts the toolbox DaemonSet.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-IMAGE="${IMAGE:-duovol-drbd:dev}"
+IMAGE="${IMAGE:-sklad-drbd:dev}"
 # k3s release installed on the nodes; get.k3s.io reads it as INSTALL_K3S_VERSION.
 K3S_VERSION="${K3S_VERSION:-v1.37.2+k3s1}"
 HERE="$(dirname "$0")"
@@ -12,7 +12,7 @@ first_ip="$(vm_ip dv-1)"
 
 for n in "${NODES[@]}"; do
     printf 'blacklist drbd\ninstall drbd /bin/false\n' \
-        | vm_put "$n" /etc/modprobe.d/duovol-blacklist-drbd.conf
+        | vm_put "$n" /etc/modprobe.d/sklad-blacklist-drbd.conf
     vm "$n" "command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl >/dev/null; }"
 done
 
@@ -39,9 +39,9 @@ done
 kc apply -f - < "$HERE/toolbox.yaml"
 # The image is imported under the same tag after a rebuild: restart the pods so
 # they run the new image.
-kc -n duovol-spike rollout restart ds/toolbox
-kc -n duovol-spike rollout status ds/toolbox --timeout=120s
+kc -n sklad-spike rollout restart ds/toolbox
+kc -n sklad-spike rollout status ds/toolbox --timeout=120s
 
 for n in "${NODES[@]}"; do
-    tb "$n" "/opt/duovol/load-module.sh"
+    tb "$n" "/opt/sklad/load-module.sh"
 done

@@ -1,8 +1,11 @@
-# Стенд duovol
+# Стенд sklad
 
 Три ВМ Lima (`dv-1`, `dv-2`, `dv-3`) с Debian 13 trixie arm64, ядром
 `6.12.116+deb13-arm64`, k3s из трёх server и привилегированным DaemonSet
-`toolbox` с образом `duovol-drbd` (модуль DRBD 9.3.4, `drbd-utils` 9.35.0).
+`toolbox` с образом `sklad-drbd` (модуль DRBD 9.3.4, `drbd-utils` 9.35.0).
+
+Префикс `dv` в именах ВМ — историческое сокращение прежнего названия проекта `duovol`; ВМ не переименованы, потому что для этого Lima-инстанс пришлось бы создавать заново.
+
 Стенд нужен для проверок из `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md`.
 
 ## Требования
@@ -19,7 +22,7 @@
 Команды выполняются из корня репозитория.
 
 1. Соберите образ: `image/build.sh`. Переменные: `KVER` (по умолчанию
-   `6.12.116+deb13-arm64`), `IMAGE` (по умолчанию `duovol-drbd:dev`).
+   `6.12.116+deb13-arm64`), `IMAGE` (по умолчанию `sklad-drbd:dev`).
 2. Создайте ВМ: `stand/up.sh`. Скрипт запускает ВМ, при несовпадении ядра ставит
    `linux-image-$KVER`, ставит `nftables` и вызывает `stand/check.sh`. Ожидаемый
    конец вывода: `OK: stand is up`.
@@ -38,7 +41,7 @@
 |---|---|---|
 | `NET_IF` | `eth0` | Интерфейс общей сети внутри ВМ; с него `vm_ip` берёт адрес узла |
 | `KVER` | `6.12.116+deb13-arm64` | Версия ядра, которую проверяют `up.sh` и `check.sh` |
-| `IMAGE` | `duovol-drbd:dev` | Образ, который `k3s.sh` импортирует в узлы |
+| `IMAGE` | `sklad-drbd:dev` | Образ, который `k3s.sh` импортирует в узлы |
 | `K3S_VERSION` | `v1.37.2+k3s1` | Версия k3s для `INSTALL_K3S_VERSION` |
 
 ## Работа со стендом
@@ -54,7 +57,7 @@
 После перезапуска ВМ модуль DRBD не загружен. Загрузите его:
 
 ```bash
-bash -c 'source stand/lib.sh; tb dv-2 "/opt/duovol/load-module.sh"'
+bash -c 'source stand/lib.sh; tb dv-2 "/opt/sklad/load-module.sh"'
 ```
 
 Ресурсы DRBD, loop-устройства и вспомогательные скрипты проверок удаляет

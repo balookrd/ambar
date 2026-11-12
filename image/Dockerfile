@@ -49,9 +49,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       kmod util-linux e2fsprogs libkeyutils1 \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=module /out/ /opt/duovol/modules/
+COPY --from=module /out/ /opt/sklad/modules/
 COPY --from=utils /stage/usr/sbin/drbdadm /stage/usr/sbin/drbdsetup \
      /stage/usr/sbin/drbdmeta /usr/sbin/
 COPY drbd.conf /etc/drbd.conf
-COPY --chmod=0755 load-module.sh /opt/duovol/load-module.sh
+COPY --chmod=0755 load-module.sh /opt/sklad/load-module.sh
 RUN mkdir -p /etc/drbd.d /var/lib/drbd /var/run/drbd

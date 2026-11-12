@@ -1,4 +1,4 @@
-# duovol, фаза 0: образ с DRBD 9 и стенд — план реализации
+# sklad, фаза 0: образ с DRBD 9 и стенд — план реализации
 
 > Статус документа: план — исторический журнал. Актуальный код лежит в
 > репозитории; отклонения проверок плана от выполненных описаны в
@@ -9,11 +9,11 @@
 
 **Цель:** собрать образ с модулем DRBD 9 и утилитами, поднять стенд из трёх ВМ с ядром узлов и закрыть шесть допущений из раздела «Что проверяется первым» спеки.
 
-**Архитектура:** образ `duovol-drbd` собирается многостадийным Dockerfile: модуль под заданную версию ядра, `drbd-utils` из исходников, итоговый слой на `debian:trixie-slim`. Стенд — три ВМ Lima на маке с тем же пакетом ядра Debian, что на узлах, и k3s из трёх server. Проверки выполняются из привилегированного пода `toolbox` с этим образом, поэтому тот же образ позже становится базой агента.
+**Архитектура:** образ `sklad-drbd` собирается многостадийным Dockerfile: модуль под заданную версию ядра, `drbd-utils` из исходников, итоговый слой на `debian:trixie-slim`. Стенд — три ВМ Lima на маке с тем же пакетом ядра Debian, что на узлах, и k3s из трёх server. Проверки выполняются из привилегированного пода `toolbox` с этим образом, поэтому тот же образ позже становится базой агента.
 
 **Стек:** Docker buildx, Lima (`vmType: vz`), Debian 13 trixie arm64, k3s, DRBD 9.3.4, drbd-utils 9.35.0, bash.
 
-**Спека:** `docs/superpowers/specs/2026-11-12-duovol-design.md`.
+**Спека:** `docs/superpowers/specs/2026-11-12-sklad-design.md`.
 
 **Что этот план не покрывает:** код агента на Rust (CRD, согласование, CSI), манифесты деплоя, сценарии отказов через Kubernetes, замер на R5C. Для них пишется отдельный план после этого: формат вывода `drbdsetup status --json`, выбор `on-no-quorum` и последовательность пропуска начальной синхронизации берутся из результатов задачи 4.
 
@@ -22,13 +22,13 @@
 - Версия ядра: `6.12.116+deb13-arm64`. Во всех скриптах — переменная `KVER` с этим значением по умолчанию.
 - DRBD: тег `drbd-9.3.4` (`https://github.com/LINBIT/drbd`). drbd-utils: тег `v9.35.0` (`https://github.com/LINBIT/drbd-utils`).
 - Сборка модуля — с `SPAAS=false`.
-- Модули в образе лежат в `/opt/duovol/modules/<версия ядра>/`.
+- Модули в образе лежат в `/opt/sklad/modules/<версия ядра>/`.
 - Модуль загружается с параметром `usermode_helper=disabled`.
-- Данные томов на узле: `/var/lib/rancher/duovol/volumes/<имя>.img`, loop с `--direct-io=on`.
+- Данные томов на узле: `/var/lib/rancher/sklad/volumes/<имя>.img`, loop с `--direct-io=on`.
 - Образ собирается с `--provenance=false --sbom=false`.
 - Комментарии в коде и сообщения коммитов — на английском. Документы в `docs/superpowers/**` — на русском.
 - `git commit` выполняется только по явной команде владельца; шаги «Коммит» в задачах ждут её. Трейлер `Co-Authored-By` и подписи об авторстве не добавлять. Работать в `main`, веток не создавать.
-- Все команды выполняются на маке из корня репозитория `~/IdeaProjects/duovol`, если в шаге не сказано иное. Shebang скриптов — `#!/usr/bin/env bash`.
+- Все команды выполняются на маке из корня репозитория `~/IdeaProjects/sklad`, если в шаге не сказано иное. Shebang скриптов — `#!/usr/bin/env bash`.
 
 ## Файлы
 
@@ -38,7 +38,7 @@
 | `image/Dockerfile` | три стадии: модуль, утилиты, итоговый образ |
 | `image/drbd.conf` | `/etc/drbd.conf` образа: без `usage-count`, подключает `*.res` |
 | `image/load-module.sh` | загрузка модуля по правилам спеки; прототип загрузчика агента |
-| `image/build.sh` | сборка образа `duovol-drbd:dev` |
+| `image/build.sh` | сборка образа `sklad-drbd:dev` |
 | `image/test.sh` | проверка образа без загрузки модуля |
 | `stand/lib.sh` | общие функции: `vm`, `vm_put`, `vm_ip`, `vm_host`, `kc`, `tb` |
 | `stand/lima/node.yaml` | шаблон ВМ |
@@ -53,14 +53,14 @@
 
 ---
 
-### Task 1: образ `duovol-drbd`
+### Task 1: образ `sklad-drbd`
 
 **Files:**
 - Create: `.gitignore`, `image/Dockerfile`, `image/drbd.conf`, `image/load-module.sh`, `image/build.sh`, `image/test.sh`
 
 **Interfaces:**
 - Consumes: ничего.
-- Produces: локальный образ `duovol-drbd:dev` (linux/arm64). В нём: `/opt/duovol/modules/$KVER/{drbd.ko,drbd_transport_tcp.ko}`, `/usr/sbin/{drbdadm,drbdsetup,drbdmeta}`, `/etc/drbd.conf`, `/opt/duovol/load-module.sh`, утилиты `losetup`, `mkfs.ext4`, `modprobe`, `insmod`. Скрипт `image/build.sh` принимает `KVER` из окружения.
+- Produces: локальный образ `sklad-drbd:dev` (linux/arm64). В нём: `/opt/sklad/modules/$KVER/{drbd.ko,drbd_transport_tcp.ko}`, `/usr/sbin/{drbdadm,drbdsetup,drbdmeta}`, `/etc/drbd.conf`, `/opt/sklad/load-module.sh`, утилиты `losetup`, `mkfs.ext4`, `modprobe`, `insmod`. Скрипт `image/build.sh` принимает `KVER` из окружения.
 
 - [ ] **Step 1: написать проверку образа**
 
@@ -68,23 +68,23 @@
 
 ```bash
 #!/usr/bin/env bash
-# Verifies the duovol-drbd image without loading the kernel module.
+# Verifies the sklad-drbd image without loading the kernel module.
 set -euo pipefail
 
 KVER="${KVER:-6.12.116+deb13-arm64}"
-IMAGE="${IMAGE:-duovol-drbd:dev}"
+IMAGE="${IMAGE:-sklad-drbd:dev}"
 
 run() { docker run --rm --platform linux/arm64 "$IMAGE" bash -c "$1"; }
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-vermagic="$(run "modinfo -F vermagic /opt/duovol/modules/$KVER/drbd.ko")"
+vermagic="$(run "modinfo -F vermagic /opt/sklad/modules/$KVER/drbd.ko")"
 [[ "$vermagic" == "$KVER SMP "* ]] || fail "drbd.ko vermagic: $vermagic"
 
-modver="$(run "modinfo -F version /opt/duovol/modules/$KVER/drbd.ko")"
+modver="$(run "modinfo -F version /opt/sklad/modules/$KVER/drbd.ko")"
 [[ "$modver" == 9.3.4 ]] || fail "drbd.ko version: $modver"
 
-run "test -f /opt/duovol/modules/$KVER/drbd_transport_tcp.ko" \
+run "test -f /opt/sklad/modules/$KVER/drbd_transport_tcp.ko" \
   || fail "drbd_transport_tcp.ko is missing"
 
 admver="$(run "drbdadm --version | sed -n 's/^DRBDADM_VERSION=//p'")"
@@ -92,7 +92,7 @@ admver="$(run "drbdadm --version | sed -n 's/^DRBDADM_VERSION=//p'")"
 
 run "grep -q 'usage-count no' /etc/drbd.conf" || fail "usage-count is not disabled"
 run "command -v losetup mkfs.ext4 modprobe insmod >/dev/null" || fail "host tools are missing"
-run "test -x /opt/duovol/load-module.sh" || fail "load-module.sh is missing"
+run "test -x /opt/sklad/load-module.sh" || fail "load-module.sh is missing"
 
 echo "OK: $IMAGE module $modver for $KVER, drbd-utils $admver"
 ```
@@ -103,12 +103,12 @@ echo "OK: $IMAGE module $modver for $KVER, drbd-utils $admver"
 chmod +x image/test.sh && image/test.sh
 ```
 
-Ожидается: ненулевой код возврата, в выводе `Unable to find image 'duovol-drbd:dev' locally`.
+Ожидается: ненулевой код возврата, в выводе `Unable to find image 'sklad-drbd:dev' locally`.
 
 - [ ] **Step 3: написать `image/drbd.conf`**
 
 ```
-# duovol: resources are generated per volume into /etc/drbd.d
+# sklad: resources are generated per volume into /etc/drbd.d
 global {
     usage-count no;
 }
@@ -123,7 +123,7 @@ include "/etc/drbd.d/*.res";
 # Refuses to continue when the in-tree DRBD 8.4 module is already loaded.
 set -euo pipefail
 
-MODULES_DIR="${MODULES_DIR:-/opt/duovol/modules}"
+MODULES_DIR="${MODULES_DIR:-/opt/sklad/modules}"
 
 if [[ -d /sys/module/drbd ]]; then
     loaded="$(cat /sys/module/drbd/version)"
@@ -201,11 +201,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       kmod util-linux e2fsprogs libkeyutils1 \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=module /out/ /opt/duovol/modules/
+COPY --from=module /out/ /opt/sklad/modules/
 COPY --from=utils /stage/usr/sbin/drbdadm /stage/usr/sbin/drbdsetup \
      /stage/usr/sbin/drbdmeta /usr/sbin/
 COPY drbd.conf /etc/drbd.conf
-COPY --chmod=0755 load-module.sh /opt/duovol/load-module.sh
+COPY --chmod=0755 load-module.sh /opt/sklad/load-module.sh
 RUN mkdir -p /etc/drbd.d /var/lib/drbd /var/run/drbd
 ```
 
@@ -215,11 +215,11 @@ RUN mkdir -p /etc/drbd.d /var/lib/drbd /var/run/drbd
 
 ```bash
 #!/usr/bin/env bash
-# Builds the duovol-drbd image for one kernel version.
+# Builds the sklad-drbd image for one kernel version.
 set -euo pipefail
 
 KVER="${KVER:-6.12.116+deb13-arm64}"
-IMAGE="${IMAGE:-duovol-drbd:dev}"
+IMAGE="${IMAGE:-sklad-drbd:dev}"
 cd "$(dirname "$0")"
 
 docker buildx build \
@@ -245,7 +245,7 @@ chmod +x image/build.sh image/load-module.sh && image/build.sh && image/test.sh
 ```
 
 Ожидается последняя строка:
-`OK: duovol-drbd:dev module 9.3.4 for 6.12.116+deb13-arm64, drbd-utils 9.35.0`
+`OK: sklad-drbd:dev module 9.3.4 for 6.12.116+deb13-arm64, drbd-utils 9.35.0`
 
 Если `apt-get` не находит `linux-headers-6.12.116+deb13-arm64`, пакет вытеснен из `trixie-security` более новой версией. Тогда в стадию `module` перед `apt-get update` добавляется источник `snapshot.debian.org` на дату, когда пакет был в архиве; `KVER` не менять, он должен совпадать с ядром узлов.
 
@@ -290,7 +290,7 @@ limactl --version
 
 ```bash
 #!/usr/bin/env bash
-# Shared helpers for the duovol test stand. Source this file.
+# Shared helpers for the sklad test stand. Source this file.
 set -euo pipefail
 
 NODES=(dv-1 dv-2 dv-3)
@@ -399,7 +399,7 @@ for n in "${NODES[@]}"; do
         apt-get update -qq
         apt-get install -y -qq linux-image-$KVER nftables
         mkdir -p /etc/default/grub.d
-        cat > /etc/default/grub.d/99-duovol.cfg <<EOF
+        cat > /etc/default/grub.d/99-sklad.cfg <<EOF
 GRUB_DEFAULT='Advanced options for Debian GNU/Linux>Debian GNU/Linux, with Linux $KVER'
 EOF
         update-grub"
@@ -457,11 +457,11 @@ git commit -m "feat(stand): three Lima VMs on the node kernel"
 - Modify: `stand/lib.sh` (добавить `kc` и `tb`)
 
 **Interfaces:**
-- Consumes: `duovol-drbd:dev` (задача 1); `vm`, `vm_put`, `vm_ip`, `vm_host`, `NODES` (задача 2).
-- Produces: кластер k3s из трёх server на стенде; DaemonSet `toolbox` в namespace `duovol-spike`; на каждом узле загружен модуль DRBD 9. Функции:
+- Consumes: `sklad-drbd:dev` (задача 1); `vm`, `vm_put`, `vm_ip`, `vm_host`, `NODES` (задача 2).
+- Produces: кластер k3s из трёх server на стенде; DaemonSet `toolbox` в namespace `sklad-spike`; на каждом узле загружен модуль DRBD 9. Функции:
   - `kc <аргументы kubectl...>` — `kubectl` на `dv-1`;
   - `tb <узел> <команда...>` — выполнить команду в поде `toolbox` этого узла.
-  Каталоги узла: `/var/lib/rancher/duovol/volumes` (файлы томов), `/var/lib/rancher/duovol/res` (смонтирован в под как `/etc/drbd.d`).
+  Каталоги узла: `/var/lib/rancher/sklad/volumes` (файлы томов), `/var/lib/rancher/sklad/res` (смонтирован в под как `/etc/drbd.d`).
 
 - [ ] **Step 1: добавить `kc` и `tb` в конец `stand/lib.sh`**
 
@@ -476,9 +476,9 @@ tb() {
     local node="$1"; shift
     local host pod
     host="$(vm_host "$node")"
-    pod="$(kc -n duovol-spike get pod -l app=toolbox \
+    pod="$(kc -n sklad-spike get pod -l app=toolbox \
         --field-selector "spec.nodeName=$host" -o name)"
-    kc -n duovol-spike exec "$pod" -- bash -c "$*"
+    kc -n sklad-spike exec "$pod" -- bash -c "$*"
 }
 ```
 
@@ -488,13 +488,13 @@ tb() {
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: duovol-spike
+  name: sklad-spike
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: toolbox
-  namespace: duovol-spike
+  namespace: sklad-spike
 spec:
   selector:
     matchLabels: {app: toolbox}
@@ -507,7 +507,7 @@ spec:
         - operator: Exists
       containers:
         - name: toolbox
-          image: duovol-drbd:dev
+          image: sklad-drbd:dev
           imagePullPolicy: Never
           command: ["sleep", "infinity"]
           securityContext:
@@ -516,16 +516,16 @@ spec:
             - {name: dev, mountPath: /dev}
             - {name: modules, mountPath: /lib/modules, readOnly: true}
             - {name: res, mountPath: /etc/drbd.d}
-            - {name: volumes, mountPath: /var/lib/rancher/duovol/volumes}
+            - {name: volumes, mountPath: /var/lib/rancher/sklad/volumes}
       volumes:
         - name: dev
           hostPath: {path: /dev}
         - name: modules
           hostPath: {path: /lib/modules}
         - name: res
-          hostPath: {path: /var/lib/rancher/duovol/res, type: DirectoryOrCreate}
+          hostPath: {path: /var/lib/rancher/sklad/res, type: DirectoryOrCreate}
         - name: volumes
-          hostPath: {path: /var/lib/rancher/duovol/volumes, type: DirectoryOrCreate}
+          hostPath: {path: /var/lib/rancher/sklad/volumes, type: DirectoryOrCreate}
 ```
 
 - [ ] **Step 3: написать `stand/k3s.sh`**
@@ -533,17 +533,17 @@ spec:
 ```bash
 #!/usr/bin/env bash
 # Installs a three-server k3s cluster on the stand, blacklists the in-tree drbd
-# module, imports the duovol-drbd image and starts the toolbox DaemonSet.
+# module, imports the sklad-drbd image and starts the toolbox DaemonSet.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-IMAGE="${IMAGE:-duovol-drbd:dev}"
+IMAGE="${IMAGE:-sklad-drbd:dev}"
 HERE="$(dirname "$0")"
 
 first_ip="$(vm_ip dv-1)"
 
 for n in "${NODES[@]}"; do
     printf 'blacklist drbd\ninstall drbd /bin/false\n' \
-        | vm_put "$n" /etc/modprobe.d/duovol-blacklist-drbd.conf
+        | vm_put "$n" /etc/modprobe.d/sklad-blacklist-drbd.conf
     vm "$n" "apt-get install -y -qq curl >/dev/null"
 done
 
@@ -568,10 +568,10 @@ for n in "${NODES[@]}"; do
 done
 
 kc apply -f - < "$HERE/toolbox.yaml"
-kc -n duovol-spike rollout status ds/toolbox --timeout=120s
+kc -n sklad-spike rollout status ds/toolbox --timeout=120s
 
 for n in "${NODES[@]}"; do
-    tb "$n" "/opt/duovol/load-module.sh"
+    tb "$n" "/opt/sklad/load-module.sh"
 done
 ```
 
@@ -599,7 +599,7 @@ source stand/lib.sh && for n in "${NODES[@]}"; do tb "$n" "cat /sys/module/drbd/
 source stand/lib.sh
 tb dv-3 "rmmod drbd_transport_tcp drbd"
 vm dv-3 "modprobe --ignore-install drbd && cat /sys/module/drbd/version"
-tb dv-3 "/opt/duovol/load-module.sh"; echo "rc=$?"
+tb dv-3 "/opt/sklad/load-module.sh"; echo "rc=$?"
 ```
 
 Ожидается: версия `8.4.`…, затем `in-tree drbd 8.4 is loaded (version 8.4.…)` и `rc=1`.
@@ -607,7 +607,7 @@ tb dv-3 "/opt/duovol/load-module.sh"; echo "rc=$?"
 Вернуть узел в рабочее состояние:
 
 ```bash
-vm dv-3 "rmmod drbd" && tb dv-3 "/opt/duovol/load-module.sh"
+vm dv-3 "rmmod drbd" && tb dv-3 "/opt/sklad/load-module.sh"
 ```
 
 Ожидается: `loaded drbd 9.3.4 for kernel 6.12.116+deb13-arm64`.
@@ -643,15 +643,15 @@ source "$(dirname "$0")/../lib.sh"
 
 name="$1"; minor="$2"; port="$3"; diskless="${4:--}"; on_no_quorum="${5:-io-error}"
 size="1G"
-vol_dir=/var/lib/rancher/duovol/volumes
-res_dir=/var/lib/rancher/duovol/res
+vol_dir=/var/lib/rancher/sklad/volumes
+res_dir=/var/lib/rancher/sklad/res
 
 on_block() {
     local node="$1" id="$2" disk_line
     if [[ "$node" == "$diskless" ]]; then
         disk_line="disk none;"
     else
-        disk_line="disk /dev/duovol/$name; meta-disk internal;"
+        disk_line="disk /dev/sklad/$name; meta-disk internal;"
     fi
     cat <<EOF
     on $(vm_host "$node") {
@@ -675,14 +675,14 @@ EOF
 )"
 
 for n in "${NODES[@]}"; do
-    vm "$n" "mkdir -p $vol_dir $res_dir /dev/duovol"
+    vm "$n" "mkdir -p $vol_dir $res_dir /dev/sklad"
     printf '%s\n' "$res" | vm_put "$n" "$res_dir/$name.res"
     if [[ "$n" != "$diskless" ]]; then
         vm "$n" "f=$vol_dir/$name.img
             test -f \$f || truncate -s $size \$f
             dev=\$(losetup -j \$f | cut -d: -f1)
             test -n \"\$dev\" || dev=\$(losetup --find --show --direct-io=on \$f)
-            ln -sfn \$dev /dev/duovol/$name"
+            ln -sfn \$dev /dev/sklad/$name"
         tb "$n" "drbdadm create-md --force $name"
     fi
     tb "$n" "drbdadm up $name"
@@ -725,7 +725,7 @@ done
 Стенд: три ВМ Lima на маке, Debian 13 trixie arm64, ядро
 `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0. Каждое допущение взято
 из раздела «Что проверяется первым» спеки
-`2026-11-12-duovol-design.md`.
+`2026-11-12-sklad-design.md`.
 
 ## Окружение
 
@@ -872,7 +872,7 @@ vm dv-2 "umount /mnt/spike"
 
 ```bash
 for n in "${NODES[@]}"; do
-  vm "$n" "sed -i 's/on-no-quorum io-error/on-no-quorum suspend-io/' /var/lib/rancher/duovol/res/spike.res"
+  vm "$n" "sed -i 's/on-no-quorum io-error/on-no-quorum suspend-io/' /var/lib/rancher/sklad/res/spike.res"
   tb "$n" "drbdadm adjust spike"
 done
 tb dv-1 "drbdsetup show spike | grep on-no-quorum"
@@ -933,9 +933,9 @@ tb dv-3 "drbdadm status spike2"
 limactl start --tty=false dv-2
 source stand/lib.sh
 kc wait --for=condition=Ready node --all --timeout=180s
-kc -n duovol-spike rollout status ds/toolbox --timeout=120s
-tb dv-2 "/opt/duovol/load-module.sh"
-vm dv-2 "mkdir -p /dev/duovol; for r in spike spike2; do f=/var/lib/rancher/duovol/volumes/\$r.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/duovol/\$r; done"
+kc -n sklad-spike rollout status ds/toolbox --timeout=120s
+tb dv-2 "/opt/sklad/load-module.sh"
+vm dv-2 "mkdir -p /dev/sklad; for r in spike spike2; do f=/var/lib/rancher/sklad/volumes/\$r.img; ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/sklad/\$r; done"
 tb dv-2 "drbdadm up spike; drbdadm up spike2" && sleep 10 && tb dv-2 "drbdadm status"
 ```
 
@@ -968,13 +968,13 @@ vm dv-1 "chmod +x /usr/local/bin/fsync-bench.sh; mkdir -p /var/tmp/local; mount 
 - [ ] **Step 10: заполнить результаты и сверить спеку**
 
 1. Заполнить таблицы «Окружение» и «Итог по допущениям» в `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md`. В файле не должно остаться пустых ячеек.
-2. Для каждой строки с непустым столбцом «Что меняется в спеке» внести правку в `docs/superpowers/specs/2026-11-12-duovol-design.md`: раздел «Параметры ресурса DRBD» (выбор `on-no-quorum`), «Создание» (последовательность пропуска синхронизации), таблица `StorageClass` (ограничение `replicas: 2`, если оно появилось).
+2. Для каждой строки с непустым столбцом «Что меняется в спеке» внести правку в `docs/superpowers/specs/2026-11-12-sklad-design.md`: раздел «Параметры ресурса DRBD» (выбор `on-no-quorum`), «Создание» (последовательность пропуска синхронизации), таблица `StorageClass` (ограничение `replicas: 2`, если оно появилось).
 3. Удалить из спеки пометки `[проверить на стенде: …]`, закрытые этим планом. Пометка про минимальную версию `drbd-utils` заменяется фактом: «проверено с 9.35.0».
 
 Проверка:
 
 ```bash
-grep -n "| |" docs/superpowers/specs/2026-11-12-drbd9-spike-results.md; grep -n "проверить на стенде" docs/superpowers/specs/2026-11-12-duovol-design.md
+grep -n "| |" docs/superpowers/specs/2026-11-12-drbd9-spike-results.md; grep -n "проверить на стенде" docs/superpowers/specs/2026-11-12-sklad-design.md
 ```
 
 Ожидается: пустой вывод обеих команд.
@@ -997,7 +997,7 @@ stand/down.sh
 ```
 
 ```bash
-docker image rm duovol-drbd:dev
+docker image rm sklad-drbd:dev
 ```
 
 `brew uninstall lima` удаляет Lima, если она ставилась только ради стенда.

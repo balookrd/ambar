@@ -5,8 +5,8 @@ set -euo pipefail
 source "$(dirname "$0")/../lib.sh"
 
 RESOURCES=(spike spike2)
-vol_dir=/var/lib/rancher/duovol/volumes
-res_dir=/var/lib/rancher/duovol/res
+vol_dir=/var/lib/rancher/sklad/volumes
+res_dir=/var/lib/rancher/sklad/res
 
 for n in "${NODES[@]}"; do
     echo "== $n"
@@ -23,9 +23,9 @@ for n in "${NODES[@]}"; do
     vm "$n" "for r in ${RESOURCES[*]}; do
             f=$vol_dir/\$r.img
             for d in \$(losetup -j \$f 2>/dev/null | cut -d: -f1); do losetup -d \$d; done
-            rm -f /dev/duovol/\$r \$f $res_dir/\$r.res
+            rm -f /dev/sklad/\$r \$f $res_dir/\$r.res
         done
-        rmdir /dev/duovol 2>/dev/null || true
+        rmdir /dev/sklad 2>/dev/null || true
         if nft list table inet spike >/dev/null 2>&1; then nft delete table inet spike; fi
         rm -f /usr/local/bin/probe.sh /usr/local/bin/watch.sh /usr/local/bin/fsync-bench.sh
         rm -rf /var/tmp/acked /var/tmp/acked2 /var/tmp/probe.log /var/tmp/probe2.log \

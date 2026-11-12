@@ -26,7 +26,7 @@ for n in "${NODES[@]}"; do
         apt-get install -y -qq linux-image-$KVER \
             || { echo \"FAIL: cannot install package linux-image-$KVER (KVER=$KVER): not in the apt archive; pin an older image in stand/lima/node.yaml\" >&2; exit 1; }
         mkdir -p /etc/default/grub.d
-        cat > /etc/default/grub.d/99-duovol.cfg <<EOF
+        cat > /etc/default/grub.d/99-sklad.cfg <<EOF
 GRUB_DEFAULT='Advanced options for Debian GNU/Linux>Debian GNU/Linux, with Linux $KVER'
 EOF
         update-grub"
