@@ -4,6 +4,8 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 IMAGE="${IMAGE:-duovol-drbd:dev}"
+# k3s release installed on the nodes; get.k3s.io reads it as INSTALL_K3S_VERSION.
+K3S_VERSION="${K3S_VERSION:-v1.37.2+k3s1}"
 HERE="$(dirname "$0")"
 
 first_ip="$(vm_ip dv-1)"
@@ -15,14 +17,14 @@ for n in "${NODES[@]}"; do
 done
 
 if ! vm dv-1 "test -x /usr/local/bin/k3s"; then
-    vm dv-1 "curl -sfL https://get.k3s.io | sh -s - server --cluster-init \
+    vm dv-1 "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - server --cluster-init \
         --node-ip $first_ip --disable=traefik --disable=servicelb"
 fi
 token="$(vm dv-1 "cat /var/lib/rancher/k3s/server/node-token")"
 
 for n in dv-2 dv-3; do
     if ! vm "$n" "test -x /usr/local/bin/k3s"; then
-        vm "$n" "curl -sfL https://get.k3s.io | K3S_TOKEN='$token' sh -s - server \
+        vm "$n" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN='$token' sh -s - server \
             --server https://$first_ip:6443 --node-ip $(vm_ip "$n") \
             --disable=traefik --disable=servicelb"
     fi
@@ -35,6 +37,9 @@ for n in "${NODES[@]}"; do
 done
 
 kc apply -f - < "$HERE/toolbox.yaml"
+# The image is imported under the same tag after a rebuild: restart the pods so
+# they run the new image.
+kc -n duovol-spike rollout restart ds/toolbox
 kc -n duovol-spike rollout status ds/toolbox --timeout=120s
 
 for n in "${NODES[@]}"; do

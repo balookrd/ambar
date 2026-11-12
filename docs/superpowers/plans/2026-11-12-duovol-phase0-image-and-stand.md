@@ -1,5 +1,10 @@
 # duovol, фаза 0: образ с DRBD 9 и стенд — план реализации
 
+> Статус документа: план — исторический журнал. Актуальный код лежит в
+> репозитории; отклонения проверок плана от выполненных описаны в
+> `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md`, раздел
+> «Отклонения от брифа».
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Цель:** собрать образ с модулем DRBD 9 и утилитами, поднять стенд из трёх ВМ с ядром узлов и закрыть шесть допущений из раздела «Что проверяется первым» спеки.

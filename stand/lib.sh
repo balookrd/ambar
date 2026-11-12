@@ -37,9 +37,30 @@ vm_host() {
     limactl shell --workdir / "$1" uname -n
 }
 
-# kc <kubectl args...>: kubectl against the stand cluster.
+# kc_node: first node of NODES that Lima reports as Running and whose
+# Kubernetes API answers. stdin is closed for the probes so they cannot consume
+# the input of the kubectl call that follows.
+kc_node() {
+    local n status
+    for n in "${NODES[@]}"; do
+        status="$(limactl list --format '{{.Status}}' "$n" 2>/dev/null </dev/null)" || continue
+        [[ "$status" == "Running" ]] || continue
+        if limactl shell --workdir / "$n" sudo timeout 5 k3s kubectl get --raw /readyz \
+            >/dev/null 2>&1 </dev/null; then
+            printf '%s\n' "$n"
+            return 0
+        fi
+    done
+    echo "kc: no running node with a reachable API server among: ${NODES[*]}" >&2
+    return 1
+}
+
+# kc <kubectl args...>: kubectl against the stand cluster, run on the first
+# running node so it keeps working while dv-1 is stopped.
 kc() {
-    limactl shell --workdir / dv-1 sudo k3s kubectl "$@"
+    local node
+    node="$(kc_node)" || return 1
+    limactl shell --workdir / "$node" sudo k3s kubectl "$@"
 }
 
 # tb <node> <command...>: run a command in the toolbox pod of that node.
