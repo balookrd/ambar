@@ -79,4 +79,4 @@ Docker, ни ядро Linux.
 
 ## Лицензия
 
-Лицензия пока не выбрана.
+Apache License 2.0, текст в файле [LICENSE](LICENSE).

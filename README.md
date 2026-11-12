@@ -80,4 +80,4 @@ Bringing up the stand is described in `stand/README.md`.
 
 ## License
 
-No license has been chosen yet.
+Apache License 2.0, see [LICENSE](LICENSE).
