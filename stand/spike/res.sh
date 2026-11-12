@@ -6,15 +6,15 @@ source "$(dirname "$0")/../lib.sh"
 
 name="$1"; minor="$2"; port="$3"; diskless="${4:--}"; on_no_quorum="${5:-io-error}"
 size="1G"
-vol_dir=/var/lib/rancher/sklad/volumes
-res_dir=/var/lib/rancher/sklad/res
+vol_dir=/var/lib/rancher/ambar/volumes
+res_dir=/var/lib/rancher/ambar/res
 
 on_block() {
     local node="$1" id="$2" disk_line
     if [[ "$node" == "$diskless" ]]; then
         disk_line="disk none;"
     else
-        disk_line="disk /dev/sklad/$name; meta-disk internal;"
+        disk_line="disk /dev/ambar/$name; meta-disk internal;"
     fi
     cat <<EOF
     on $(vm_host "$node") {
@@ -38,14 +38,14 @@ EOF
 )"
 
 for n in "${NODES[@]}"; do
-    vm "$n" "mkdir -p $vol_dir $res_dir /dev/sklad"
+    vm "$n" "mkdir -p $vol_dir $res_dir /dev/ambar"
     printf '%s\n' "$res" | vm_put "$n" "$res_dir/$name.res"
     if [[ "$n" != "$diskless" ]]; then
         vm "$n" "f=$vol_dir/$name.img
             test -f \$f || truncate -s $size \$f
             dev=\$(losetup -j \$f | cut -d: -f1)
             test -n \"\$dev\" || dev=\$(losetup --find --show --direct-io=on \$f)
-            ln -sfn \$dev /dev/sklad/$name"
+            ln -sfn \$dev /dev/ambar/$name"
         tb "$n" "drbdadm create-md --force $name"
     fi
     tb "$n" "drbdadm up $name"

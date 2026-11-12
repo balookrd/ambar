@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the sklad test stand. Source this file.
+# Shared helpers for the ambar test stand. Source this file.
 set -euo pipefail
 
 NODES=(dv-1 dv-2 dv-3)
@@ -70,7 +70,7 @@ tb() {
     local node="$1"; shift
     local host pod
     host="$(vm_host "$node")"
-    pod="$(kc -n sklad-spike get pod -l app=toolbox \
+    pod="$(kc -n ambar-spike get pod -l app=toolbox \
         --field-selector "spec.nodeName=$host,status.phase=Running" \
         -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' \
         | head -n1)"
@@ -78,5 +78,5 @@ tb() {
         echo "tb: no running toolbox pod on $node" >&2
         return 1
     fi
-    kc -n sklad-spike exec "$pod" -- bash -c "$*"
+    kc -n ambar-spike exec "$pod" -- bash -c "$*"
 }

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Builds the sklad-drbd image for one kernel version.
+# Builds the ambar-drbd image for one kernel version.
 set -euo pipefail
 
 KVER="${KVER:-6.12.116+deb13-arm64}"
-IMAGE="${IMAGE:-sklad-drbd:dev}"
+IMAGE="${IMAGE:-ambar-drbd:dev}"
 cd "$(dirname "$0")"
 
 docker buildx build \
