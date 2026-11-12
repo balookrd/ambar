@@ -6,7 +6,8 @@ set -uo pipefail
 
 ack="$1"
 while :; do
-    pid="$(pgrep -f probe.sh | head -n1)"
+    # Anchored: an unanchored pattern also matches "sudo bash -c ... probe.sh ..." wrappers.
+    pid="$(pgrep -f '^bash /usr/local/bin/probe.sh' | head -n1)"
     if [[ -n "$pid" ]]; then
         st="$(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null)"
         probe="alive:${st:-?}"

@@ -10,9 +10,9 @@ res_dir=/var/lib/rancher/duovol/res
 
 for n in "${NODES[@]}"; do
     echo "== $n"
-    # Patterns are anchored so they never match this wrapper's own command line.
-    vm "$n" "pkill -f '^bash /usr/local/bin/probe.sh' || true
-        pkill -x watch.sh || true
+    # Both scripts run as 'bash <script>' (comm is bash), so match the anchored
+    # command line; the anchor keeps this wrapper's own command line out.
+    vm "$n" "pkill -f '^bash /usr/local/bin/(probe|watch)\\.sh' || true
         for m in /mnt/spike /mnt/spike2; do
             if mountpoint -q \$m; then umount \$m; fi
             rmdir \$m 2>/dev/null || true
@@ -31,5 +31,6 @@ for n in "${NODES[@]}"; do
         rm -rf /var/tmp/acked /var/tmp/acked2 /var/tmp/probe.log /var/tmp/probe2.log \
             /var/tmp/watch.log /var/tmp/watch2.log /var/tmp/local"
     tb "$n" "drbdsetup status"
-    vm "$n" "losetup -l; ls -A $vol_dir $res_dir; nft list tables | grep -c 'inet spike' || true"
+    vm "$n" "losetup -l; ls -A $vol_dir $res_dir; nft list tables | grep -c 'inet spike' || true
+        ps -eo pid,comm,args | grep -E '[p]robe\\.sh|[w]atch\\.sh' || echo 'no probe/watch processes'"
 done
