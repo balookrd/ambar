@@ -1,10 +1,14 @@
 # Debian 13 "generic" image: ships cloud-init and the linux-image-arm64 flavour,
 # the same kernel flavour as on the k3s nodes ("genericcloud" uses a different one).
+# Pinned to a dated build (the one "latest" pointed to on 2026-11-12): old point
+# versions of linux-image are dropped from the archive, so "latest" may stop
+# matching KVER.
 vmType: vz
 arch: aarch64
 images:
-  - location: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-arm64.qcow2"
+  - location: "https://cloud.debian.org/images/cloud/trixie/20261111-2659/debian-13-generic-arm64-20261111-2659.qcow2"
     arch: aarch64
+    digest: "sha512:45a3ed38b6946500187e037259c6ae4d62ab0314b42ddbc5a340168fc5a2165ff79d780876e1748fa302697ba9ad3d3db133006413097c5127b2ee61bb787a27"
 cpus: 2
 memory: "3GiB"
 disk: "20GiB"

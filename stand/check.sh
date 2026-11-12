@@ -6,6 +6,8 @@ source "$(dirname "$0")/lib.sh"
 for n in "${NODES[@]}"; do
     k="$(limactl shell --workdir / "$n" uname -r)"
     [[ "$k" == "$KVER" ]] || { echo "FAIL: $n runs $k, want $KVER" >&2; exit 1; }
+    nftv="$(vm "$n" "nft --version")" || { echo "FAIL: nft does not work in $n" >&2; exit 1; }
+    echo "$n: $nftv"
     echo "$n: kernel $k, host $(vm_host "$n"), ip $(vm_ip "$n")"
 done
 
