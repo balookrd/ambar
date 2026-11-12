@@ -1,0 +1,16 @@
+# Debian 13 "generic" image: ships cloud-init and the linux-image-arm64 flavour,
+# the same kernel flavour as on the k3s nodes ("genericcloud" uses a different one).
+vmType: vz
+arch: aarch64
+images:
+  - location: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-arm64.qcow2"
+    arch: aarch64
+cpus: 2
+memory: "3GiB"
+disk: "20GiB"
+mounts: []
+containerd:
+  system: false
+  user: false
+networks:
+  - lima: user-v2
