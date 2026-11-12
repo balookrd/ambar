@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: duovol-spike
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: toolbox
+  namespace: duovol-spike
+spec:
+  selector:
+    matchLabels: {app: toolbox}
+  template:
+    metadata:
+      labels: {app: toolbox}
+    spec:
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: toolbox
+          image: duovol-drbd:dev
+          imagePullPolicy: Never
+          command: ["sleep", "infinity"]
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - {name: dev, mountPath: /dev}
+            - {name: modules, mountPath: /lib/modules, readOnly: true}
+            - {name: res, mountPath: /etc/drbd.d}
+            - {name: volumes, mountPath: /var/lib/rancher/duovol/volumes}
+      volumes:
+        - name: dev
+          hostPath: {path: /dev}
+        - name: modules
+          hostPath: {path: /lib/modules}
+        - name: res
+          hostPath: {path: /var/lib/rancher/duovol/res, type: DirectoryOrCreate}
+        - name: volumes
+          hostPath: {path: /var/lib/rancher/duovol/volumes, type: DirectoryOrCreate}

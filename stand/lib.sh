@@ -36,3 +36,26 @@ vm_ip() {
 vm_host() {
     limactl shell --workdir / "$1" uname -n
 }
+
+# kc <kubectl args...>: kubectl against the stand cluster.
+kc() {
+    limactl shell --workdir / dv-1 sudo k3s kubectl "$@"
+}
+
+# tb <node> <command...>: run a command in the toolbox pod of that node.
+# Picks the single Running pod without deletionTimestamp, so it also works
+# while a DaemonSet rollout leaves the old pod Terminating.
+tb() {
+    local node="$1"; shift
+    local host pod
+    host="$(vm_host "$node")"
+    pod="$(kc -n duovol-spike get pod -l app=toolbox \
+        --field-selector "spec.nodeName=$host,status.phase=Running" \
+        -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' \
+        | head -n1)"
+    if [[ -z "$pod" ]]; then
+        echo "tb: no running toolbox pod on $node" >&2
+        return 1
+    fi
+    kc -n duovol-spike exec "$pod" -- bash -c "$*"
+}
