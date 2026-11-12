@@ -20,8 +20,16 @@ vm_put() {
 
 # vm_ip <node>: IPv4 address on the shared network.
 vm_ip() {
-    limactl shell --workdir / "$1" ip -4 -o addr show dev "$NET_IF" \
-        | awk '{print $4}' | cut -d/ -f1
+    local ip
+    ip="$(limactl shell --workdir / "$1" ip -4 -o addr show dev "$NET_IF" \
+        | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+    # The address is interpolated into shell command strings by callers:
+    # accept nothing but a dotted quad.
+    if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        echo "vm_ip: $1 has no IPv4 address on $NET_IF (got '$ip')" >&2
+        return 1
+    fi
+    printf '%s\n' "$ip"
 }
 
 # vm_host <node>: hostname as DRBD sees it.
