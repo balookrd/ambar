@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: sklad-spike
+  name: ambar-spike
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: toolbox
-  namespace: sklad-spike
+  namespace: ambar-spike
 spec:
   selector:
     matchLabels: {app: toolbox}
@@ -20,7 +20,7 @@ spec:
         - operator: Exists
       containers:
         - name: toolbox
-          image: sklad-drbd:dev
+          image: ambar-drbd:dev
           imagePullPolicy: Never
           command: ["sleep", "infinity"]
           securityContext:
@@ -29,13 +29,13 @@ spec:
             - {name: dev, mountPath: /dev}
             - {name: modules, mountPath: /lib/modules, readOnly: true}
             - {name: res, mountPath: /etc/drbd.d}
-            - {name: volumes, mountPath: /var/lib/rancher/sklad/volumes}
+            - {name: volumes, mountPath: /var/lib/rancher/ambar/volumes}
       volumes:
         - name: dev
           hostPath: {path: /dev}
         - name: modules
           hostPath: {path: /lib/modules}
         - name: res
-          hostPath: {path: /var/lib/rancher/sklad/res, type: DirectoryOrCreate}
+          hostPath: {path: /var/lib/rancher/ambar/res, type: DirectoryOrCreate}
         - name: volumes
-          hostPath: {path: /var/lib/rancher/sklad/volumes, type: DirectoryOrCreate}
+          hostPath: {path: /var/lib/rancher/ambar/volumes, type: DirectoryOrCreate}

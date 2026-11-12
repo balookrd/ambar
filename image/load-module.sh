@@ -3,7 +3,7 @@
 # Refuses to continue when the in-tree DRBD 8.4 module is already loaded.
 set -euo pipefail
 
-MODULES_DIR="${MODULES_DIR:-/opt/sklad/modules}"
+MODULES_DIR="${MODULES_DIR:-/opt/ambar/modules}"
 SYS_MODULE_DIR="${SYS_MODULE_DIR:-/sys/module}"
 
 kver="$(uname -r)"
