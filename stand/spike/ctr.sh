@@ -8,7 +8,7 @@ set -euo pipefail
 source "$(dirname "$0")/../lib.sh"
 
 node="$1"; shift
-id="$(vm "$node" "k3s crictl ps --name toolbox --state running -q" </dev/null | head -n1)"
+id="$(vm "$node" "k3s crictl ps --name toolbox --state running -q" </dev/null | sed -n 1p)"
 if [[ -z "$id" ]]; then
     echo "ctr: no running toolbox container on $node" >&2
     exit 1

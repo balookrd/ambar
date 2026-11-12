@@ -23,7 +23,7 @@
 | 1 | Модуль 9.3.4 загружается с `usermode_helper=disabled` | подтверждено предыдущей задачей: модуль 9.3.4 загружен на трёх узлах, `/sys/module/drbd/parameters/usermode_helper` = `disabled`, в `dmesg` только предупреждения о модуле вне дерева ядра и без подписи; после перезапуска `dv-2` `load-module.sh` загрузил его снова (шаг 8) | ничего |
 | 2 | Ресурс из трёх сторон поверх loop с `--direct-io=on` поднимается | подтверждено: `res.sh` без правок, `DIO` = `1` на трёх узлах, три стороны `Connected`; досылки после изоляции и остановки узла идут по битовой карте (32 КиБ; 16668 КиБ за ~30 с под нагрузкой писателя; 16520 КиБ за 1 с без нагрузки, E2) | «Поведение при отказах», строка «Узел вернулся»: последовательность состояний диска по каждому наблюдавшемуся случаю (шаги 6, 8, E1, E2) |
 | 3 | Начальная синхронизация пропускается через `new-current-uuid --clear-bitmap` | подтверждено: одна команда `drbdadm new-current-uuid --clear-bitmap <имя>/0` на `dv-1` после соединения всех сторон перевела все копии в `UpToDate` за < 4 с без досылки; так же для ресурса со стороной без диска | «Создание (`CreateVolume`)»: пометка `[проверить на стенде: …]` заменена наблюдаемой последовательностью |
-| 4 | Сторона без диска участвует в кворуме и открывает устройство на запись | подтверждено: `dv-3` без диска в роли `Primary` пишет; при штатной остановке `dv-2` (шаг 8) и при принудительной (`limactl stop --force`, E2) кворум не потерян (`dv-3` + `dv-1`; на `dv-1` — `Would lose quorum, but using tiebreaker logic to keep`), запись стоит 4.6–5.6 с (5.1 с между выборками в обоих опытах) до `PingAck did not arrive in time` и продолжается; по одному прогону на каждый вид остановки | «Поведение при отказах», строка «Упал узел без пода»: пауза записи, вид остановки, сообщение о tiebreaker |
+| 4 | Сторона без диска участвует в кворуме и открывает устройство на запись | подтверждено для стороны, у которой кворум уже был: `dv-3` без диска в роли `Primary` пишет; при штатной остановке `dv-2` (шаг 8) и при принудительной (`limactl stop --force`, E2) кворум не потерян (`dv-3` + `dv-1`; на `dv-1` — `Would lose quorum, but using tiebreaker logic to keep`), запись стоит 4.6–5.6 с (5.1 с между выборками в обоих опытах) до `PingAck did not arrive in time` и продолжается; по одному прогону на каждый вид остановки. Заново запущенной устаревшей копии узел без диска кворума не дал (C1, два прогона: `1 of 2 nodes visible, need 2 for quorum`); объяснение различия — `[проверить: tiebreaker сохраняет уже имевшийся кворум, но не даёт его заново запущенному узлу — предположение]` | «Поведение при отказах», строка «Упал узел без пода»: пауза записи, вид остановки, сообщение о tiebreaker |
 | 5 | `on-no-quorum`: `io-error` или `suspend-io` | выбран `io-error` (по одному прогону каждого режима). `io-error`: изолированный узел через 10–11 с получает `EIO` от `fsync`. `io-error`: если том размонтирован до возврата сети, `umount` проходит и узел уходит в `Secondary`. `suspend-io`: `sync` висит в `D` до возврата сети (77 с). `suspend-io`: `SIGKILL` не действует, `umount` → `target is busy`, устройство открыто, узел остаётся `Primary`; освободить том на изолированном узле не удалось. `StandAlone` после возврата сети зависит от роли узла в этот момент, не от политики: в шаге 6 (`Secondary`) его нет, в опыте E1 (`io-error`, том не размонтирован, `Primary`) обе связи `dv-1` перешли в `StandAlone` с `I shall become SyncTarget, but I am primary!`. Восстановление в E1: размонтирование и `drbdadm adjust` на трёх узлах. Подтверждённые записи на месте во всех опытах. `suspend-io` — значение по умолчанию в 9.3.4 | «Параметры ресурса DRBD»: `io-error` закреплён, строка в `.res` обязательна, описание ext4 по наблюдению; абзац о выборе разделён на политику и роль при возврате; «Поведение при отказах», строка «Узел с подом изолирован по `lan0`»: время, текст `dmesg`, `StandAlone` при возврате в роли `Primary`; абзац о split-brain: пометка `[проверить: …]`; «Монтирование»: код ошибки при открытии на втором узле |
 | 6 | `drbdadm` и `drbdsetup` работают из контейнера | подтверждено предыдущей задачей: в поде `drbdadm --version` → `DRBD_KERNEL_VERSION=9.3.4`, `DRBDADM_VERSION=9.35.0`; в этой проверке все команды `drbdadm`/`drbdsetup` (`create-md`, `up`, `adjust`, `new-current-uuid`, `status --json`, `secondary`, `down`) выполнялись в поде `toolbox` | «Утилиты DRBD»: пометка о версии `drbd-utils` заменена на «проверено с 9.35.0» |
 
@@ -34,12 +34,12 @@
 
 | Опыт | Вопрос | Результат |
 |---|---|---|
-| C1, вариант A | Устаревшая копия `dv-2` и узел без диска `dv-3` (не перезапускался) поднимаются при выключенной новейшей копии `dv-1`: получают ли кворум, принимают ли запись | нет: `quorum:no` на обоих; `mount` и `drbdadm primary` отклонены на обоих (`dv-3`: `Need access to UpToDate data`, `dv-2`: `No quorum`, `1 of 2 nodes visible, need 2 for quorum`); `dv-3` понизил `dv-2` до `Consistent` (`Downgrading joining peer's disk as its data is older`). После возврата `dv-1` — `SyncSource`, split-brain нет; на томе 9349 при ACKED 9348 |
+| C1, вариант A | Устаревшая копия `dv-2` и узел без диска `dv-3` (не перезапускался) поднимаются при выключенной новейшей копии `dv-1`: получают ли кворум, принимают ли запись | нет: `quorum:no` на обоих; `mount` (rw) и `drbdadm primary` отклонены на обоих (`dv-3`: `Need access to UpToDate data`, `dv-2`: `No quorum`, `1 of 2 nodes visible, need 2 for quorum`); `mount -o ro,noload` выполнялся только на `dv-2` (отказ, причина не записана); запись не пробовали, `primary --force` не выполнялся; `dv-3` понизил `dv-2` до `Consistent` (`Downgrading joining peer's disk as its data is older`). После возврата `dv-1` — `SyncSource`, split-brain нет; на томе 9349 при ACKED 9348 |
 | C1, вариант B | То же, но `dv-3` тоже перезапущен и не помнит новых данных | нет: `quorum:no` на обоих, хотя `dv-3` видит `dv-2` как `UpToDate`; `mount`/`primary` отклонены с `No quorum` (`dv-3`: `no UpToDate peer with quorum`). После возврата `dv-1` — `SyncSource`, split-brain нет; на томе 12852 при ACKED 12851 |
 | C1, `quorum-minimum-redundancy` | Знают ли опцию drbd-utils 9.35.0 / модуль 9.3.4 | опция есть (`drbdsetup help resource-options`, `--show-defaults`: `quorum-minimum-redundancy off; # default`); шаг 5 не выполнялся, потому что ни A, ни B не дали повысить устаревшую копию |
 | C2, прогон 1 | Изолированный `Primary` с `EIO`, пиры не продвинулись: восстанавливаются ли связи сами | да, через ~2 с после снятия правил `nft`, `dv-1` остаётся `Primary` и становится `SyncSource` (8 КиБ); ext4 на `dv-1` остаётся с прерванным журналом (`EIO` на запись и чтение) до `umount` + `mount` |
 | C2, прогон 2 | Пиры продвинулись (запись на `dv-2`); помогает ли `adjust` без размонтирования | нет: `adjust` на трёх узлах (`rc=0`) приводит к новой попытке соединения с тем же `I shall become SyncTarget, but I am primary!` и снова к `StandAlone`; после `umount` на `dv-1` (авто-`Secondary`) `adjust` на трёх узлах соединил всех за ~2 с |
-| C3 | Как выглядит настоящий split-brain (`quorum off`, запись на двух сторонах) | ядро: `uuid_compare()=split-brain-auto-recover by rule=bitmap-both` и `Split-Brain detected but unresolved, dropping connection!`; в `drbdsetup status --json` и `events2` отдельного признака нет — те же `StandAlone`, что в E1; разрешено `disconnect` + `connect --discard-my-data` на `dv-1` и `connect` на двух других узлах; данные `dv-1`, подтверждённые писателем после изоляции, отброшены |
+| C3 | Как выглядит настоящий split-brain (`quorum off`, запись на двух сторонах) | ядро: `uuid_compare()=split-brain-auto-recover by rule=bitmap-both` и `Split-Brain detected but unresolved, dropping connection!`; в `drbdsetup status --json` нет поля, которым состояние отличалось бы от `StandAlone` из E1 (набор ключей совпадает); в захвате `events2` опыта C3 отличающего признака нет, `events2` для E1 не снимался; разрешено `disconnect` + `connect --discard-my-data` на `dv-1` и `connect` на двух других узлах. Записи `dv-1` 897–15875, подтверждённые писателем после изоляции, потеряны. Это следствие запуска с `quorum off`. При `quorum majority` (проектная конфигурация) split-brain не получен и не проверялся; единственное свидетельство о `quorum majority` — E1: изолированный `Primary` с `quorum:no` получает `EIO`, подтверждённые данные целы |
 
 ## Отклонения от брифа
 
@@ -56,7 +56,7 @@
 | `clean.sh` первой версии | — | `pkill -x watch.sh` не находил `watch.sh` (имя процесса `bash`), два `watch.sh` оставались на `dv-1` и `dv-3`; шаблоны заменены на `pkill -f '^bash /usr/local/bin/(probe\|watch)\.sh'`, в `watch.sh` шаблон поиска писателя тоже закреплён `^` |
 | После ревью | — | добавлены опыты E1 (`io-error`, узел `Primary` при возврате сети) и E2 (принудительная остановка `dv-2`) |
 | C1, команды DRBD при двух выключенных ВМ | через контейнер toolbox без API | добавлен `stand/spike/ctr.sh <узел> <команда>`: находит контейнер `k3s crictl ps --name toolbox --state running -q` и выполняет команду через `k3s crictl exec -i … bash -s`; проверен до выключения ВМ; в опытах C1–C3 все команды `drbdadm`/`drbdsetup` шли через него |
-| C1, вариант B, `limactl start --tty=false dv-3` при двух выключенных ВМ | запуск ВМ | команда не завершилась за 300 с (`timeout 300`, `rc=124`), Lima ждала `User session to be ready for SSH`; ВМ при этом работала. Причина по `systemctl list-jobs` в госте: `k3s.service start running`, `multi-user.target` и `cloud-final.service` в `waiting`, файла `/run/lima-ssh-ready` нет — запуск k3s на одном узле из трёх ждёт кворума etcd и держит загрузку. После `limactl start dv-2` (два узла из трёх) оба узла дошли до `running` |
+| C1, вариант B, `limactl start --tty=false dv-3` при двух выключенных ВМ | запуск ВМ | узел не дошёл до `READY` за 300 с (`timeout 300`, `rc=124`), Lima ждала `User session to be ready for SSH`; ВМ при этом работала. Снимок `systemctl list-jobs` в госте (через ~3 мин после старта): `k3s.service start running`, `multi-user.target` и `cloud-final.service` в `waiting`. `journalctl -u k3s` и журнал etcd не снимались; `[проверить: причина — ожидание кворума etcd]`. После `limactl start dv-2` (два узла из трёх) оба узла дошли до `running` |
 | C3, `drbdadm disconnect spike` на жертве | первый шаг разрешения | ядро отвечает `State change failed: Can not disconnect a StandAlone device (-9)`, `drbdadm` возвращает `rc=0` |
 | C3, `drbdadm connect spike` на выживших | соединить с жертвой | `rc=10`, `Failure: (125) Device has a net-config (use disconnect first)` для уже соединённого пира; соединение с `StandAlone`-пиром при этом поднялось |
 
@@ -1902,7 +1902,11 @@ up rc=0
 
 Строки `extent 255 beyond end of bitmap!` печатает `drbdadm up` после
 принудительной остановки узла с копией [проверить: какая утилита
-(`drbdmeta apply-al`) и что они значат для битовой карты на одного пира].
+(`drbdmeta apply-al`) и что они значат для битовой карты на одного пира]. В
+образце `stale-diskful-no-quorum.json`, снятом на этом узле до возврата
+`dv-1`, битовая карта к `lima-dv-1` уже показывает `out-of-sync: 1044480` и
+`percent-in-sync: 0.38`, то есть 1044480 КиБ из 1048508 (99.6 %; 4028 КиБ в
+наборе нет) [проверить: откуда эти значения и почему не 1048508].
 
 `drbdsetup status spike2 --verbose` в 22:33:11–12:
 
@@ -2039,14 +2043,19 @@ primary rc=11
 [Thu Nov 12 22:34:19 2026] drbd spike2/0 drbd1001 lima-dv-2: pdsk( Inconsistent -> UpToDate ) resync-susp( peer -> no ) [peer-state]
 ```
 
-`grep -i split` по этим строкам пуст, `StandAlone` нет. Досылка на `dv-2`
-полная: 261120 бит (1044480 КиБ из 1048508), хотя у `dv-1` к `dv-2` было
-отмечено 4112 бит. Битовая карта `dv-2` к `dv-1` при соединении с `dv-3` в
-22:32:53 была `bits:0`, при соединении с `dv-1` в 22:34:08 — `bits:261120`;
-в `dmesg` `dv-2` между этими моментами строк про битовую карту нет [проверить:
-откуда 261120 бит; 261120 = 255 × 1024, то есть 255 экстентов по 4 МиБ — то
-же число 255, что в `extent 255 beyond end of bitmap!`]. В E2 после такой же
-принудительной остановки досылка была 16520 КиБ.
+`grep -i split` по этим строкам пуст, `StandAlone` нет. Досылка на `dv-2` —
+261120 бит, 1044480 КиБ из 1048508 КиБ (99.6 %; 4028 КиБ в набор досылки не
+вошли), хотя у `dv-1` к `dv-2` было отмечено 4112 бит. Строка `bits:0` в
+22:32:53 (`dmesg` `dv-2`) относится к битовой карте `dv-2` к `lima-dv-3`, а не
+к `dv-1`. Битовая карта `dv-2` к `dv-1` была почти полной уже до возврата
+`dv-1`: образец `stale-diskful-no-quorum.json` (снят на `dv-2` в шаге 2)
+показывает для `lima-dv-1` `out-of-sync: 1044480`, `percent-in-sync: 0.38`; при
+соединении с `dv-1` в 22:34:08 в `dmesg` — `bits:261120`. В `dmesg` `dv-2` между
+22:32:53 и 22:34:08 строк про битовую карту нет [проверить: откуда 1044480 КиБ
+в карте к `dv-1` при attach и почему не 1048508 КиБ (разница 4028 КиБ);
+261120 = 255 × 1024 — то же число 255, что в `extent 255 beyond end of
+bitmap!`; связь не проверена]. В E2 после такой же принудительной остановки
+досылка была 16520 КиБ.
 
 Сверка после досылки (`mount` на `dv-3`):
 
@@ -2203,7 +2212,9 @@ primary rc=11
 
 На `dv-3` при соединении с `dv-1`: `my exposed UUID: 64E7A32F4872D668` →
 `Setting exposed data uuid: 68AF08C76065A51A`, `pdsk( UpToDate -> Outdated )`
-и `Outdated -> Inconsistent` для `dv-2`. `grep -i split` пуст. Сверка:
+и `Outdated -> Inconsistent` для `dv-2`. `grep -i split` пуст. Итоговая сверка
+(узел, на котором она выполнена, и время в выводе не записаны; в варианте A
+сверка шла на `dv-3`):
 
 ```text
 12851
@@ -2235,10 +2246,10 @@ stand/spike/ctr.sh dv-1 'drbdsetup help resource-options 2>&1 | grep -i -E -A3 "
 | Кворум у {устаревшая копия + узел без диска} | нет на обоих (`quorum:no`) | нет на обоих (`quorum:no`) |
 | Как узел без диска видит устаревшую копию | `Consistent` (`Downgrading joining peer's disk as its data is older`) | `UpToDate` (`my exposed UUID: 0000000000000000`, принял UUID копии) |
 | Как устаревшая копия видит себя | `disk:UpToDate` | `disk:UpToDate` |
-| `mount` rw / `mount -o ro,noload` / `drbdadm primary` на узле без диска | отказ: `Need access to UpToDate data (-2)` | отказ: `No quorum (-25)`, `no UpToDate peer with quorum` |
-| То же на устаревшей копии | отказ: `No quorum (-25)`, `1 of 2 nodes visible, need 2 for quorum` | отказ, те же сообщения |
-| Новая запись принята | нет (том не открылся) | нет (том не открылся) |
-| Возврат `dv-1` | `Restored quorum from before reboot`, `SyncSource`, досылка 1044480 КиБ за 10–11 с, split-brain нет | то же, досылка 1044480 КиБ за 10 с |
+| `mount` rw / `mount -o ro,noload` / `drbdadm primary` на узле без диска | `mount` rw и `primary`: отказ `Need access to UpToDate data (-2)`; `mount -o ro,noload` не выполнялся | все три: отказ, `No quorum (-25)`, `no UpToDate peer with quorum` |
+| То же на устаревшей копии | `mount` rw, `mount -o ro,noload`, `primary`: отказ, `No quorum (-25)`, `1 of 2 nodes visible, need 2 for quorum` (причина отказа `ro`-монтирования не записана) | отказ, те же сообщения |
+| Запись | не пробовали: том не открылся; `primary --force` не выполнялся | не пробовали: том не открылся; `primary --force` не выполнялся |
+| Возврат `dv-1` | `Restored quorum from before reboot`, `SyncSource`, досылка 1044480 КиБ из 1048508 (99.6 %) за 10–11 с, split-brain нет | то же, досылка 1044480 КиБ за 10 с |
 | На томе / ACKED | 9349 / 9348 | 12852 / 12851 |
 | Пауза записи при принудительной остановке `dv-2` | 11.3 с между выборками | ~6 с (12 выборок) |
 
@@ -2246,33 +2257,43 @@ stand/spike/ctr.sh dv-1 'drbdsetup help resource-options 2>&1 | grep -i -E -A3 "
 
 - Состоянию диска узла о самом себе верить нельзя: устаревшая копия после
   перезапуска пишет `disk:UpToDate` (`stale-diskful-no-quorum.json`, строка
-  `disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no` на `dv-2`).
-  Признак того, что открывать том можно, — поле `quorum` и результат
-  `primary`/`mount`, а не `disk-state`.
+  `disk:UpToDate backing_dev:/dev/duovol/spike2 quorum:no` на `dv-2`). В
+  обоих прогонах `quorum:no` совпало с отказом `mount` и `drbdadm primary`.
+  Обратное (`quorum:yes` на устаревшей копии означает, что открывать можно) не
+  проверялось.
 - Узел без диска после перезагрузки показывает устаревшую копию как
   `peer-disk:UpToDate` (`diskless-rebooted-stale-peer.json`). Выбор узла для
   пода по `peer-disk-state` на узле без диска может указать на устаревшую
   копию; в этом прогоне повышение всё равно отклонено по кворуму
   (`no UpToDate peer with quorum`).
-- При двух копиях и узле без диска «устаревшая копия + узел без диска» не
-  получают кворум ни в одном из двух вариантов (`1 of 2 nodes visible, need 2
-  for quorum`). Ошибка `mount` в этом случае — `Can't open blockdev`
-  (`rc=32`), причина видна только в `dmesg` (`Auto-promote failed: …`) или в
-  выводе `drbdadm primary` (`rc=11` для `No quorum`, `rc=17` для `Need access
-  to UpToDate data`).
+- В двух прогонах (A и B, один стенд) пара {устаревшая копия, узел без диска}
+  не получила кворум (`1 of 2 nodes visible, need 2 for quorum`). В E2 узел без
+  диска вместе с оставшейся копией кворум сохранил (`Would lose quorum, but
+  using tiebreaker logic to keep`); в C1 тот же узел без диска не дал кворума
+  заново запущенной устаревшей копии [проверить: tiebreaker сохраняет уже
+  имевшийся кворум, но не даёт его заново запущенному узлу — предположение].
+  Ошибка `mount` в этом случае — `Can't open blockdev` (`rc=32`), причина
+  видна только в `dmesg` (`Auto-promote failed: …`) или в выводе `drbdadm
+  primary` (`rc=11` для `No quorum`, `rc=17` для `Need access to UpToDate
+  data`).
+- Запись на устаревшую копию не пробовали, `drbdadm primary --force` не
+  выполнялся: данных о том, что произошло бы при принудительном повышении, нет.
 - Узел с новейшей копией, загруженный в одиночку, получает кворум при attach
   (`Restored quorum from before reboot`, `quorum( no -> yes ) [attach]` до
   соединения с кем-либо). Можно ли открыть том на таком узле, пока остальные
   выключены, не проверялось [проверить].
-- После принудительной остановки узла с копией досылка при его возврате в
-  обоих вариантах полная (261120 бит, 10–11 с на 1 ГиБ на этом стенде), а не
-  по битовой карте, как в E2 (16520 КиБ) [проверить: причина]. Время возврата
-  копии на больших томах надо закладывать по полной досылке, пока причина не
-  найдена.
-- Одиночная ВМ стенда с k3s-server не завершает загрузку, пока нет кворума
-  etcd (`k3s.service start running`, `multi-user.target start waiting`).
-  Toolbox и модуль DRBD на таком узле недоступны, пока не поднят второй
-  узел.
+- После принудительной остановки узла с копией досылка при его возврате в двух
+  прогонах (A и B) была 261120 бит, 1044480 КиБ из 1048508 (99.6 %), за 10–11 с
+  (`Resync done (total 11 sec …)` на `dv-1` в варианте A, `total 10 sec` на
+  `dv-2` в варианте A и на `dv-1` в варианте B), а не по небольшой битовой карте,
+  как в E2 (16520 КиБ) [проверить: причина]. Это два прогона на одном стенде; для
+  томов другого размера время досылки не измерялось.
+- Одиночная ВМ стенда с k3s-server не дошла до `READY` за 300 с, пока две другие
+  были выключены (`k3s.service start running`, `multi-user.target start
+  waiting`) [проверить: причина — ожидание кворума etcd]. Доступность toolbox и
+  модуля DRBD на ВМ, пока она была одна, не проверялась [проверить]; после
+  запуска второго узла toolbox был запущен, модуль не загружен (`lsmod | grep -c
+  ^drbd` → `0`).
 
 ### Опыт C2. Изолированный `Primary`: пиры не продвинулись; `adjust` до размонтирования
 
@@ -2382,8 +2403,9 @@ TARGET     OPTIONS
 [Thu Nov 12 22:46:51 2026] EXT4-fs (drbd1000): Remounting filesystem read-only
 ```
 
-`tail -1` первым выводом показал `5073` из кэша страниц, затем ошибку
-чтения. DRBD-устройство после переподключения пишется (три копии
+В этом выводе `findmnt` показывает `rw,relatime`, хотя ядро уже пишет
+`Remounting filesystem read-only`. `tail -1` первым выводом показал `5073` из
+кэша страниц, затем ошибку чтения. DRBD-устройство после переподключения пишется (три копии
 `UpToDate`, `quorum` есть), но ext4 на `dv-1` после `EIO` остаётся с
 прерванным журналом. Перемонтирование:
 
@@ -2457,8 +2479,9 @@ ok-5
 [Thu Nov 12 22:47:45 2026] drbd spike lima-dv-2: conn( Disconnecting -> StandAlone ) [disconnected]
 ```
 
-Это та же картина, что в E1. `adjust` на трёх узлах при смонтированном томе
-(`findmnt` → `/mnt/spike rw,relatime`) и `Primary` на `dv-1`:
+Это та же картина, что в E1. `adjust` на трёх узлах при `Primary` на `dv-1`
+(том смонтирован: `open:yes` в строках опроса ниже; вывод `findmnt` в этом
+прогоне не записан):
 
 ```bash
 for n in dv-1 dv-2 dv-3; do stand/spike/ctr.sh $n "date +%T.%3N; timeout 30 drbdadm adjust spike; echo adjust rc=\$?"; done
@@ -2564,17 +2587,21 @@ umount rc=0
 
 #### Что из этого следует для агента
 
-- После `EIO` на изолированном узле ext4 на этом узле не возвращается в
-  рабочее состояние сам, даже если DRBD переподключился и все копии
-  `UpToDate` (прогон 1: `Detected aborted journal`, `Remounting filesystem
-  read-only` при `quorum` уже восстановленном). Агенту нужен `umount` на
-  этом узле в обоих случаях; после повторного `mount` ядро пишет `mounting fs
-  with errors, running e2fsck is recommended`.
+- После `EIO` на изолированном узле ext4 на этом узле в прогоне 1 не
+  вернулась в рабочее состояние сама, хотя DRBD переподключился и все копии
+  были `UpToDate` (22:46:51: `Detected aborted journal`, `Remounting filesystem
+  read-only`). Момент аборта журнала неизвестен: первые строки ext4 в выводе
+  `dmesg | grep -i ext4 | tail -3` относятся к 22:46:51, когда `tail` наткнулся
+  на уже прерванный журнал. В прогоне 1 `EIO` на запись ext4 вернула ещё до
+  возврата сети (`write 5073 failed` в журнале писателя). После `umount` и повторного
+  `mount` ядро пишет `mounting fs with errors, running e2fsck is recommended`,
+  запись проходит (один прогон).
 - Если пиры не продвинулись, связи изолированного `Primary` восстанавливаются
   без вмешательства (прогон 1, `uuid_compare()=no-sync by rule=reconnected` и
-  `source-use-bitmap`); `StandAlone` появляется только когда другая сторона
-  записала данные (прогон 2, `target-use-bitmap` + `I shall become
-  SyncTarget, but I am primary!`).
+  `source-use-bitmap`). `StandAlone` наблюдался в прогоне 2, где `dv-2`
+  записал данные до снятия правил (`target-use-bitmap` + `I shall become
+  SyncTarget, but I am primary!`), и в E1 с тем же сообщением; в прогоне 1
+  `StandAlone` не было. Других условий появления `StandAlone` не проверяли.
 - `drbdadm adjust` при смонтированном томе и роли `Primary` возвращает `rc=0`,
   но связи снова уходят в `StandAlone` (прогон 2, 22:48:23). Код возврата
   `adjust` не говорит, восстановилась ли связь; проверять надо
@@ -2711,8 +2738,12 @@ umount rc=0
 [Thu Nov 12 22:51:38 2026] drbd spike lima-dv-1: conn( Disconnecting -> StandAlone ) [disconnected]
 ```
 
-`dv-3` печатает те же строки для `lima-dv-1` в 22:51:37: у `dv-3` данные
-`dv-2` (`self 1A2099DE875E62C8:…`), поэтому с `dv-1` у него тоже split-brain.
+`dmesg` `dv-3` в отчёте не приведён. О связи `dv-3` с `dv-1` видно из двух
+выводов: `drbdsetup status` на `dv-3` в 22:51:38 показывает `lima-dv-1
+connection:StandAlone`, а в `dmesg` `dv-1` (22:51:37) для `lima-dv-3`
+`peer 1A2099DE875E62C8:…` — тот же текущий UUID, что `self` у `dv-2`, и то же
+`Split-Brain detected but unresolved`. Сообщение ядра на стороне `dv-3` не
+записано.
 `dmesg -T | grep -i split` на `dv-1` и `dv-2` находит кроме этих строк ещё
 `drbd spike2 lima-dv-3: Cluster is now split` (22:44:03 на `dv-1`, 22:44:06 на
 `dv-2`) и `drbd spike lima-dv-3: Cluster is now split` (22:49:44, 22:49:47) —
@@ -2728,8 +2759,8 @@ split-brain.
 | UUID при рукопожатии | у одной стороны текущий UUID другой стороны стоит в истории (`peer 199B…:3FED…`, `self 3FED…`) | обе стороны имеют разные текущие UUID с общим UUID битовой карты `56D2FD426ECBD8AC` |
 | Роль узла | `Primary`, том смонтирован | обе стороны `Secondary` |
 
-`events2 --timestamps` на `dv-1` с 14:51:31 UTC (на `dv-2` и `dv-3` та же
-последовательность для соединения с `lima-dv-1`):
+`events2 --timestamps` на `dv-1` с 14:51:31 UTC (запускался на трёх узлах; вывод
+`dv-2` и `dv-3` в отчёте не приведён):
 
 ```text
 2026-11-12T14:51:37.226272+00:00 change path name:spike peer-node-id:2 conn-name:lima-dv-3 local:ipv4:192.168.104.1:7000 peer:ipv4:192.168.104.4:7000 established:yes
@@ -2799,12 +2830,16 @@ spike node-id:1 role:Secondary suspended:no force-io-failures:no
 ```
 
 Вывод `dv-2` сокращён (строки статистики устройства опущены); `dv-3`
-совпадает с `dv-2` по состояниям. `quorum:yes` при `quorum off` — поле
-показывает `yes` всегда.
+совпадает с `dv-2` по состояниям. `quorum:yes` при `quorum off` — в этом захвате
+поле `yes`; для других состояний при `quorum off` оно не снималось.
 
 Образцы: `split-brain-victim.json` (`dv-1`), `split-brain-survivor.json`
 (`dv-2`). Сравнение по полям с `standalone-primary.json` (E1, `dv-1`)
-скриптом, который раскладывает JSON в плоский словарь «путь → значение»:
+скриптом `stand/spike/compare-fixtures.py` (раскладывает JSON в плоский
+словарь «путь → значение»; вызов `python3 stand/spike/compare-fixtures.py
+stand/spike/samples/split-brain-victim.json stand/spike/samples/standalone-primary.json`):
+
+Вывод ниже снят ранним ad-hoc вариантом скрипта (подписи `E1`/`SB`); повторный запуск сохранённого скрипта даёт те же различия.
 
 ```text
 === split-brain-victim.json vs standalone-primary.json
@@ -2827,7 +2862,7 @@ split-brain, в `drbdsetup status --json` нет.
 
 #### Разрешение
 
-Жертва — `dv-1` (его записи 897–15876 и файл `dv1-only` отбрасываются).
+Жертва — `dv-1` (его записи 897–15875 и файл `dv1-only` отбрасываются; на томе у `dv-1` было 15876 строк, последняя не подтверждена писателем).
 
 ```bash
 stand/spike/ctr.sh dv-1 "drbdadm disconnect spike; echo disconnect rc=\$?; drbdadm connect --discard-my-data spike; echo connect rc=\$?"
@@ -2847,9 +2882,10 @@ connect rc=0
 [Thu Nov 12 22:53:03 2026] drbd spike lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
 ```
 
-20 с после этого: `dv-1` в `Connecting` к обоим, `dv-2` и `dv-3` держат
-`lima-dv-1 connection:StandAlone`, в их `dmesg` новых строк нет. Одной
-команды на жертве недостаточно. Затем на выживших:
+Через ~20 с после этого `dv-1` был в `Connecting` к обоим, а `dv-2` и `dv-3`
+держали `lima-dv-1 connection:StandAlone`, в их `dmesg` новых строк не было;
+вывод этой проверки не записан. По этому наблюдению одной команды на жертве
+недостаточно. Затем на выживших:
 
 ```bash
 for n in dv-2 dv-3; do stand/spike/ctr.sh $n "drbdadm connect spike; echo connect rc=\$?"; done
@@ -2870,9 +2906,12 @@ connect rc=10
 22:53:35 dv-3: spike role:Secondary disk:UpToDate open:no lima-dv-1 role:Secondary peer-disk:UpToDate lima-dv-2 role:Secondary peer-disk:UpToDate
 ```
 
-`drbdadm connect spike` вернул `rc=10` из-за соединения, которое уже
-`Connected` (`dv-2`→`dv-3`, `dv-3`→`dv-2`), а соединение с `lima-dv-1`
-перешло `StandAlone -> Unconnected` и поднялось. `dmesg -T` на `dv-1`:
+Код 10 вернули `drbdsetup connect spike 2` на `dv-2` (пир `dv-3`) и
+`drbdsetup connect spike 1` на `dv-3` (пир `dv-2`), то есть команды для уже
+`Connected` пар. Вывод `drbdadm connect` для пары с `lima-dv-1` и `dmesg`
+выживших не записаны (переход `StandAlone -> Unconnected` на них не
+зафиксирован); по `drbdsetup status` в 22:53:34–35 связь с `lima-dv-1`
+поднялась. `dmesg -T` на `dv-1`:
 
 ```text
 [Thu Nov 12 22:53:34 2026] drbd spike/0 drbd1000 lima-dv-2: self 3BB88FDA87BA31F0:56D2FD426ECBD8AC:0000000000000000:0000000000000000 bits:4126 flags:2121
@@ -2907,46 +2946,55 @@ umount rc=0
 
 На `dv-1` данные `dv-2`: 901 строка, последняя `dv2-5`, файла `dv1-only`
 нет. Записи 897–15875, которые писатель на `dv-1` получил как
-подтверждённые (ACKED на `dv-1` = 15875), отброшены. Это ожидаемый исход
-опыта с `quorum off`.
+подтверждённые (ACKED на `dv-1` = 15875), отброшены: потеря произошла. Она
+следствие запуска с `quorum off`. В проектной конфигурации (`quorum majority`)
+split-brain в этом опыте не воспроизводился и не проверялся; единственное
+свидетельство о `quorum majority` — опыт E1 (изолированный `Primary` с
+`quorum:no` получает `EIO`, подтверждённые данные на месте).
 
 | Наблюдение C3 (один прогон) | Значение |
 |---|---|
 | Запись на обеих сторонах при `quorum off` | `dv-1` подтвердил 897–15875 после изоляции, `dv-2` — `dv2-1`…`dv2-5` и `dv2-only` |
 | Сообщение ядра | `uuid_compare()=split-brain-auto-recover by rule=bitmap-both`, затем `Split-Brain detected but unresolved, dropping connection!` |
 | Состояние после | на жертве обе связи `StandAlone`, на выживших — связь с жертвой `StandAlone`; все `Secondary`, `disk:UpToDate` |
-| Отличие от E1 в `status --json` / `events2` | отдельного поля или события нет; набор ключей JSON совпадает |
+| Потеря данных | записи 897–15875 с `dv-1` отброшены; следствие `quorum off`, при `quorum majority` не проверялось |
+| Отличие от E1 в `status --json` / `events2` | в `status --json` поля нет, набор ключей совпадает; в захвате `events2` C3 отличающего события нет, `events2` для E1 не снимался |
 | Время от снятия правил до `StandAlone` | ~2 с (22:51:35.45 → 22:51:37–38) |
 | Разрешение | на жертве `disconnect` (ядро: `Can not disconnect a StandAlone device`, `rc=0`) + `connect --discard-my-data`; на двух других узлах `connect` (`rc=10` из-за уже соединённого пира, связь с жертвой поднялась); досылка 16512 КиБ за 1 с |
 | Сообщение после разрешения | жертва: `Split-Brain detected, manually solved. Sync from peer node`; выживший: `… Sync from this node` |
 
 #### Что из этого следует для агента
 
-- Отличить настоящий split-brain от `StandAlone` из-за роли (E1) по
-  `drbdsetup status --json` и `events2` нельзя: ключи JSON совпадают, в
-  `events2` только `connection:Disconnecting` → `StandAlone`. Различие есть
-  только в сообщении ядра: `Split-Brain detected but unresolved, dropping
-  connection!` против `I shall become SyncTarget, but I am primary!` (и
-  `uuid_compare()=…by rule=bitmap-both` против `…by rule=bitmap-peer`).
-  Агенту нужен источник этих строк (`dmesg`/kmsg) или собственная проверка
-  UUID через `drbdadm get-gi`.
+- Потеря записей 897–15875 в этом опыте — следствие запуска с `quorum off`. В
+  конфигурации `quorum majority` split-brain не получен и не проверялся;
+  свидетельство о ней только E1 (`EIO` на изолированном `Primary`, данные
+  целы).
+- В `drbdsetup status --json` нет поля, которым split-brain отличался бы от
+  `StandAlone` из E1 (набор ключей совпадает). В захвате `events2` опыта C3
+  только `connection:Disconnecting` → `StandAlone`; `events2` для E1 не
+  снимался, поэтому сравнить нельзя. Записанное различие — текст сообщения ядра:
+  `Split-Brain detected but unresolved, dropping connection!` против `I shall
+  become SyncTarget, but I am primary!` (и `uuid_compare()=…by rule=bitmap-both`
+  против `…by rule=bitmap-peer`).
+- Гипотеза, не проверенная как признак: у сторон при split-brain разные
+  текущие UUID при общем UUID битовой карты (`3BB88FDA87BA31F0:56D2FD426ECBD8AC`
+  и `1A2099DE875E62C8:56D2FD426ECBD8AC`), в E1 текущий UUID одной стороны стоял
+  в истории другой. `drbdadm get-gi` снят только после C3, для E1 не снимался
+  [проверить: годится ли сравнение UUID как признак split-brain].
 - Поиск по `dmesg` словом `split` без привязки к формулировке даёт ложные
   совпадения: `Cluster is now split` печатается при `drbdsetup down` на
   пире (22:44:03, 22:49:44 на `dv-1`).
-- Признак split-brain по UUID: у сторон разные текущие UUID при общем UUID
-  битовой карты (`3BB88FDA87BA31F0:56D2FD426ECBD8AC` и
-  `1A2099DE875E62C8:56D2FD426ECBD8AC`); в E1 текущий UUID одной стороны был
-  в истории другой.
-- Разрешение требует действий на всех узлах с `StandAlone`-связью к жертве,
-  не только на жертве: после `connect --discard-my-data` на `dv-1` пиры 20 с
-  оставались `StandAlone`. Коды возврата `drbdadm` здесь не показывают
-  результат: `disconnect` даёт `rc=0` при отказе ядра, `connect` даёт `rc=10`
-  при успешно поднятой связи с жертвой; проверять надо `connection-state`.
-- Узел, который держал связь с выжившей стороной (`dv-3`), тоже переходит в
-  `StandAlone` к жертве с тем же сообщением split-brain, хотя сам записей не
-  принимал.
-- При `quorum off` поле `quorum` в статусе всегда `true` (`quorum:yes` на
-  изолированном `dv-1`), оно не говорит о возможности split-brain.
+- Разрешение потребовало команд на всех узлах со `StandAlone`-связью к жертве:
+  после `connect --discard-my-data` на `dv-1` пиры оставались `StandAlone`
+  (проверка через ~20 с, вывод не записан). Коды возврата `drbdadm` здесь не
+  показывают результат: `disconnect` дал `rc=0` при отказе ядра, `connect` дал
+  `rc=10` для уже соединённых пар; результат виден в `connection-state`.
+- Связь `dv-3` с жертвой тоже оказалась `StandAlone` (`drbdsetup status` на
+  `dv-3`, 22:51:38), хотя `dv-3` записей не принимал; сообщение ядра на
+  стороне `dv-3` не записано.
+- Поле `quorum` в статусе при `quorum off` было `yes` в одном захвате
+  (`split-brain-victim.json`, `dv-1`); для других состояний при `quorum off`
+  поле не снималось.
 
 ### Очистка стенда после опытов C1–C3
 
