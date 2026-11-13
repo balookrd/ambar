@@ -12,6 +12,8 @@ use crate::exec::{Output, Runner, command_line};
 use crate::model::VolumeSpec;
 use crate::paths::Paths;
 
+pub(crate) mod volumes;
+
 type Reply = Box<dyn Fn(&str, &[&str]) -> Output + Send + Sync>;
 
 /// Records every command line and answers from a closure.

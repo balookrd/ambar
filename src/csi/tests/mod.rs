@@ -17,13 +17,17 @@ use super::proto::identity_client::IdentityClient;
 use super::proto::node_client::NodeClient;
 use super::proto::{GetCapacityRequest, GetPluginInfoRequest, NodeGetInfoRequest, ProbeRequest};
 use super::*;
+use crate::tests::volumes::{FakeNodes, FakeVolumes, cluster};
 
 fn services(ready: bool) -> Services {
     Services {
         identity: IdentityService {
             ready: Arc::new(AtomicBool::new(ready)),
         },
-        controller: ControllerService,
+        controller: ControllerService::new(
+            Arc::new(FakeVolumes::default()),
+            Arc::new(FakeNodes(Ok(cluster(&[1 << 40; 3])))),
+        ),
         node: NodeService,
     }
 }

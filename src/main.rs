@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use ambar::agent::kube::KubeVolumes;
+use ambar::agent::nodes::ConfigMapNodes;
 use ambar::agent::run::{Agent, VolumeLocks, preflight};
 use ambar::cli;
 use ambar::csi::{self, ControllerService, IdentityService, NodeService, Services};
@@ -62,7 +63,8 @@ enum Command {
         /// A stale socket file is replaced; any other file there is an error.
         #[arg(long, default_value = "/var/lib/kubelet/plugins/ambar/csi.sock")]
         csi_socket: PathBuf,
-        /// Namespace of the agent's own objects. Not used yet.
+        /// Namespace of the agent's own objects: the ConfigMap `ambar-nodes`
+        /// is read from it.
         #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
         namespace: String,
         #[arg(long, default_value = "/opt/ambar/modules")]
@@ -95,9 +97,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Agent {
             node_name,
             csi_socket,
+            namespace,
             modules_dir,
-            ..
-        } => run_agent(&node_name, &csi_socket, &modules_dir, paths)?,
+        } => run_agent(&node_name, &csi_socket, &namespace, &modules_dir, paths)?,
         Command::Apply { file } => {
             let json = fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
             let spec = VolumeSpec::from_json(&json)?;
@@ -159,7 +161,7 @@ fn load_module(modules_dir: &Path, runner: &SystemRunner) -> Result<String> {
 
 /// The checks that need no API server come first: a wrong node name or a
 /// missing volumes directory must stop the agent before it touches anything.
-fn run_agent(node: &str, csi_socket: &Path, modules_dir: &Path, paths: Paths) -> Result<()> {
+fn run_agent(node: &str, csi_socket: &Path, namespace: &str, modules_dir: &Path, paths: Paths) -> Result<()> {
     let hostname = read_trimmed(Path::new("/proc/sys/kernel/hostname"))?;
     preflight(node, &hostname, &paths)?;
     let runner = Arc::new(SystemRunner::default());
@@ -173,11 +175,15 @@ fn run_agent(node: &str, csi_socket: &Path, modules_dir: &Path, paths: Paths) ->
         let client = kube::Client::try_default()
             .await
             .context("cannot configure the Kubernetes client (in-cluster configuration or kubeconfig)")?;
+        // The reconcile loop and the Controller share one object: its list
+        // reads the cache the watch fills.
+        let volumes = Arc::new(KubeVolumes::new(client.clone()));
+        let controller = ControllerService::new(volumes.clone(), Arc::new(ConfigMapNodes::new(client, namespace)));
         let agent = Agent {
             node: node.to_string(),
             paths,
             runner,
-            volumes: Arc::new(KubeVolumes::new(client)),
+            volumes,
             locks: VolumeLocks::default(),
             ready: Arc::new(AtomicBool::new(false)),
         };
@@ -187,7 +193,7 @@ fn run_agent(node: &str, csi_socket: &Path, modules_dir: &Path, paths: Paths) ->
             identity: IdentityService {
                 ready: agent.ready.clone(),
             },
-            controller: ControllerService,
+            controller,
             node: NodeService,
         };
         eprintln!("ambar-agent: node {node} started");
