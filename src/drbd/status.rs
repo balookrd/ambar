@@ -118,6 +118,9 @@ impl ResourceStatus {
         self.device().is_some_and(|d| d.quorum)
     }
 
+    /// `true` when every connection is `Connected`, and also when there are no
+    /// connections at all. Do not read it as "the volume is replicated": check
+    /// `connections` separately.
     pub fn all_peers_connected(&self) -> bool {
         self.connections
             .iter()
@@ -133,19 +136,37 @@ impl ResourceStatus {
             .collect()
     }
 
-    /// `true` only for a freshly created volume that has never held data:
-    /// this node has an `Inconsistent` disk, every peer is connected, and
-    /// every peer either has an `Inconsistent` disk too or attaches without
-    /// one. Only in this state may the initial full sync be skipped.
+    /// Checks that every status field is consistent with a freshly created
+    /// volume: this node is a `Secondary` with an `Inconsistent` diskful,
+    /// closed, unsuspended volume 0; there is at least one connection and all
+    /// are `Connected`; each peer has a volume-0 device in replication state
+    /// `Established` whose disk is `Inconsistent`, or `Diskless` with
+    /// `peer-client` set (a node attached without a disk).
+    ///
+    /// This is a necessary condition, not a sufficient one: status alone cannot
+    /// prove that the volume never held data. The caller must additionally
+    /// know that this agent has just created the volume (the reconcile logic
+    /// keeps a local marker for that) before skipping the initial full sync.
+    /// Any unknown or unexpected value makes the result `false`.
     pub fn ready_to_skip_initial_sync(&self) -> bool {
-        let local_inconsistent = self.device().is_some_and(|d| d.disk_state == DiskState::Inconsistent);
+        let Some(local) = self.device() else {
+            return false;
+        };
+        let local_fresh = local.disk_state == DiskState::Inconsistent
+            && !local.client
+            && !local.open
+            && self.role == Role::Secondary
+            && !self.suspended;
+        let peer_fresh = |p: &PeerDevice| {
+            p.replication_state == "Established"
+                && (p.peer_disk_state == DiskState::Inconsistent
+                    || (p.peer_client && p.peer_disk_state == DiskState::Diskless))
+        };
         let peers_fresh = self.connections.iter().all(|c| {
-            c.peer_devices.iter().all(|p| {
-                matches!(p.peer_disk_state, DiskState::Inconsistent)
-                    || (p.peer_client && p.peer_disk_state == DiskState::Diskless)
-            })
+            c.connection_state == ConnectionState::Connected
+                && c.peer_devices.iter().find(|p| p.volume == 0).is_some_and(peer_fresh)
         });
-        local_inconsistent && !self.connections.is_empty() && self.all_peers_connected() && peers_fresh
+        local_fresh && !self.connections.is_empty() && peers_fresh
     }
 }
 

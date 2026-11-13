@@ -45,7 +45,11 @@ fn every_captured_sample_parses_without_unknown_states() {
         for conn in &st.connections {
             assert_ne!(conn.connection_state, ConnectionState::Other, "{}", st.name);
             assert_ne!(conn.peer_role, Role::Other, "{}", st.name);
-            assert_ne!(conn.peer_devices[0].peer_disk_state, DiskState::Other, "{}", st.name);
+            let peer = conn
+                .peer_devices
+                .first()
+                .unwrap_or_else(|| panic!("{}: connection {} has no peer devices", st.name, conn.name));
+            assert_ne!(peer.peer_disk_state, DiskState::Other, "{}", st.name);
         }
     }
 }
@@ -138,4 +142,105 @@ fn unknown_states_do_not_break_parsing() {
     let st = one(&json);
     assert_eq!(st.role, Role::Other);
     assert_eq!(st.device().unwrap().disk_state, DiskState::Other);
+
+    let json = sample!("three-uptodate").replace(
+        "\"connection-state\": \"Connected\"",
+        "\"connection-state\": \"Warping\"",
+    );
+    let st = one(&json);
+    assert!(
+        st.connections
+            .iter()
+            .all(|c| c.connection_state == ConnectionState::Other)
+    );
+    assert!(!st.all_peers_connected());
+}
+
+fn fresh() -> ResourceStatus {
+    one(sample!("three-inconsistent"))
+}
+
+fn dev0(st: &mut ResourceStatus) -> &mut Device {
+    st.devices.iter_mut().find(|d| d.volume == 0).expect("volume 0")
+}
+
+fn peer0(st: &mut ResourceStatus) -> &mut PeerDevice {
+    st.connections[0]
+        .peer_devices
+        .iter_mut()
+        .find(|p| p.volume == 0)
+        .expect("peer volume 0")
+}
+
+#[test]
+fn the_fresh_sample_may_skip_the_initial_sync() {
+    assert!(fresh().ready_to_skip_initial_sync());
+}
+
+#[test]
+fn a_peer_without_a_disk_does_not_block_the_skip() {
+    let mut st = fresh();
+    let p = peer0(&mut st);
+    p.peer_disk_state = DiskState::Diskless;
+    p.peer_client = true;
+    assert!(st.ready_to_skip_initial_sync());
+}
+
+/// Each case changes exactly one thing in the fresh sample, so the guard it
+/// targets is the only reason for the rejection.
+#[test]
+fn every_single_deviation_from_the_fresh_sample_blocks_the_skip() {
+    type Mutation = fn(&mut ResourceStatus);
+    let cases: &[(&str, Mutation)] = &[
+        ("no connections", |st| st.connections.clear()),
+        ("connection Connecting", |st| {
+            st.connections[0].connection_state = ConnectionState::Connecting
+        }),
+        ("connection StandAlone", |st| {
+            st.connections[0].connection_state = ConnectionState::StandAlone
+        }),
+        ("connection state unknown", |st| {
+            st.connections[0].connection_state = ConnectionState::Other
+        }),
+        ("peer without peer devices", |st| st.connections[0].peer_devices.clear()),
+        ("peer device only for volume 1", |st| {
+            st.connections[0].peer_devices[0].volume = 1
+        }),
+        ("peer UpToDate", |st| peer0(st).peer_disk_state = DiskState::UpToDate),
+        ("peer Outdated", |st| peer0(st).peer_disk_state = DiskState::Outdated),
+        ("peer Consistent", |st| {
+            peer0(st).peer_disk_state = DiskState::Consistent
+        }),
+        ("peer DUnknown", |st| peer0(st).peer_disk_state = DiskState::DUnknown),
+        ("peer disk state unknown", |st| {
+            peer0(st).peer_disk_state = DiskState::Other
+        }),
+        ("peer Diskless without peer-client (failed disk)", |st| {
+            let p = peer0(st);
+            p.peer_disk_state = DiskState::Diskless;
+            p.peer_client = false;
+        }),
+        ("peer SyncSource", |st| {
+            peer0(st).replication_state = "SyncSource".into()
+        }),
+        ("peer SyncTarget", |st| {
+            peer0(st).replication_state = "SyncTarget".into()
+        }),
+        ("local role Primary", |st| st.role = Role::Primary),
+        ("local device open", |st| dev0(st).open = true),
+        ("resource suspended", |st| st.suspended = true),
+        ("local device client", |st| dev0(st).client = true),
+        ("local disk UpToDate", |st| dev0(st).disk_state = DiskState::UpToDate),
+        ("local disk Diskless", |st| dev0(st).disk_state = DiskState::Diskless),
+    ];
+    let wrongly_accepted: Vec<&str> = cases
+        .iter()
+        .filter(|(_, mutate)| {
+            let mut st = fresh();
+            mutate(&mut st);
+            st.ready_to_skip_initial_sync()
+        })
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(wrongly_accepted.is_empty(), "wrongly accepted: {wrongly_accepted:?}");
 }
