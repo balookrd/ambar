@@ -1,8 +1,8 @@
 //! The backing store of a copy: a sparse file attached as a loop device.
 
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use crate::exec::{Runner, command_line};
@@ -69,9 +69,10 @@ pub fn backing_file_bytes(size_bytes: u64, max_peers: u32) -> u64 {
     }
 }
 
-/// Creates a sparse file of `bytes` with mode 0600; a missing parent
-/// directory is created with mode 0700, an existing one is left as it is.
-/// Fails if the file already exists. When the resize fails the file is
+/// Creates a sparse file of `bytes` with mode 0600. The parent directory
+/// must exist: a missing one is an error, never created here (a fresh empty
+/// volumes directory would hide a storage that is not mounted). Fails if the
+/// file already exists. When the resize fails the file is
 /// removed again, so a retry does not meet a zero-length stub.
 pub fn create_sparse_file(path: &Path, bytes: u64) -> Result<(), BackingError> {
     let io_err = |action, source| BackingError::Io {
@@ -79,13 +80,6 @@ pub fn create_sparse_file(path: &Path, bytes: u64) -> Result<(), BackingError> {
         path: path.display().to_string(),
         source,
     };
-    if let Some(parent) = path.parent() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .map_err(|e| io_err("create directory for", e))?;
-    }
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
