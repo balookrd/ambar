@@ -19,15 +19,26 @@
 //! Another Controller instance (a leader handover with a request still in
 //! flight) is not covered by the mutex. Right after a successful create, still
 //! under the mutex, the call reads the live list again (`withdraw_if_lost`):
-//! if another object has the same minor or port and is older by
-//! `(creationTimestamp, name)`, the object this very call created is deleted
-//! (with the uid the create returned as a precondition) and the call answers
-//! `ABORTED`; the retry places against a list that shows the winner. The loser
-//! is new (`initialSync: Skip`, no agent has configured a colliding object:
+//! if another object has the same minor or port and a `creationTimestamp`
+//! that is not later than the own one, the object this very call created is
+//! deleted (with the uid the create returned as a precondition) and the call
+//! answers `ABORTED`; the retry places against a list that shows the other
+//! object. There is no tie-break by name: the timestamp has one-second
+//! resolution and the first creator checks before the second object exists,
+//! so a name rule could keep both. When two calls see each other within one
+//! second both withdraw and the provisioner retries. The withdrawn object is
+//! new (`initialSync: Skip`, no agent has configured a colliding object:
 //! `membership::collisions`), so it holds no data. An unclear state (own object
 //! missing or with another uid, a missing timestamp) deletes nothing and
-//! answers `ABORTED` as well; the agents keep refusing the colliding objects
-//! until somebody removes one.
+//! answers `ABORTED` as well.
+//!
+//! A retry that finds the object already there (the earlier attempt may have
+//! been cut between the create and the check, or ended unclear) does not
+//! know whether this call created it, so it deletes nothing: while the
+//! replicas are not all `UpToDate` it reads the live list and answers
+//! `ABORTED` when another object has the same minor or port; an operator
+//! deletes the newer volume (`collision_with`, a pure function of the lists,
+//! has no handle to delete anything).
 //!
 //! Every step is idempotent: the object name is the volume name, a repeated
 //! call finds the object and goes on to the wait.
@@ -211,7 +222,8 @@ impl ControllerService {
                 .await
                 .map_err(|e| api_status("cannot read the volume", e))?
             {
-                return same_volume(name, &object, wanted);
+                same_volume(name, &object, wanted)?;
+                return self.refuse_collision(name, &object).await;
             }
             let nodes = self
                 .nodes
@@ -247,10 +259,32 @@ impl ControllerService {
         )))
     }
 
-    /// After a create: another object with the same minor or port that wins
-    /// by `(creationTimestamp, name)` makes this call delete its own object
-    /// (`uid` is the one the create returned) and answer `ABORTED`. See the
-    /// module comment for the cases that delete nothing.
+    /// The retry path: the object `name` was there before this call. Read
+    /// only, deletes nothing. An object whose replicas are all `UpToDate`
+    /// passes without an API call; otherwise another object with the same
+    /// minor or port is `ABORTED` for an operator to resolve.
+    async fn refuse_collision(&self, name: &str, object: &ReplicatedVolume) -> Result<(), Status> {
+        let status = object.status.clone().unwrap_or_default();
+        if all_replicas_up_to_date(&object.spec, &status) {
+            return Ok(());
+        }
+        let list = self
+            .volumes
+            .list_fresh()
+            .await
+            .map_err(|e| api_status("cannot list the volumes", e))?;
+        match collision_with(name, &object.spec, &list) {
+            Some(other) => Err(Status::aborted(format!(
+                "volumes {name:?} and {other:?} use the same minor or port and cannot both be configured; an operator must delete one of them (the newer PVC), then retry"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// After a create: another object with the same minor or port and a
+    /// `creationTimestamp` not later than the own one makes this call delete
+    /// its own object (`uid` is the one the create returned) and answer
+    /// `ABORTED`. See the module comment for the cases that delete nothing.
     async fn withdraw_if_lost(&self, name: &str, uid: &str) -> Result<(), Status> {
         let list = self
             .volumes
@@ -279,16 +313,16 @@ impl ControllerService {
             let other_name = other.metadata.name.as_deref().unwrap_or_default();
             let Some(other_stamp) = other.metadata.creation_timestamp.as_ref() else {
                 return Err(Status::aborted(format!(
-                    "volume {other_name:?} uses the same minor or port as {name:?} and has no creationTimestamp; cannot tell which one is older, retry"
+                    "volume {other_name:?} (same minor or port as {name:?}) has no creationTimestamp; cannot tell which one is older, retry"
                 )));
             };
-            if (other_stamp, other_name) < (own_stamp, name) {
+            if other_stamp <= own_stamp {
                 self.volumes
                     .delete_exact(name, uid)
                     .await
                     .map_err(|e| api_status("cannot withdraw the volume that lost the placement", e))?;
                 return Err(Status::aborted(format!(
-                    "volume {other_name:?} was placed with the same minor or port at the same time and is older; {name:?} was withdrawn, retry"
+                    "volume {other_name:?} was placed with the same minor or port at the same time or earlier; {name:?} was withdrawn, retry"
                 )));
             }
         }
@@ -324,6 +358,19 @@ impl ControllerService {
             sleep(self.poll.min(deadline - now)).await;
         }
     }
+}
+
+/// The name of another object that uses the minor or the port of `spec`.
+/// Takes the lists and nothing that could delete.
+fn collision_with<'a>(
+    name: &str,
+    spec: &crate::crd::ReplicatedVolumeSpec,
+    list: &'a [ReplicatedVolume],
+) -> Option<&'a str> {
+    list.iter()
+        .filter(|o| o.metadata.name.as_deref() != Some(name))
+        .find(|o| o.spec.minor == spec.minor || o.spec.port == spec.port)
+        .map(|o| o.metadata.name.as_deref().unwrap_or_default())
 }
 
 fn not_ready_message(name: &str, spec: &crate::crd::ReplicatedVolumeSpec, status: &ReplicatedVolumeStatus) -> String {
