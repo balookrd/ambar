@@ -10,8 +10,10 @@
 //! |---|---|
 //! | `get` | `Api::get_opt` |
 //! | `list` | the reflector cache once the watch has listed once, `Api::list` before that |
-//! | `create` | `Api::create`; HTTP 409 is `Created::Exists` |
+//! | `list_fresh` | `Api::list` with `ListParams::default()` (no `resourceVersion`: the API server answers from a quorum read of etcd, not from its own cache), following `metadata.continue` while the server sets it |
+//! | `create` | `Api::create`; the uid of the stored object is in `Created::New`; HTTP 409 is `Created::Exists` |
 //! | `delete` | `Api::delete`; HTTP 404 is success |
+//! | `delete_exact` | `Api::delete` with `DeleteParams::preconditions` (`uid`); HTTP 404 is success, a failed precondition (HTTP 409) is `ApiError::Conflict` |
 //! | `remove_finalizer`, `mark_initial_sync_done` | `Api::get_opt`, then `Api::patch` with `Patch::Json`: `test /metadata/uid`, a `test` of the value that is edited, the edit; a refused patch (HTTP 409 or 422) reads again, up to `EDIT_ATTEMPTS` times |
 //! | `apply_node_status` | `Api::patch_status` with `Patch::Apply` and `PatchParams::apply("ambar-<node>").force()`; HTTP 404 is success |
 //! | `remove_node_entry` | `Api::get_opt`, then `Api::patch_status` with `Patch::Json`: `test /metadata/uid`, `test /status/nodes/<i>/name`, `remove /status/nodes/<i>`; retried like the two edits above |
@@ -44,7 +46,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
-use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
 use kube::runtime::reflector::{self, Store};
 use kube::runtime::watcher::{self, Event};
 use kube::runtime::{WatchStreamExt, watcher as watcher_fn};
@@ -70,9 +72,10 @@ pub enum ApiError {
     Other(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Created {
-    New,
+    /// The object was stored; the uid the API server gave it.
+    New(String),
     /// An object with this name was there already; it was not changed.
     Exists,
 }
@@ -82,9 +85,18 @@ pub enum Created {
 pub trait Volumes: Send + Sync {
     async fn get(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError>;
     async fn list(&self) -> Result<Vec<ReplicatedVolume>, ApiError>;
+    /// Every object as the API server holds it now: a live LIST, never the
+    /// watch cache. A caller that decides from the list what is free (the
+    /// placement of a new volume) needs this one: the cache lags behind a
+    /// create by the watch latency.
+    async fn list_fresh(&self) -> Result<Vec<ReplicatedVolume>, ApiError>;
     async fn create(&self, volume: &ReplicatedVolume) -> Result<Created, ApiError>;
     /// Not found is success.
     async fn delete(&self, name: &str) -> Result<(), ApiError>;
+    /// Deletes the object `name` only while it has the uid `uid`; an object
+    /// that was created again under the name is not touched. Not found is
+    /// success, another uid is `ApiError::Conflict`.
+    async fn delete_exact(&self, name: &str, uid: &str) -> Result<(), ApiError>;
     /// Removes `finalizer` from the object `name`, if the object has the uid
     /// `uid`. `true`: the finalizer was removed. `false`: the object does not
     /// exist, has another uid (it was created again), or does not carry the
@@ -307,9 +319,32 @@ impl Volumes for KubeVolumes {
         Ok(list.items)
     }
 
+    async fn list_fresh(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
+        // Default parameters: no `resourceVersion` (a quorum read) and no
+        // `limit` (the server returns everything in one response). The
+        // client does not paginate by itself; a `continue` token in the
+        // answer is followed all the same, so that a server that chunks
+        // anyway cannot hide objects.
+        let mut params = ListParams::default();
+        let mut items = Vec::new();
+        loop {
+            let page = self.api.list(&params).await.map_err(api_error)?;
+            items.extend(page.items);
+            match page.metadata.continue_ {
+                Some(token) if !token.is_empty() => params.continue_token = Some(token),
+                _ => return Ok(items),
+            }
+        }
+    }
+
     async fn create(&self, volume: &ReplicatedVolume) -> Result<Created, ApiError> {
         match self.api.create(&PostParams::default(), volume).await {
-            Ok(_) => Ok(Created::New),
+            Ok(stored) => match stored.metadata.uid {
+                Some(uid) => Ok(Created::New(uid)),
+                None => Err(ApiError::Other(
+                    "the API server stored the object without a uid".to_string(),
+                )),
+            },
             Err(e) if code_of(&e) == Some(409) => Ok(Created::Exists),
             Err(e) => Err(api_error(e)),
         }
@@ -317,6 +352,18 @@ impl Volumes for KubeVolumes {
 
     async fn delete(&self, name: &str) -> Result<(), ApiError> {
         match self.api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(e) if code_of(&e) == Some(404) => Ok(()),
+            Err(e) => Err(api_error(e)),
+        }
+    }
+
+    async fn delete_exact(&self, name: &str, uid: &str) -> Result<(), ApiError> {
+        let params = DeleteParams::default().preconditions(Preconditions {
+            uid: Some(uid.to_string()),
+            resource_version: None,
+        });
+        match self.api.delete(name, &params).await {
             Ok(_) => Ok(()),
             Err(e) if code_of(&e) == Some(404) => Ok(()),
             Err(e) => Err(api_error(e)),
