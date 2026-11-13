@@ -21,6 +21,9 @@
 //! | `remove_node_entry` | `Api::get_opt`, then `Api::patch_status` with `Patch::Json`: `test /metadata/uid`, `test /status/nodes/<i>/name`, `remove /status/nodes/<i>`; retried like the two edits above |
 //! | `watch` | `watcher` (with the default backoff) through a `reflector` that fills the cache |
 //!
+//! Every call of the table except `watch` runs under `API_CALL_TIMEOUT` (`bounded`); an
+//! expired call is an `ApiError::Other`, and the callers treat it like any other API error.
+//!
 //! Why a JSON patch for the two edits of the object itself (`metadata.finalizers`
 //! and `spec.initialSync`). The API server applies the patch to the stored
 //! object, so fields this build does not know are not read and not written
@@ -42,8 +45,10 @@
 //! object after the empty apply and, when its entry is still there, removes it
 //! with this patch.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -66,6 +71,12 @@ pub const FORMATTED_ANNOTATION: &str = "ambar.balookrd.github.io/formatted";
 /// How often an edit of the object reads it and patches it again after the
 /// API server refused the patch, before it gives up.
 pub const EDIT_ATTEMPTS: usize = 5;
+
+/// The longest a call to the API server (the watch stream excepted) may take.
+/// `kube::Client` has no timeout of its own: without this limit a request
+/// that an API server never answers would keep its caller, and the lock the
+/// caller holds, forever.
+pub const API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
@@ -295,6 +306,26 @@ pub fn replace_members_ops(
     ])
 }
 
+/// Runs one API call under `API_CALL_TIMEOUT`. The outer `Err` is the expiry,
+/// an `ApiError::Other`: callers end it in their retry paths (reconcile: the
+/// name is due again after `ERROR_DELAY`; CSI: `UNAVAILABLE`). The inner
+/// result is the call's own, for callers that handle HTTP codes themselves.
+pub(crate) async fn bounded<T>(
+    call: impl Future<Output = Result<T, kube::Error>>,
+) -> Result<Result<T, kube::Error>, ApiError> {
+    tokio::time::timeout(API_CALL_TIMEOUT, call).await.map_err(|_| {
+        ApiError::Other(format!(
+            "the API server did not answer within {} s",
+            API_CALL_TIMEOUT.as_secs()
+        ))
+    })
+}
+
+/// `bounded` for a call whose errors need no special handling.
+async fn call<T>(call: impl Future<Output = Result<T, kube::Error>>) -> Result<T, ApiError> {
+    bounded(call).await?.map_err(api_error)
+}
+
 fn code_of(error: &kube::Error) -> Option<u16> {
     match error {
         kube::Error::Api(status) => Some(status.code),
@@ -341,11 +372,7 @@ impl Objects for KubeVolumes {
         // `json_patch::Patch` is not named here: the operations are parsed into
         // whatever `Patch::Json` takes.
         let ops = serde_json::from_value(Value::Array(ops)).map_err(|e| ApiError::Other(e.to_string()))?;
-        match self
-            .api
-            .patch(name, &PatchParams::default(), &Patch::Json::<()>(ops))
-            .await
-        {
+        match bounded(self.api.patch(name, &PatchParams::default(), &Patch::Json::<()>(ops))).await? {
             Ok(_) => Ok(true),
             Err(e) if code_of(&e) == Some(404) => Ok(false),
             Err(e) => Err(api_error(e)),
@@ -354,10 +381,11 @@ impl Objects for KubeVolumes {
 
     async fn patch_status(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
         let ops = serde_json::from_value(Value::Array(ops)).map_err(|e| ApiError::Other(e.to_string()))?;
-        match self
-            .api
-            .patch_status(name, &PatchParams::default(), &Patch::Json::<()>(ops))
-            .await
+        match bounded(
+            self.api
+                .patch_status(name, &PatchParams::default(), &Patch::Json::<()>(ops)),
+        )
+        .await?
         {
             Ok(_) => Ok(true),
             Err(e) if code_of(&e) == Some(404) => Ok(false),
@@ -369,14 +397,14 @@ impl Objects for KubeVolumes {
 #[async_trait]
 impl Volumes for KubeVolumes {
     async fn get(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError> {
-        self.api.get_opt(name).await.map_err(api_error)
+        call(self.api.get_opt(name)).await
     }
 
     async fn list(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
         if self.listed.load(Ordering::SeqCst) {
             return Ok(self.cache.state().iter().map(|volume| (**volume).clone()).collect());
         }
-        let list = self.api.list(&ListParams::default()).await.map_err(api_error)?;
+        let list = call(self.api.list(&ListParams::default())).await?;
         Ok(list.items)
     }
 
@@ -389,7 +417,7 @@ impl Volumes for KubeVolumes {
         let mut params = ListParams::default();
         let mut items = Vec::new();
         loop {
-            let page = self.api.list(&params).await.map_err(api_error)?;
+            let page = call(self.api.list(&params)).await?;
             items.extend(page.items);
             match page.metadata.continue_ {
                 Some(token) if !token.is_empty() => params.continue_token = Some(token),
@@ -399,7 +427,7 @@ impl Volumes for KubeVolumes {
     }
 
     async fn create(&self, volume: &ReplicatedVolume) -> Result<Created, ApiError> {
-        match self.api.create(&PostParams::default(), volume).await {
+        match bounded(self.api.create(&PostParams::default(), volume)).await? {
             Ok(stored) => match stored.metadata.uid {
                 Some(uid) => Ok(Created::New(uid)),
                 None => Err(ApiError::Other(
@@ -412,7 +440,7 @@ impl Volumes for KubeVolumes {
     }
 
     async fn delete(&self, name: &str) -> Result<(), ApiError> {
-        match self.api.delete(name, &DeleteParams::default()).await {
+        match bounded(self.api.delete(name, &DeleteParams::default())).await? {
             Ok(_) => Ok(()),
             Err(e) if code_of(&e) == Some(404) => Ok(()),
             Err(e) => Err(api_error(e)),
@@ -424,7 +452,7 @@ impl Volumes for KubeVolumes {
             uid: Some(uid.to_string()),
             resource_version: None,
         });
-        match self.api.delete(name, &params).await {
+        match bounded(self.api.delete(name, &params)).await? {
             Ok(_) => Ok(()),
             Err(e) if code_of(&e) == Some(404) => Ok(()),
             Err(e) => Err(api_error(e)),
@@ -467,7 +495,7 @@ impl Volumes for KubeVolumes {
             "status": { "nodes": entry.into_iter().collect::<Vec<_>>() },
         });
         let params = PatchParams::apply(&format!("ambar-{node}")).force();
-        match self.api.patch_status(name, &params, &Patch::Apply(&patch)).await {
+        match bounded(self.api.patch_status(name, &params, &Patch::Apply(&patch))).await? {
             Ok(_) => Ok(()),
             Err(e) if code_of(&e) == Some(404) => Ok(()),
             Err(e) => Err(api_error(e)),
@@ -506,3 +534,7 @@ impl Volumes for KubeVolumes {
             .boxed()
     }
 }
+
+#[cfg(test)]
+#[path = "tests/kube.rs"]
+mod tests;

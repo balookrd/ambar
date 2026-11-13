@@ -50,3 +50,18 @@ fn an_invalid_map_is_an_error_naming_the_configmap() {
         .to_string();
     assert!(err.contains("ambar-nodes"), "{err}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_configmap_read_has_a_time_limit() {
+    let nodes = ConfigMapNodes::new(crate::tests::volumes::hanging_client(), "ambar-system");
+    let start = tokio::time::Instant::now();
+    let result = tokio::time::timeout(crate::agent::kube::API_CALL_TIMEOUT * 2, nodes.load())
+        .await
+        .expect("the read has no time limit of its own");
+    assert_eq!(start.elapsed(), crate::agent::kube::API_CALL_TIMEOUT);
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ambar-nodes") && err.contains("did not answer within 30 s"),
+        "{err}"
+    );
+}

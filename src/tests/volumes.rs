@@ -19,6 +19,21 @@ use crate::agent::nodes::NodeMap;
 use crate::config::ClusterNodes;
 use crate::crd::{MemberNode, NodeStatus, ReplicatedVolume};
 
+// ---- a client of an API server that never answers ----
+
+/// A `kube::Client` whose service accepts every request and never answers:
+/// the API server that lost power after the request was sent. Needs a tokio
+/// runtime (the client spawns its buffer worker).
+pub(crate) fn hanging_client() -> kube::Client {
+    use kube::client::Body;
+    use tonic::codegen::http::{Request, Response};
+
+    let service = tower::service_fn(|_: Request<Body>| {
+        std::future::pending::<Result<Response<Body>, std::convert::Infallible>>()
+    });
+    kube::Client::new(service, "default")
+}
+
 // ---- fake API server ----
 
 /// Objects (as JSON, so that fields this build does not know survive) in a
