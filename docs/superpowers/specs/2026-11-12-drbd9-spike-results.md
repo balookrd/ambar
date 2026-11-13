@@ -3029,3 +3029,563 @@ no-mounts
 
 `dv-2` и `dv-3` дали тот же вывод. `/var/tmp` на трёх узлах после повторного
 `clean.sh`: `cloud-init` и каталог `systemd-private-…`.
+
+## Опыты перед агентом (P1–P6)
+
+Дата: 2026-11-13. Стенд тот же: три ВМ Lima, ядро `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0 (`drbdadm --version` в поде `toolbox`: `DRBD_KERNEL_VERSION=9.3.4`, `DRBDADM_VERSION=9.35.0`). Опыты выполняет `stand/spike/pre-agent.sh <p1|…|p6>`: перед опытом и после него скрипт останавливает ресурсы `p1`–`p6`, отсоединяет loop-устройства и удаляет файлы. Каждый опыт запущен один раз. Перед первым опытом `stand/check.sh` дал `OK: stand is up`, `drbdsetup status` на трёх узлах — `# No currently configured DRBD found.`, `losetup -a` пуст.
+
+| Опыт | Вопрос | Результат |
+|---|---|---|
+| P1 | Работает ли `losetup --find --show --direct-io=on` из привилегированного контейнера и видит ли узел то же устройство | да: в контейнере `/dev/loop0`, `DIO` = `1`, `losetup -j` в контейнере и на узле печатает одну и ту же строку; символьная ссылка `/dev/ambar/p1`, созданная в контейнере, видна на узле |
+| P2 | Принимает ли `create-md` флаг `--max-peers=7` и каков `size` устройства для файла 1 ГиБ | флаг принят в форме `--max-peers=7`, `rc=0`, битовая карта 224 КБ; `size` = 1048316 КиБ, как по формуле |
+| P3 | Что печатает `drbdsetup status --json` без ресурсов и для несуществующего имени | без ресурсов `rc=0`, stdout `[`, `]`, пустая строка (пустой JSON-массив); для `nosuch` `rc=10`, stdout тот же пустой массив, stderr `nosuch: No such resource` |
+| P4 | Что делает `drbdadm adjust` на ресурсе, который не поднят | поднимает: на каждом из трёх узлов `rc=0`, ресурс настроен в ядре и соединён, у узла без диска `disk:Diskless client:yes` |
+| P5 | Что нужно, чтобы добавить сторону без диска к работающему ресурсу с писателем, и прерывается ли запись | `adjust` на двух узлах и `up` на новом достаточны: все три связи `Connected`, кворум не менялся; писатель не останавливался (рост номера в каждой выборке через ~0.5 с, состояние `S`/`R`, ошибок нет); подтверждённый номер 4206, на томе 4207 |
+| P6 | Что делает `drbdadm up` для файла без метаданных | `rc=1`, `No valid meta data found`; ресурс остаётся наполовину настроенным (`disk:Diskless`, соединения `StandAlone`, `quorum:no`), `drbdadm adjust` даёт ту же ошибку |
+
+### Отклонения от брифа и правки скрипта
+
+| Место | Что сказано | Что наблюдалось и что сделано |
+|---|---|---|
+| P3, ожидание в брифе | без ресурсов `drbdsetup status --json` «не печатает JSON-массив» | печатает пустой массив `[`, `]` и пустую строку (`od -c`: `[ \n ] \n \n`), `rc=0` |
+| P3, `nosuch` | «ненулевой код» | `rc=10`; stdout — тот же пустой массив, сообщение об ошибке идёт в stderr (проверено повтором с `2>/dev/null` и `2>&1 >/dev/null`) |
+| `pre-agent.sh`, `cleanup` | не удалял каталог `/mnt/pa` | добавлено `rmdir /mnt/pa 2>/dev/null || true` после `umount`; правка внесена после опытов P1–P6 и проверена запуском `pre-agent.sh clean` |
+
+Остальной текст скрипта выполнен без правок.
+
+### P1. loop-устройства из контейнера
+
+Вопрос: хватает ли привилегированного контейнера, чтобы агент подключал файл тома как loop-устройство с прямым вводом-выводом.
+
+```bash
+stand/spike/pre-agent.sh p1
+```
+
+```text
+### P1: loop devices from inside the container
+$ [dv-1] truncate -s 64M /var/lib/rancher/ambar/volumes/p1.img && losetup --find --show --direct-io=on /var/lib/rancher/ambar/volumes/p1.img
+/dev/loop0
+rc=0
+$ [dv-1] losetup -l -O NAME,BACK-FILE,DIO | grep p1.img
+/dev/loop0 /var/lib/rancher/ambar/volumes/p1.img   1
+rc=0
+$ [dv-1] losetup -j /var/lib/rancher/ambar/volumes/p1.img
+/dev/loop0: [65025]:262650 (/var/lib/rancher/ambar/volumes/p1.img)
+rc=0
+$ [dv-1 host] losetup -j /var/lib/rancher/ambar/volumes/p1.img
+/dev/loop0: [65025]:262650 (/var/lib/rancher/ambar/volumes/p1.img)
+rc=0
+$ [dv-1] mkdir -p /dev/ambar && ln -sfn $(losetup -j /var/lib/rancher/ambar/volumes/p1.img | cut -d: -f1) /dev/ambar/p1 && ls -l /dev/ambar/p1
+lrwxrwxrwx 1 root root 10 Nov 13 00:44 /dev/ambar/p1 -> /dev/loop0
+rc=0
+$ [dv-1 host] ls -l /dev/ambar/p1
+lrwxrwxrwx 1 root root 10 Nov 13 08:44 /dev/ambar/p1 -> /dev/loop0
+rc=0
+$ [dv-1] losetup -d $(losetup -j /var/lib/rancher/ambar/volumes/p1.img | cut -d: -f1)
+rc=0
+```
+
+Итог: в контейнере `losetup --find --show --direct-io=on` вернул `/dev/loop0`, `DIO` = `1`; `losetup -j` в контейнере и на узле называет `/dev/loop0` с одним и тем же `[65025]:262650`; ссылка `/dev/ambar/p1`, созданная в контейнере, видна на узле. Один прогон, один узел (`dv-1`).
+
+### P2. `create-md --max-peers=7` и размер устройства
+
+Вопрос: принимает ли drbd-utils 9.35.0 флаг `--max-peers` у `drbdadm create-md` и какой `size` получает устройство для файла 1 ГиБ. Ресурс `p2`: три стороны с диском (`node-id` 0, 1, 2), порт 7002, minor 1002.
+
+```bash
+stand/spike/pre-agent.sh p2
+```
+
+```text
+### P2: create-md --max-peers=7, device size for a 1 GiB file
+$ [dv-1] drbdadm create-md --force --max-peers=7 p2
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p2
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p2
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm up p2
+rc=0
+$ [dv-3] drbdadm create-md --force --max-peers=7 p2
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p2
+rc=0
+$ [dv-1] drbdsetup status p2 --json | grep -E '"size"|"disk-state"|"connection-state"'
+      "disk-state": "Inconsistent",
+      "size": 1048316,
+      "connection-state": "Connected", 
+      "connection-state": "Connected", 
+rc=0
+expected "size" by the formula (ceil(sectors/2^18)*8*7+72 sectors of metadata): 1048316
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p2/0
+rc=0
+$ [dv-1] drbdsetup status p2 --json | grep -E '"disk-state"|"peer-disk-state"'
+      "disk-state": "UpToDate",
+          "peer-disk-state": "UpToDate",
+          "peer-disk-state": "UpToDate",
+rc=0
+```
+
+Дополнительно (чтение справки, без изменений на стенде):
+
+```bash
+drbdadm create-md --help | grep -iE "max-peers|peer|force"
+drbdmeta --help | grep -i peers
+```
+
+```text
+  --max-peers=...
+  --peer-max-bio-size=...
+  --force[=...]
+  --diskful-peers=...
+  --peers=...
+  --peers-outdated[=...]
+  restore-md file [--max-peers {val}] [--peers {val}]
+  convert-dump file [--peers {val}] [--bitmap-slots {val}] [--bitmap-block-size {val}]
+  create-md [--effective-size {val}] [--diskful-peers {val}] [--peer-max-bio-size {val}] [--al-stripes {val}] [--al-stripe-size-kB {val}] [--bitmap-block-size {val}] [--peers {val}] [--bitmap-slots {val}] {max_peers}
+```
+
+Размеры метаданных из выводов P2, P3, P4 и P5 (файл 1 ГиБ, один прогон каждого):
+
+| Опыт | Команда `create-md` | Стороны с диском в файле ресурса | Битовая карта | `size`, КиБ |
+|---|---|---|---|---|
+| P2 | `--force --max-peers=7` | 3 | 224 КБ | 1048316 (`drbdsetup status --json`; то же в `dmesg` узла без диска: `size = 1024 MB (1048316 KB)`) |
+| P5 | `--force --max-peers=7` | 2 (третья сторона без диска добавлена позже) | 224 КБ | 1048316 (`dmesg` узла `dv-3` без диска) |
+| P3 | `--force` | 3 | 64 КБ | не снимался |
+| P4 | `--force` | 2 (третья сторона без диска) | 32 КБ | не снимался |
+
+Расчёт по формуле из брифа: 1 ГиБ = 2097152 секторов; `ceil(2097152 / 2^18) = 8`; 8 × 8 × 7 = 448 секторов (224 КиБ) битовой карты плюс 72 сектора (36 КиБ) = 520 секторов = 260 КиБ; 1048576 − 260 = 1048316. Совпадает с наблюдением. Размер проверен для одного размера файла (1 ГиБ) и одного значения `--max-peers`. `[проверить: формула для других размеров файла и значений --max-peers]`
+
+Итог: форма `--max-peers=7` принята, `rc=0`, `size` = 1048316 КиБ; запас в 7 сторон занимает 224 КиБ битовой карты независимо от числа сторон с диском в файле ресурса (в P3 и P4 без флага размер карты следует числу сторон с диском в файле: 64 и 32 КБ). Сторона без диска в P5 (`node-id` 2, внутри запаса) место сверх уже зарезервированных 224 КиБ не заняла: `size` узла без диска тот же, 1048316 КиБ. После `new-current-uuid --clear-bitmap` все три копии стали `UpToDate` за ≤ 3 с (одна выборка через `sleep 3`).
+
+### P3. `drbdsetup status --json` без ресурсов
+
+Вопрос: что печатает команда, когда в ядре нет ресурсов, и для имени, которого нет.
+
+```bash
+stand/spike/pre-agent.sh p3
+```
+
+```text
+### P3: drbdsetup status --json without resources
+$ [dv-1] drbdsetup status --json
+[
+]
+
+rc=0
+$ [dv-1] drbdsetup status
+# No currently configured DRBD found.
+rc=0
+$ [dv-1] drbdsetup status nosuch --json
+nosuch: No such resource
+[
+]
+
+rc=10
+
+### P3: the same with one configured resource
+$ [dv-1] drbdadm create-md --force p3 && drbdadm up p3
+initializing bitmap (64 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdsetup status --json | head -c 300
+[
+{
+  "name": "p3",
+  "node-id": 0,
+  "role": "Secondary",
+  "suspended": false,
+  "suspended-user": false,
+  "suspended-no-data": false,
+  "suspended-fencing": false,
+  "suspended-quorum": false,
+  "force-io-failures": false,
+  "write-ordering": "flush",
+  "devices": [
+    {
+      "volume": 0,
+    rc=0
+$ [dv-1] drbdsetup status nosuch --json
+[
+]
+
+nosuch: No such resource
+rc=10
+```
+
+Поток вывода проверен отдельно (ресурсов на стенде нет):
+
+```bash
+drbdsetup status --json 2>/dev/null | od -c; drbdsetup status nosuch --json 2>/dev/null | od -c
+drbdsetup status nosuch --json 2>&1 >/dev/null; drbdsetup status --json 2>&1 >/dev/null
+```
+
+```text
+A
+0000000   [  \n   ]  \n  \n
+0000005
+rc=0
+B
+0000000   [  \n   ]  \n  \n
+0000005
+rc=10
+C
+nosuch: No such resource
+rc=10
+D
+rc=0
+```
+
+Итог: без ресурсов `drbdsetup status --json` возвращает `rc=0` и печатает в stdout пустой JSON-массив (`[`, `]`, пустая строка), не пустой вывод. Для несуществующего имени `rc=10`, stdout тот же пустой массив, stderr `nosuch: No such resource`. С одним настроенным ресурсом `p3` вывод начинается с `[` и `{` с полями `name`, `node-id`, `role`, `suspended`…, `rc=0`; для `nosuch` при настроенном `p3` те же `rc=10` и пустой массив.
+
+### P4. `drbdadm adjust` на ресурсе, который не поднят
+
+Вопрос: поднимает ли `adjust` ресурс, которого в ядре нет, или отказывает. Ресурс `p4`: стороны `dv-1` (диск), `dv-2` (диск), `dv-3` (`disk none`); метаданные созданы на `dv-1` и `dv-2` без `--max-peers`; `up` не вызывался ни на одном узле.
+
+```bash
+stand/spike/pre-agent.sh p4
+```
+
+```text
+### P4: drbdadm adjust on a resource that is not up
+$ [dv-1] drbdadm create-md --force p4
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force p4
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+
+### P4: node with a copy, resource never configured: adjust instead of up
+$ [dv-1] drbdadm adjust p4
+rc=0
+$ [dv-1] drbdsetup status p4
+p4 role:Secondary
+  disk:Inconsistent quorum:no open:no
+  lima-dv-2 connection:Connecting
+  lima-dv-3 connection:Connecting
+
+rc=0
+
+### P4: second node with a copy: adjust
+$ [dv-2] drbdadm adjust p4
+rc=0
+
+### P4: node without a disk: adjust
+$ [dv-3] drbdadm adjust p4
+rc=0
+$ [dv-1] drbdsetup status p4 --verbose
+p4 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1004 disk:Inconsistent backing_dev:/dev/ambar/p4 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-3] drbdsetup status p4 --verbose
+p4 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1004 disk:Diskless client:yes backing_dev:none quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+
+rc=0
+```
+
+Итог: на трёх узлах, где ресурса в ядре не было, `drbdadm adjust p4` вернул `rc=0` и без вывода; после него ресурс настроен: на `dv-1` сразу `disk:Inconsistent quorum:no`, обе связи `Connecting`; после `adjust` на `dv-2` и `dv-3` (через `sleep 5`) все связи `Connected`, у `dv-3` `disk:Diskless client:yes`, на сторонах с диском `Inconsistent` (начальная синхронизация не пропускалась). Отдельный `up` не потребовался. Один прогон.
+
+### P5. Сторона без диска добавляется к работающему ресурсу с писателем
+
+Вопрос: что нужно сделать на узлах, чтобы к поднятому ресурсу из двух копий, на котором идёт запись, добавилась третья сторона без диска; прерывается ли запись; что делает кворум. Ресурс `p5`: `dv-1` (`node-id` 0) и `dv-2` (`node-id` 1), `create-md --max-peers=7`, `up`, `new-current-uuid --clear-bitmap`; на `dv-1` ext4, `probe.sh` пишет и вызывает `sync` на каждую запись, `watch.sh` печатает номер каждые ~0.5 с. Затем файл ресурса переписан с тремя сторонами (`dv-3`, `node-id` 2, `disk none`), `adjust` на `dv-1` и `dv-2`, `up` на `dv-3`. Узлы работают в одной временной зоне, метки времени в выводе — по часам узлов.
+
+```bash
+stand/spike/pre-agent.sh p5
+```
+
+```text
+### P5: two-node resource with a writer, then a node without a disk is added
+$ [dv-1] drbdadm create-md --force --max-peers=7 p5
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p5
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p5
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm up p5
+rc=0
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p5/0
+rc=0
+$ [dv-1] drbdsetup status p5 --verbose
+p5 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1005 disk:UpToDate backing_dev:/dev/ambar/p5 quorum:yes open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+08:49:38.169
+803
+
+### P5: the resource file now lists three nodes; adjust on the two running nodes
+08:49:40.653
+$ [dv-1] drbdadm adjust p5
+rc=0
+$ [dv-2] drbdadm adjust p5
+rc=0
+
+### P5: the new node brings the resource up without a disk
+$ [dv-3] drbdadm up p5
+rc=0
+$ [dv-1] drbdsetup status p5 --verbose
+p5 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1005 disk:UpToDate backing_dev:/dev/ambar/p5 quorum:yes open:yes
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:24 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p5 --verbose
+p5 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1005 disk:UpToDate backing_dev:/dev/ambar/p5 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-3] drbdsetup status p5 --verbose
+p5 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1005 disk:Diskless client:yes backing_dev:none quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+
+### P5: did the writer stall or fail while the node was added?
+08:49:38.827 acked=855 probe=alive:S
+08:49:39.338 acked=904 probe=alive:R
+08:49:39.850 acked=971 probe=alive:S
+08:49:40.363 acked=1042 probe=alive:S
+08:49:40.874 acked=1114 probe=alive:S
+08:49:41.385 acked=1201 probe=alive:S
+08:49:41.911 acked=1272 probe=alive:S
+08:49:42.433 acked=1347 probe=alive:S
+08:49:42.969 acked=1470 probe=alive:S
+08:49:43.484 acked=1546 probe=alive:S
+08:49:44.001 acked=1596 probe=alive:S
+08:49:44.519 acked=1658 probe=alive:S
+08:49:45.031 acked=1780 probe=alive:S
+08:49:45.543 acked=1950 probe=alive:S
+08:49:46.053 acked=2080 probe=alive:S
+08:49:46.561 acked=2258 probe=alive:S
+08:49:47.070 acked=2348 probe=alive:S
+08:49:47.580 acked=2420 probe=alive:S
+08:49:48.107 acked=2492 probe=alive:S
+08:49:48.622 acked=2580 probe=alive:S
+08:49:49.131 acked=2775 probe=alive:S
+08:49:49.640 acked=2862 probe=alive:S
+08:49:50.149 acked=3035 probe=alive:S
+08:49:50.659 acked=3226 probe=alive:S
+08:49:51.166 acked=3414 probe=alive:S
+08:49:51.676 acked=3542 probe=alive:S
+08:49:52.190 acked=3604 probe=alive:S
+08:49:52.705 acked=3658 probe=alive:R
+08:49:53.224 acked=3733 probe=alive:S
+08:49:53.745 acked=3783 probe=alive:R
+08:49:54.268 acked=3844 probe=alive:S
+08:49:54.803 acked=3867 probe=alive:S
+08:49:55.332 acked=3916 probe=alive:S
+08:49:55.847 acked=3966 probe=alive:S
+08:49:56.366 acked=4038 probe=alive:S
+08:49:56.883 acked=4079 probe=alive:S
+08:49:57.405 acked=4103 probe=alive:S
+08:49:57.922 acked=4158 probe=alive:S
+08:49:58.452 acked=4186 probe=alive:S
+08:49:58.964 acked=4195 probe=alive:S
+[Fri Nov 13 08:49:32 2026] drbd p5/0 drbd1005: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Fri Nov 13 08:49:32 2026] drbd p5: Preparing cluster-wide state change 2303985897: 0->all role( Secondary )
+[Fri Nov 13 08:49:32 2026] drbd p5: State change 2303985897: primary_nodes=0, weak_nodes=0
+[Fri Nov 13 08:49:32 2026] drbd p5: Committing cluster-wide state change 2303985897 (0ms)
+[Fri Nov 13 08:49:32 2026] drbd p5: role( Primary -> Secondary ) [mkfs.ext4:82655 auto-demote]
+[Fri Nov 13 08:49:32 2026] drbd p5: Preparing cluster-wide state change 1021233363: 0->all role( Primary )
+[Fri Nov 13 08:49:32 2026] drbd p5: State change 1021233363: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFFC
+[Fri Nov 13 08:49:32 2026] drbd p5: Committing cluster-wide state change 1021233363 (4ms)
+[Fri Nov 13 08:49:32 2026] drbd p5: role( Secondary -> Primary ) [mount:82684 auto-promote]
+[Fri Nov 13 08:49:32 2026] drbd p5/0 drbd1005: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Fri Nov 13 08:49:32 2026] drbd p5/0 drbd1005: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Fri Nov 13 08:49:32 2026] drbd p5/0 drbd1005: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Fri Nov 13 08:49:44 2026] drbd p5 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Fri Nov 13 08:49:44 2026] drbd p5 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Fri Nov 13 08:49:44 2026] drbd p5: Preparing cluster-wide state change 857000934: 0->2 role( Primary ) conn( Connected )
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005 lima-dv-3: self AA3F417BDC3399FA:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:0
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005 lima-dv-3: peer's exposed UUID: 0000000000000000
+[Fri Nov 13 08:49:45 2026] drbd p5: State change 857000934: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Fri Nov 13 08:49:45 2026] drbd p5: Committing cluster-wide state change 857000934 (16ms)
+[Fri Nov 13 08:49:45 2026] drbd p5 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005 lima-dv-3: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) [connected]
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005: gen-obligation: DISCHARGED(promoted) -> ARMED(peer-returned-diskless)
+[Fri Nov 13 08:49:45 2026] drbd p5: Preparing remote state change 2427081311: 1->2 role( Secondary ) conn( Connected )
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005: gen-obligation: ARMED(peer-returned-diskless) -> MINTING(peer-returned-diskless)
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005: gen-obligation: MINTING(peer-returned-diskless) -> DISCHARGED(peer-returned-diskless)
+[Fri Nov 13 08:49:45 2026] drbd p5 lima-dv-2: Committing remote state change 2427081311 (primary_nodes=1)
+
+### P5: stop the writer, compare acknowledged and on-volume numbers, read through the new node
+acked=4206 on-volume=4207
+on-volume-via-dv-3=4207
+```
+
+`dmesg -T` с трёх узлов по ресурсу `p5` (выбор строк по `quorum`, времени 08:49:33–08:49:59 и 08:50, без `gen-obligation`; снято после опыта и очистки, команда `dmesg -T | grep -E "drbd p5" | grep -E "quorum|08:49:(3[3-9]|[45])" | grep -vE "gen-obligation"`):
+
+```text
+== dv-1
+[Fri Nov 13 08:49:21 2026] drbd p5/0 drbd1005: quorum( no -> yes ) [connected]
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Fri Nov 13 08:49:41 2026] drbd p5 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Fri Nov 13 08:49:44 2026] drbd p5 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Fri Nov 13 08:49:44 2026] drbd p5: Preparing cluster-wide state change 857000934: 0->2 role( Primary ) conn( Connected )
+[Fri Nov 13 08:49:45 2026] drbd p5: State change 857000934: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Fri Nov 13 08:49:45 2026] drbd p5 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005 lima-dv-3: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) [connected]
+[Fri Nov 13 08:50:11 2026] drbd p5/0 drbd1005: Would lose quorum, but using tiebreaker logic to keep
+[Fri Nov 13 08:50:11 2026] drbd p5/0 drbd1005: quorum( yes -> no ) [down]
+== dv-2
+[Fri Nov 13 08:49:21 2026] drbd p5/0 drbd1005: quorum( no -> yes ) [remote]
+[Fri Nov 13 08:49:42 2026] drbd p5 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 08:49:42 2026] drbd p5 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Fri Nov 13 08:49:42 2026] drbd p5 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Fri Nov 13 08:49:45 2026] drbd p5 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005 lima-dv-3: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) [connected]
+[Fri Nov 13 08:50:11 2026] drbd p5/0 drbd1005: Would lose quorum, but using tiebreaker logic to keep
+[Fri Nov 13 08:50:20 2026] drbd p5/0 drbd1005: disk( Detaching -> Diskless ) quorum( yes -> no ) [go-diskless]
+== dv-3
+[Fri Nov 13 08:49:44 2026] drbd p5: Starting worker thread (node-id 2)
+[Fri Nov 13 08:49:44 2026] drbd p5 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Fri Nov 13 08:49:44 2026] drbd p5 lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005: size = 1024 MB (1048316 KB)
+[Fri Nov 13 08:49:45 2026] drbd p5/0 drbd1005: quorum( no -> yes ) [remote]
+[Fri Nov 13 08:50:20 2026] drbd p5/0 drbd1005: quorum( yes -> no ) [remote]
+```
+
+В листинге `dmesg` оставлены не все строки: в сводке выше пропущены строки `Starting receiver thread`, `Feature flags`, `Committing`, `self`/`peer's exposed UUID` и `pdsk` для пиров `dv-3`; полный вывод в протокол не включён.
+
+Наблюдаемые факты:
+
+| Факт | Значение | Источник |
+|---|---|---|
+| `adjust` на `dv-1` | `rc=0`; в `dmesg` `dv-1` соединение с `dv-3` появляется с меткой `[connect]` в 08:49:41 | `date` до `adjust`: 08:49:40.653; `dmesg` `dv-1` |
+| `adjust` на `dv-2` | `rc=0`; соединение с `dv-3` с меткой `[connect]` в 08:49:42 | `dmesg` `dv-2` |
+| `up` на `dv-3` | `rc=0`; соединения с `dv-1` и `dv-2` `Connected` в 08:49:45 | `dmesg` `dv-3` |
+| Достаточность | да: после трёх команд на всех узлах три связи `Connected`, `dv-3` `disk:Diskless client:yes quorum:yes`, роль `dv-1` `Primary` | `drbdsetup status p5 --verbose` |
+| Необходимость `adjust` на запущенных узлах | без `adjust` не запускалось; в этом прогоне соединение с `dv-3` на `dv-1` и `dv-2` возникло только с командой `adjust` каждого из них `[проверить: нужен ли adjust на каждом из двух узлов по отдельности]` | `dmesg` |
+| Остановка писателя | нет: в `watch.log` номер растёт между всеми 40 выборками (интервал 0.51–0.54 с, минимальный прирост 9 за выборку: 4186 → 4195), состояние писателя `S` или `R`, не `D`; `probe.log` пуст | `watch.log`, `probe.log` |
+| Скорость записи | 855 → 3542 за 12.85 с до 08:49:51.7 (~209 номеров/с); 3542 → 4195 за 7.29 с после (~90 номеров/с); падение началось примерно через 6–7 с после `Connected` с `dv-3` `[проверить: причина падения скорости — связь с dv-3, нагрузка ВМ или ext4]` | `watch.log` |
+| Кворум | при добавлении не менялся: у `dv-1` и `dv-2` нет строк `quorum(` между 08:49:21 и 08:50:11; `quorum( no -> yes )` у `dv-3` при подключении к двум сторонам с диском; строки 08:50:11–08:50:20 (`Would lose quorum, but using tiebreaker logic to keep`, `quorum( yes -> no )`) совпадают по времени с очисткой после опыта `[проверить: причина — остановка ресурса очисткой]` | `dmesg` |
+| Подтверждено / на томе | `acked=4206 on-volume=4207`; на `dv-3` после размонтирования на `dv-1` `on-volume-via-dv-3=4207` | вывод опыта |
+
+Итог: на двух работающих узлах нужен `drbdadm adjust` после обновления файла ресурса, на новом узле — `drbdadm up`; запись на `dv-1` не прерывалась и не получала ошибок, кворум не менялся. Номер на томе (4207) на единицу больше подтверждённого (4206): процесс остановлен между записью и подтверждением, подтверждённых записей, не оказавшихся на томе, нет; через сторону без диска `dv-3` читается тот же номер. Один прогон, одна пара `adjust`; порядок «`up` на новом узле после `adjust` на старых» не менялся.
+
+### P6. `drbdadm up` для файла без метаданных
+
+Вопрос: отказывает ли `up`, когда в файле нет метаданных DRBD. Ресурс `p6`: файл 1 ГиБ без `create-md`, loop-устройство, `up` на `dv-1`.
+
+```bash
+stand/spike/pre-agent.sh p6
+```
+
+```text
+### P6: drbdadm up on a backing file without metadata
+$ [dv-1] drbdadm up p6
+rc=1
+No valid meta data found
+Command 'drbdmeta 1006 v09 /dev/ambar/p6 internal repair-md' terminated with exit code 255
+$ [dv-1] drbdsetup status p6
+p6 role:Secondary
+  disk:Diskless client:no quorum:no open:no
+  lima-dv-2 connection:StandAlone
+  lima-dv-3 connection:StandAlone
+
+rc=0
+$ [dv-1] drbdadm adjust p6
+No valid meta data found
+rc=1
+Command 'drbdmeta 1006 v09 /dev/ambar/p6 internal repair-md' terminated with exit code 255
+```
+
+`dmesg -T` на `dv-1` по ресурсу `p6` (`dmesg -T | grep -E "drbd p6|drbd1006" | tail -n 25`):
+
+```text
+[Fri Nov 13 08:50:56 2026] drbd p6: Starting worker thread (node-id 0)
+[Fri Nov 13 08:50:56 2026] drbd p6 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Fri Nov 13 08:50:56 2026] drbd p6 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 08:51:05 2026] drbd p6 lima-dv-2: Terminating sender thread
+[Fri Nov 13 08:51:05 2026] drbd p6 lima-dv-3: Terminating sender thread
+```
+
+Итог: `drbdadm up p6` вернул `rc=1` с текстом `No valid meta data found` и `Command 'drbdmeta 1006 v09 /dev/ambar/p6 internal repair-md' terminated with exit code 255`. Ресурс при этом остался в ядре: `drbdsetup status p6` печатает `disk:Diskless client:no quorum:no`, обе связи `StandAlone`, `rc=0`; `drbdadm adjust p6` повторил ту же ошибку (`rc=1`). Для возврата в исходное состояние скрипт выполнил `drbdsetup down p6` (очистка после опыта). Состояние ресурса после неудачного `up` — наполовину настроенное, не отсутствующее. Один прогон, один узел.
+
+### Очистка стенда после опытов P1–P6
+
+```bash
+stand/spike/pre-agent.sh clean && stand/spike/clean.sh && stand/check.sh
+```
+
+```text
+OK: stand is up
+```
+
+На трёх узлах `drbdsetup status` — `# No currently configured DRBD found.`, `losetup -l -n | wc -l` = 0, `/dev/ambar` и `/mnt/pa` отсутствуют, в `/var/tmp` только `cloud-init` и каталог `systemd-private-…`, `/sys/module/drbd/version` = `9.3.4`.
