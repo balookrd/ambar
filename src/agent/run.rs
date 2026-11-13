@@ -11,7 +11,7 @@
 //! | Path | Task | Checked before the lock | Guard, under the lock |
 //! |---|---|---|---|
 //! | `delete_replica`, peer checks | `DeleteReplica`, resource configured in the kernel, any file state | the DRBD status can be read; rules 1-3 below on the object read at the start of the pass | the DRBD status is read again; rules 1-3a below; 3b uses the same object |
-//! | `delete_replica`, no data | `DeleteReplica`, resource not configured, and `prove_no_data` shows the node holds no data (rows 3 and 5 of the table below) | the resource is not configured; `prove_no_data` | the DRBD status is read again and the resource is still not configured; `prove_no_data` again |
+//! | `delete_replica`, no data | `DeleteReplica`, resource not configured, and `prove_no_data` shows the node holds no data (rows 3 and 5 of the table below) | the resource is not configured; `prove_no_data` | the DRBD status is read again and the resource is still not configured; `prove_no_data` again; then `Reconciler::remove_unconfigured` reads the status once more and refuses a resource that has appeared |
 //! | `clean_diskless` | `CleanDiskless` | nothing | no backing file exists |
 //!
 //! `DeleteReplica` by what this node holds. The first matching row applies;
@@ -21,21 +21,27 @@
 //!
 //! | Resource in the kernel | Backing file | Other facts | Action |
 //! |---|---|---|---|
-//! | configured | any (absent, no ready marker, ready marker) | | peer checks, rules 1-3 below: DRBD holds the disk, so the file state does not matter |
+//! | configured | any (absent, no ready marker, ready marker), when the node has an image or traces | | peer checks, rules 1-3 below: DRBD holds the disk, so the file state does not matter. With nothing local `decide` returns `DropFinalizer` and this table is not reached |
 //! | not configured | ready marker | | `bring_up`: `Reconciler::apply` with the object's description and `initialSync: Done`, status written, `Progress` (1 s); nothing is deleted. A description that cannot be converted or a failed `apply`: the copy is kept, the error is in the status `message`, `Kept` (30 s) |
 //! | not configured | absent | no loop device is attached to the image path (`local::loops_holding` is empty) | no data: removed without the peer checks |
 //! | not configured | absent | a loop device still holds the deleted file | kept, `Kept`: "the backing file is gone but a loop device still holds it" |
-//! | not configured | no ready marker | the synced marker is absent and `Drbd::metadata` (`drbdadm dump-md`) is `Absent` or `Fresh` | no data: removed without the peer checks |
-//! | not configured | no ready marker | the synced marker exists, or the metadata is `Used`, or the check fails | kept, `Kept`; the message names the reason (same wording family as `ReadyMarkerLost` and `MetadataPresent` of `reconcile`); the operator decides |
+//! | not configured | no ready marker | the synced marker is absent, the device link `<dev_dir>/<volume>` points at a loop device that `loop_holders` reports for the image under its live path (not `(deleted)`), and `Drbd::metadata` (`drbdadm dump-md`) is `Absent` or `Fresh` | no data: removed without the peer checks |
+//! | not configured | no ready marker | the synced marker exists, or the device link is missing or points at another loop device or at one that holds a deleted file, or the metadata is `Used`, or the check fails | kept, `Kept`; the message names the reason (same wording family as `ReadyMarkerLost` and `MetadataPresent` of `reconcile`); the operator decides |
 //!
 //! Every fact of "no data" is read, never assumed. A path that cannot be
 //! inspected, a `losetup` or `drbdadm dump-md` that fails (`dump-md` needs the
 //! resource file, the device link and an attached loop device; nothing is
-//! prepared on the deletion path) and a status that cannot be read all count as
-//! "cannot be shown": the copy stays. `losetup -j <path>` is not used for the
+//! prepared on the deletion path), a `losetup --list` line that is not a device
+//! followed by a backing file or whose backing file ends in `*` (util-linux cut
+//! a long name) and a status that cannot be read all count as "cannot be
+//! shown": the copy stays. `dump-md` reads whatever the device link points at,
+//! so the link is checked against the loop devices of this volume's image first. `losetup -j <path>` is not used for the
 //! loop devices of a missing file: it finds files by path and says nothing for
 //! a path that no longer exists, while `losetup --list` shows the device with
-//! `<path> (deleted)` (checked on the stand).
+//! `<path> (deleted)` (checked on the stand). The listing is read by
+//! `backing::loop_holders`, for the proof here (through `local::loops_holding`)
+//! and for the detach in `Reconciler::remove_checked`, so both see the same
+//! devices, also with the volumes directory behind a symbolic link.
 //!
 //! Why the bring-up: after a reboot the resource of a deleting object is not
 //! configured, so this node sees no peers and the peers see it not connected
@@ -87,6 +93,11 @@
 //! alive but was restarted does not need this: it brings its resource up as
 //! above.
 //!
+//! Known limit: `status.nodes` is edited by hand only with a JSON patch on the
+//! status subresource (`--type=json`, as in the command above). A merge patch
+//! (`kubectl patch --type=merge`) replaces the whole list and removes the
+//! entries of the other nodes, which their peers read as "cleaned up".
+//!
 //! Other rules:
 //!
 //! * `Task::CleanDiskless` deletes no backing file: the guard stops it when
@@ -113,6 +124,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
+use std::fs;
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,6 +136,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
+use crate::backing::loop_holders;
 use crate::crd::{NodeStatus, ReplicatedVolume, ReplicatedVolumeSpec, to_volume_spec};
 use crate::drbd::adm::{Drbd, Metadata};
 use crate::drbd::status::{ConnectionState, ResourceStatus, Role};
@@ -318,8 +332,9 @@ enum Check {
 /// * the state of the backing file is still `file`;
 /// * `Absent`: no loop device is attached to the path of the file, so the
 ///   deleted inode is not held;
-/// * `Pending`: the synced marker is absent and `Drbd::metadata` is `Absent`
-///   or `Fresh`.
+/// * `Pending`: the synced marker is absent, the device link of the volume is
+///   on a loop device that holds this very file (`prove_device_link`), and
+///   `Drbd::metadata` is `Absent` or `Fresh`.
 fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileState) -> Result<(), String> {
     let now = file_state(paths, volume).map_err(|e| format!("cannot inspect the backing file: {e}"))?;
     if now != file {
@@ -351,6 +366,8 @@ fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileSta
                      deleted: check it by hand, then restore the ready marker or run `ambar remove --name {volume}`"
                 ));
             }
+            // `dump-md` reads whatever the device link points at.
+            prove_device_link(paths, runner, volume)?;
             match (Drbd { runner }).metadata(volume) {
                 Ok(Metadata::Absent | Metadata::Fresh) => Ok(()),
                 Ok(Metadata::Used) => Err(
@@ -362,6 +379,54 @@ fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileSta
             }
         }
     }
+}
+
+/// Shows that `drbdadm dump-md <volume>` would read this volume's backing
+/// file: the device link `<dev_dir>/<volume>` is a symbolic link that points
+/// at a loop device which `loop_holders` reports for the image under its live
+/// path. A missing link, a link elsewhere, a loop device that holds only the
+/// deleted inode and a listing that cannot be read all fail the proof.
+fn prove_device_link(paths: &Paths, runner: &dyn Runner, volume: &str) -> Result<(), String> {
+    let link = paths.device_link(volume);
+    let target = match fs::read_link(&link) {
+        Ok(target) => target.to_string_lossy().into_owned(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(format!(
+                "the device link {} is missing, so `drbdadm dump-md` cannot be shown to read the backing file; check \
+                 it by hand",
+                link.display()
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "the device link {} cannot be read as a symbolic link ({e}); check it by hand",
+                link.display()
+            ));
+        }
+    };
+    let holders = loop_holders(runner, &paths.image(volume))
+        .map_err(|e| format!("cannot tell which loop device holds the backing file: {e}"))?;
+    if holders.iter().any(|h| h.device == target && !h.deleted) {
+        return Ok(());
+    }
+    if holders.iter().any(|h| h.device == target) {
+        return Err(format!(
+            "the device link {} points at {target}, which holds a deleted file under the name of the backing file, \
+             not the file itself; check it by hand",
+            link.display()
+        ));
+    }
+    if holders.is_empty() {
+        return Err(format!(
+            "the device link {} points at {target} but no loop device holds the backing file; check it by hand",
+            link.display()
+        ));
+    }
+    Err(format!(
+        "the device link {} points at {target} but the backing file is held by {}; check it by hand",
+        link.display(),
+        holders.iter().map(|h| h.device.as_str()).collect::<Vec<_>>().join(", ")
+    ))
 }
 
 fn uid_of(object: &ReplicatedVolume) -> Result<String, AgentError> {
@@ -746,7 +811,12 @@ impl Agent {
                         }
                     }
                 };
-                Reconciler { paths, runner }.remove_checked(&name, &guard)
+                let reconciler = Reconciler { paths, runner };
+                match &check {
+                    // The resource must still be absent when the files go.
+                    Check::NoData(_) => reconciler.remove_unconfigured(&name, &guard),
+                    Check::Peers(_) => reconciler.remove_checked(&name, &guard),
+                }
             })
             .await?;
         match removed {

@@ -1109,13 +1109,10 @@ fn remove_rejects_an_invalid_name_before_touching_anything() {
     assert!(!paths.volumes_dir.exists());
 }
 
-/// A node where the image is gone and `losetup` reports `back_file` behind
-/// /dev/loop5.
-fn node_with_back_file(back_file: String) -> FakeRunner {
+/// A node where the image is gone and `losetup --list` prints `listing`.
+fn node_with_listing(listing: String) -> FakeRunner {
     FakeRunner::new(move |program, args| match (program, args) {
-        ("losetup", ["--list", "--noheadings", "--output", "BACK-FILE", "/dev/loop5"]) => {
-            out(0, &format!("{back_file}\n"), "")
-        }
+        ("losetup", ["--list", "--noheadings", "--output", "NAME,BACK-FILE"]) => out(0, &listing, ""),
         ("drbdsetup", _) => out(0, "[\n]\n", ""),
         _ => out(0, "", ""),
     })
@@ -1133,8 +1130,7 @@ fn remove_detaches_the_loop_device_of_a_deleted_image() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     prepare_link_without_image(&paths);
-    let deleted = format!("{} (deleted)", paths.image("spike").display());
-    let runner = node_with_back_file(deleted);
+    let runner = node_with_listing(format!("/dev/loop5 {} (deleted)\n", paths.image("spike").display()));
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
@@ -1151,14 +1147,83 @@ fn remove_leaves_a_loop_device_of_another_file_alone() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     prepare_link_without_image(&paths);
-    let other = paths.image("other").display().to_string();
-    let runner = node_with_back_file(other);
+    let runner = node_with_listing(format!("/dev/loop5 {}\n", paths.image("other").display()));
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
     };
     assert_eq!(reconciler.remove("spike").unwrap(), ["remove-marker", "remove-link"]);
     assert_eq!(count(&runner, "losetup -d"), 0);
+}
+
+#[test]
+fn remove_detaches_every_loop_device_of_a_deleted_image_whatever_the_link_says() {
+    // Two devices hold the deleted file and the device link points at neither.
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_link_without_image(&paths);
+    let image = paths.image("spike");
+    let runner = node_with_listing(format!(
+        "/dev/loop1 {0} (deleted)\n/dev/loop2 /elsewhere/x.img\n/dev/loop3 {0} (deleted)\n",
+        image.display()
+    ));
+    let steps = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    }
+    .remove("spike")
+    .unwrap();
+    assert_eq!(steps, ["detach-loop", "detach-loop", "remove-marker", "remove-link"]);
+    let detaches: Vec<_> = runner
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("losetup -d"))
+        .collect();
+    assert_eq!(detaches, ["losetup -d /dev/loop1", "losetup -d /dev/loop3"]);
+}
+
+#[test]
+fn remove_finds_the_loop_device_when_the_volumes_directory_is_behind_a_link() {
+    // `losetup` prints the canonical path; the configured one goes through a link.
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let linked = tmp.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let mut paths = temp_paths(&tmp);
+    paths.volumes_dir = linked;
+    prepare_link_without_image(&paths);
+    let canonical = real.canonicalize().unwrap();
+    let runner = node_with_listing(format!("/dev/loop5 {}/spike.img (deleted)\n", canonical.display()));
+    let steps = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    }
+    .remove("spike")
+    .unwrap();
+    assert_eq!(steps, ["detach-loop", "remove-marker", "remove-link"]);
+    assert_eq!(count(&runner, "losetup -d /dev/loop5"), 1);
+}
+
+#[test]
+fn remove_stops_when_the_loop_devices_of_a_missing_image_cannot_be_listed() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_link_without_image(&paths);
+    let runner = FakeRunner::new(|program, _| match program {
+        "losetup" => out(1, "", "losetup: cannot open /dev/loop-control"),
+        "drbdsetup" => out(0, "[\n]\n", ""),
+        _ => out(0, "", ""),
+    });
+    let err = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    }
+    .remove("spike")
+    .unwrap_err();
+    assert!(err.to_string().contains("cannot open /dev/loop-control"), "{err}");
+    assert!(paths.ready_marker("spike").exists());
+    assert!(fs::symlink_metadata(paths.device_link("spike")).is_ok());
 }
 
 // ---- durability of the image ----
@@ -1316,6 +1381,62 @@ fn a_guard_that_passes_lets_remove_proceed() {
     let steps = reconciler.remove_checked("spike", &|| Ok(())).unwrap();
     assert!(steps.contains(&"remove-file"), "{steps:?}");
     assert!(!paths.image("spike").exists());
+}
+
+#[test]
+fn a_removal_that_requires_an_absent_resource_refuses_one_that_appeared_after_the_guard() {
+    // The guard saw the resource not configured; the status read that decides
+    // `down` shows it. Nothing is run beyond the reads and nothing is deleted.
+    let (_tmp, paths, _) = copy_on_disk();
+    let reads = Arc::new(Mutex::new(0));
+    let counter = reads.clone();
+    let runner = FakeRunner::new(move |program, _| match program {
+        "drbdsetup" => {
+            let mut n = counter.lock().unwrap();
+            *n += 1;
+            out(0, if *n == 1 { "[\n]\n" } else { THREE_UPTODATE }, "")
+        }
+        _ => out(0, "", ""),
+    });
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let guard = || {
+        // Stands for the status read of the agent's guard.
+        let status = Drbd { runner: &runner }.status("spike").map_err(|e| e.to_string())?;
+        assert!(status.is_none());
+        Ok(())
+    };
+    let err = reconciler.remove_unconfigured("spike", &guard).unwrap_err();
+    assert!(
+        matches!(&err, ReconcileError::Refused { volume, reason } if volume == "spike" && reason.contains("configured")),
+        "{err}"
+    );
+    assert_eq!(*reads.lock().unwrap(), 2);
+    assert_eq!(count(&runner, "drbdadm"), 0);
+    assert_eq!(count(&runner, "losetup"), 0);
+    for path in [
+        paths.image("spike"),
+        paths.ready_marker("spike"),
+        paths.res_file("spike"),
+    ] {
+        assert!(path.exists(), "{} was deleted", path.display());
+    }
+    assert!(paths.device_link("spike").symlink_metadata().is_ok());
+}
+
+#[test]
+fn a_removal_that_requires_an_absent_resource_proceeds_when_it_is_absent() {
+    let (_tmp, paths, runner) = copy_on_disk();
+    let steps = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    }
+    .remove_unconfigured("spike", &|| Ok(()))
+    .unwrap();
+    assert!(steps.contains(&"remove-file"), "{steps:?}");
+    assert!(!steps.contains(&"down"), "{steps:?}");
 }
 
 #[test]

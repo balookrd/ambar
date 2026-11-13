@@ -1319,6 +1319,16 @@ impl Script {
         *self.loops.lock().unwrap() = out(0, &format!("/dev/loop7 {} (deleted)\n", image.display()), "");
     }
 
+    /// `/dev/loop7` holds the file under its live path, as the device link of `prepare_copy` says.
+    fn attach_loop(&self, image: &Path) {
+        *self.loops.lock().unwrap() = out(0, &format!("/dev/loop7 {}\n", image.display()), "");
+    }
+
+    /// The listing is `text` as it is.
+    fn list(&self, text: &str) {
+        *self.loops.lock().unwrap() = out(0, text, "");
+    }
+
     fn after(&self, hook: impl Fn(&str, usize) + Send + Sync + 'static) {
         *self.after.lock().unwrap() = Some(Arc::new(hook));
     }
@@ -1376,6 +1386,9 @@ async fn deleting_with(backing: Backing, script: &Script, entries: &[&str]) -> E
     fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
     if matches!(backing, Backing::Absent) {
         fs::remove_file(e.paths.image(VOLUME)).unwrap();
+    } else {
+        // The device link of `prepare_copy` points at /dev/loop7, which holds this file.
+        script.attach_loop(&e.paths.image(VOLUME));
     }
     e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
     for node in entries {
@@ -1610,6 +1623,193 @@ async fn a_loop_device_that_holds_the_file_by_the_time_of_the_lock_stops_the_rem
     assert_eq!(script.loop_calls.load(Ordering::SeqCst), 2);
 }
 
+// ---- round 4: `dump-md` reads this volume's file ----
+
+/// A deleting `spike` with a file without the ready marker, the resource not
+/// configured and a `Fresh` `dump-md`: it is removed when the device link is on
+/// the loop device of the file.
+async fn fresh_pending_copy() -> (Script, Env) {
+    let script = Script::new(EMPTY_KERNEL, out(0, FRESH_DUMP, ""));
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[DV2]).await;
+    (script, e)
+}
+
+fn assert_no_dump_md(e: &Env, script: &Script) {
+    assert!(commands(&e.runner, &["drbdadm dump-md"]).is_empty());
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 0);
+    assert!(e.paths.image(VOLUME).exists());
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_device_link_is_on_its_loop_device_is_removed_when_the_metadata_is_fresh() {
+    let (script, e) = fresh_pending_copy().await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert!(script.dump_calls.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn a_pending_file_without_a_device_link_is_kept_and_dump_md_does_not_run() {
+    let (script, e) = fresh_pending_copy().await;
+    fs::remove_file(e.paths.device_link(VOLUME)).unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "device link");
+    assert_no_dump_md(&e, &script);
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_device_link_is_not_a_link_is_kept() {
+    let (script, e) = fresh_pending_copy().await;
+    fs::remove_file(e.paths.device_link(VOLUME)).unwrap();
+    fs::write(e.paths.device_link(VOLUME), "").unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "device link");
+    assert_no_dump_md(&e, &script);
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_device_link_points_at_the_loop_of_another_file_is_kept() {
+    // /dev/loop7 holds somebody else's file, and the image has a loop of its own.
+    let (script, e) = fresh_pending_copy().await;
+    script.list(&format!(
+        "/dev/loop7 /var/lib/other/volume.img\n/dev/loop8 {}\n",
+        e.paths.image(VOLUME).display()
+    ));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "points at /dev/loop7 but the backing file is held by /dev/loop8");
+    assert_no_dump_md(&e, &script);
+}
+
+#[tokio::test]
+async fn a_pending_file_that_no_loop_device_holds_is_kept() {
+    let (script, e) = fresh_pending_copy().await;
+    script.list("");
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "no loop device holds");
+    assert_no_dump_md(&e, &script);
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_device_link_is_on_a_loop_that_holds_a_deleted_file_is_kept() {
+    let (script, e) = fresh_pending_copy().await;
+    script.hold_loop(&e.paths.image(VOLUME));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "deleted file");
+    assert_no_dump_md(&e, &script);
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_loop_devices_cannot_be_listed_is_kept() {
+    let (script, e) = fresh_pending_copy().await;
+    *script.loops.lock().unwrap() = out(1, "", "losetup: cannot open /dev/loop-control");
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "cannot open /dev/loop-control");
+    assert_no_dump_md(&e, &script);
+}
+
+#[tokio::test]
+async fn a_device_link_that_goes_away_before_the_lock_stops_the_removal() {
+    // The guard repeats the check of the link under the lock.
+    let (script, e) = fresh_pending_copy().await;
+    let link = e.paths.device_link(VOLUME);
+    script.after(move |command, n| {
+        if command == "dump-md" && n == 0 {
+            fs::remove_file(&link).unwrap();
+        }
+    });
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "device link");
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 1);
+}
+
+// ---- round 4: an unparsable listing is "not proven" ----
+
+#[tokio::test]
+async fn a_listing_that_cannot_be_parsed_keeps_a_missing_file_and_a_pending_one() {
+    for text in [
+        "/dev/loop3\n",
+        "/dev/loop3 /var/lib/rancher/ambar/volumes/a-very-long-na*\n",
+    ] {
+        let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+        let e = deleting_with(Backing::Absent, &script, &[]).await;
+        script.list(text);
+        assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept, "{text:?}");
+        assert_copy_kept(&e, "unexpected output");
+
+        let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+        let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+        script.list(text);
+        assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept, "{text:?}");
+        assert_copy_kept(&e, "unexpected output");
+        assert_no_dump_md(&e, &script);
+    }
+}
+
+// ---- round 4: the resource must still be absent when the copy is removed ----
+
+#[tokio::test]
+async fn a_resource_that_appears_after_the_guard_stops_the_removal_of_a_missing_file() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Absent, &script, &[]).await;
+    let (kernel, up) = (script.kernel.clone(), calm_kernel("Secondary"));
+    // The second listing is the proof inside the guard, the last read before
+    // `remove_checked` looks at the status again.
+    script.after(move |command, n| {
+        if command == "losetup" && n == 1 {
+            *kernel.lock().unwrap() = up.clone();
+        }
+    });
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "configured in the kernel");
+    assert_eq!(script.loop_calls.load(Ordering::SeqCst), 2);
+    assert!(e.paths.res_file(VOLUME).exists());
+    assert!(fs::symlink_metadata(e.paths.device_link(VOLUME)).is_ok());
+}
+
+#[tokio::test]
+async fn a_resource_that_appears_after_the_guard_stops_the_removal_of_a_pending_file() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+    let (kernel, up) = (script.kernel.clone(), calm_kernel("Secondary"));
+    script.after(move |command, n| {
+        if command == "dump-md" && n == 1 {
+            *kernel.lock().unwrap() = up.clone();
+        }
+    });
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "configured in the kernel");
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 2);
+    assert!(e.paths.image(VOLUME).exists());
+}
+
+// ---- round 4: the peer checks detach every loop device of a missing file ----
+
+#[tokio::test]
+async fn a_missing_file_held_by_a_loop_device_is_detached_when_the_peer_checks_pass() {
+    // The resource is configured, the file was deleted under it, the loop
+    // device holds the inode. The peer checks pass: `down`, detach, clean up.
+    let script = Script::new(&calm_kernel("Secondary"), Script::no_metadata());
+    let e = deleting_with(Backing::Absent, &script, &[DV2]).await;
+    script.hold_loop(&e.paths.image(VOLUME));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert_eq!(commands(&e.runner, &["drbdadm down"]), ["drbdadm down spike"]);
+    assert_eq!(commands(&e.runner, &["losetup -d"]), ["losetup -d /dev/loop7"]);
+    assert!(fs::symlink_metadata(e.paths.device_link(VOLUME)).is_err());
+    assert!(!e.paths.ready_marker(VOLUME).exists());
+}
+
 // ---- the removal of the status entry is verified (round 3) ----
 
 /// dv-3 holds nothing, the object is deleting and still shows the entries of
@@ -1838,27 +2038,25 @@ async fn a_name_with_no_object_and_nothing_local_is_not_queued_again() {
     let e = env(DV1, fake_node());
     assert_eq!(e.agent.reconcile_one("ghost").await.unwrap(), Outcome::Gone);
 
-    let queue = Arc::new(Queue::default());
+    let queue = Queue::default();
     queue.schedule("ghost", Instant::now());
+    // `serve` lists the names first and then runs the queued pass; the stop is
+    // requested from that listing, so the loop ends right after the pass has
+    // run and has been settled. No timing is involved.
     let shutdown = CancellationToken::new();
-    let task = tokio::spawn({
-        let agent = e.agent.clone();
-        let queue = queue.clone();
+    *e.volumes.on_list.lock().unwrap() = Some(Box::new({
         let shutdown = shutdown.clone();
-        async move { agent.serve(&queue, &shutdown).await }
-    });
-    wait_for("the pass over the name", || {
-        e.volumes.calls().iter().filter(|c| *c == "get ghost").count() >= 2
-    })
-    .await;
+        move || shutdown.cancel()
+    }));
+    e.agent.serve(&queue, &shutdown).await.unwrap();
+
+    let gets = e.volumes.calls().iter().filter(|c| *c == "get ghost").count();
+    assert_eq!(gets, 2, "the pass over the name ran");
     assert!(
         queue.due.lock().unwrap().is_empty(),
         "{:?}",
         queue.due.lock().unwrap().keys().collect::<Vec<_>>()
     );
-
-    shutdown.cancel();
-    task.await.unwrap().unwrap();
 }
 
 // ---- reconcile_one: no object, not a member, refusals ----
