@@ -13,7 +13,8 @@
 //!    the status gate holds.
 //! 3. `drbdadm primary --force` is never run.
 //! 4. The outcome of a state-changing `drbdadm` command is established by
-//!    re-reading `drbdsetup status --json`, not by its return code.
+//!    re-reading `drbdsetup status --json`, not by its return code (for
+//!    `adjust` a non-zero code is a failure, a zero code is not proof).
 //!
 //! Decision table of `plan`. "Copy" means the node holds a copy (`diskful`).
 //! `matches` is `status_matches_spec`; `applied` is `Observed::res_applied`.
@@ -46,15 +47,19 @@
 //! | Input | Actions |
 //! |---|---|
 //! | leader, no synced marker, `ready_to_skip_initial_sync` | `SkipInitialSync` |
-//! | no synced marker, local volume-0 disk `UpToDate` | `MarkSynced` |
+//! | no synced marker, local volume-0 disk `UpToDate`, or a peer's volume-0 disk `UpToDate`, `Consistent` or `Outdated` | `MarkSynced` |
 //! | anything else | nothing |
 //!
 //! The executor re-reads the status after `Up` (the resource must be
-//! configured), after `Adjust` (it must be configured and match the
-//! description) and after `drbdadm down` in `remove` (it must be gone); it
+//! configured), after `Adjust` (the exit code must be zero, the resource must
+//! be configured and match the description) and after `drbdadm down` in `remove` (it must be gone); it
 //! stops with `NotApplied` otherwise. The pass that runs `SkipInitialSync`
 //! is the last pass of an `apply`: the synced marker is written by a later
-//! `apply` once the status shows the local disk `UpToDate`.
+//! `apply` once the status shows the local disk `UpToDate`, or a peer's disk
+//! in a state that holds data. When the skip gate holds, every peer disk is
+//! `Inconsistent` or the peer has no disk, so the two rules never both apply.
+//! After `Adjust` a non-zero exit code of `drbdadm adjust` is a failure too:
+//! the status cannot show every field of the resource file.
 
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
@@ -231,9 +236,20 @@ pub fn plan(spec: &VolumeSpec, node_name: &str, obs: &Observed) -> Result<Vec<Ac
         Some(status) if node.diskful && actions.is_empty() => {
             let leader = spec.initial_sync_leader().is_some_and(|l| l.name == node_name);
             let disk = status.device().map(|d| d.disk_state);
+            let peer_has_data = status.connections.iter().any(|c| {
+                c.peer_devices.iter().find(|p| p.volume == 0).is_some_and(|p| {
+                    matches!(
+                        p.peer_disk_state,
+                        DiskState::UpToDate | DiskState::Consistent | DiskState::Outdated
+                    )
+                })
+            });
             if !obs.synced && leader && status.ready_to_skip_initial_sync() {
                 actions.push(Action::SkipInitialSync);
-            } else if !obs.synced && disk == Some(DiskState::UpToDate) {
+            } else if !obs.synced && (disk == Some(DiskState::UpToDate) || peer_has_data) {
+                // The volume has a data source: this copy is the one that
+                // holds data or receives it. The marker stops a later skip
+                // from declaring a partial copy identical to an empty one.
                 actions.push(Action::MarkSynced);
             }
         }
@@ -371,12 +387,15 @@ impl Reconciler<'_> {
                 }
             }
             Action::Adjust => {
-                // The return code of `adjust` is not a verdict; the status is.
-                drbd.adjust(volume)?;
-                let applied = drbd
+                // A zero code is necessary, not sufficient: the kernel can
+                // reject a change the status does not show (address, port,
+                // protocol, quorum options) and leave the connections as they
+                // were. The status check covers what the status can show.
+                let rejected = !drbd.adjust(volume)?.success();
+                let matches = drbd
                     .status(volume)?
                     .is_some_and(|status| status_matches_spec(spec, node_name, &status));
-                if !applied {
+                if rejected || !matches {
                     return Err(not_applied("adjust"));
                 }
             }
@@ -512,13 +531,22 @@ impl Reconciler<'_> {
         // `remove` deletes the lock file while holding the lock. If that
         // happened between our open and our lock, the lock is on a file no
         // longer reachable by its name and excludes nobody.
-        let held = file.metadata().map_err(|e| io_err("inspect", e))?;
-        match fs::metadata(&path) {
-            Ok(current) if current.dev() == held.dev() && current.ino() == held.ino() => Ok(file),
-            Ok(_) => Err(busy()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(busy()),
-            Err(e) => Err(io_err("inspect", e)),
+        if still_linked(&file, &path).map_err(|e| io_err("inspect", e))? {
+            Ok(file)
+        } else {
+            Err(busy())
         }
+    }
+}
+
+/// `true` when `path` still names the open `file`: same device and inode.
+/// `false` when the path was removed or replaced by another file.
+fn still_linked(file: &File, path: &Path) -> io::Result<bool> {
+    let held = file.metadata()?;
+    match fs::metadata(path) {
+        Ok(current) => Ok(current.dev() == held.dev() && current.ino() == held.ino()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
