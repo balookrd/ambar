@@ -94,8 +94,9 @@
 //! one of the unstage (local cleanup with the no-backing-file guard, verified
 //! removal of the status entry, `leave_as_client`); a failure is logged and the
 //! original error is returned. After a retriable error the membership stays.
-//! The teardown relies on `drbdadm down` refusing a device that is open [stand
-//! check pending]; condition 3 is the check made before it.
+//! The teardown relies on `drbdadm down` refusing a device that is open (stand,
+//! 2026-11-14: `State change failed: (-12) Device is held open by someone`, one
+//! run); condition 3 is the check made before it.
 //!
 //! `NodePublishVolume`: empty paths or a bad capability are `INVALID_ARGUMENT`;
 //! no mount at the staging path, or a mount that is not this volume's
