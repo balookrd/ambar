@@ -58,25 +58,44 @@
 //! annotation (a crash between `mkfs` and the annotation) sets it too. The
 //! agent never removes it.
 //!
-//! Error mapping of the mounter (`mount_status`): `Open { in_use: true }` is
-//! `FAILED_PRECONDITION` (open on another node); other `Open`,
-//! `AmbiguousSignature`, `NotABlockDevice` and `Io` are `UNAVAILABLE`;
-//! `WrongFilesystem`, `Busy`, `StillMounted` and `Command` are
-//! `FAILED_PRECONDITION` (the last with stderr); `ModeMismatch` is
-//! `ALREADY_EXISTS`.
+//! Error mapping of the mounter (`mount_status`):
 //!
-//! A failed stage and the membership. A node that this very call added as a
-//! `Client` (`Join::Added`) is removed again when the call ends in a final
-//! error (`is_final`: any code except `UNAVAILABLE`, `ABORTED`,
-//! `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, `CANCELLED`) while the staging
-//! path is not mounted: kubelet does not call `NodeUnstageVolume` after a final
-//! error of the stage, and the membership would occupy a `maxPeers` slot for
-//! good. The teardown is the one of the unstage (local cleanup, verified
-//! removal of the status entry, `leave_as_client`); a teardown failure is
-//! logged and the original error is returned. After a retriable error the
-//! membership stays, so that kubelet's retries do not flap the peers'
-//! configuration. A node that was a member before the call (`Replica`,
-//! `Witness`, a `Client` of an earlier call) is never touched by a failed stage.
+//! | Error | Code |
+//! |---|---|
+//! | `Open { in_use: true }` (the volume is open on another node) | `UNAVAILABLE` |
+//! | other `Open`, `AmbiguousSignature`, `NotABlockDevice`, `Io` | `UNAVAILABLE` |
+//! | `WrongFilesystem`, `Busy`, `StillMounted` | `FAILED_PRECONDITION` |
+//! | `Command` (with stderr) | `FAILED_PRECONDITION` |
+//! | `ModeMismatch` | `ALREADY_EXISTS` |
+//!
+//! "Open on another node" is retriable: during a pod move the old node still
+//! holds the device, and a final code would make every retry of kubelet join,
+//! fail and tear down again, which rewrites the peers' configuration each time.
+//! With a retriable code the membership stays between the retries.
+//!
+//! A failed stage and the membership. A `Client` membership of this node exists
+//! only for staging (`join_as_client` is called from the stage path alone).
+//! Kubelet does not call `NodeUnstageVolume` after a final error of the stage,
+//! and the membership would occupy a `maxPeers` slot for good. So when the
+//! stage ends in a final error (`is_final`: any code except `UNAVAILABLE`,
+//! `ABORTED`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, `CANCELLED`) the
+//! membership is torn down, under the volume lock, on a fresh read, when all
+//! three hold:
+//!
+//! 1. this node is a `Client` in `spec.nodes`;
+//! 2. the staging path of the call is not a mount;
+//! 3. no entry of the mount table has `<dev_dir>/drbd<minor>` as its source
+//!    (the volume is not staged or published anywhere on this node: another pod
+//!    of the same PVC keeps the membership).
+//!
+//! The decision is by state, not by the history of the call: a membership left
+//! by an earlier attempt that ended retriable is torn down by a later one that
+//! ends final. A `Replica` or a `Witness` is never touched. The teardown is the
+//! one of the unstage (local cleanup with the no-backing-file guard, verified
+//! removal of the status entry, `leave_as_client`); a failure is logged and the
+//! original error is returned. After a retriable error the membership stays.
+//! The teardown relies on `drbdadm down` refusing a device that is open [stand
+//! check pending]; condition 3 is the check made before it.
 //!
 //! `NodePublishVolume`: empty paths or a bad capability are `INVALID_ARGUMENT`;
 //! no mount at the staging path, or a mount that is not this volume's
@@ -203,8 +222,10 @@ fn agent_status(context: &str, error: AgentError) -> Status {
 pub fn mount_status(error: MountError) -> Status {
     let text = error.to_string();
     match error {
+        // A pod move: the old node still holds the device. Retriable, so that kubelet repeats
+        // the stage and calls `NodeUnstageVolume` if the pod goes away (module doc).
         MountError::Open { in_use: true, .. } => {
-            Status::failed_precondition(format!("the volume is open on another node: {text}"))
+            Status::unavailable(format!("the volume is open on another node: {text}"))
         }
         MountError::Open { .. }
         | MountError::AmbiguousSignature { .. }
@@ -315,8 +336,10 @@ fn mount_capability(capability: Option<&VolumeCapability>) -> Result<&MountVolum
 }
 
 /// The ext4 and VFS options a volume may be mounted with. `commit=<digits>`
-/// is the one with a value that is checked by shape.
-const MOUNT_FLAGS: [&str; 20] = [
+/// is the one with a value that is checked by shape. `barrier=0`,
+/// `errors=continue` and `data=writeback` are not on the list: they weaken
+/// crash and error handling of the tenant's filesystem.
+const MOUNT_FLAGS: [&str; 17] = [
     "noatime",
     "nodiratime",
     "relatime",
@@ -332,11 +355,8 @@ const MOUNT_FLAGS: [&str; 20] = [
     "sync",
     "dirsync",
     "data=ordered",
-    "data=writeback",
-    "barrier=0",
     "barrier=1",
     "errors=remount-ro",
-    "errors=continue",
 ];
 
 fn allowed_flag(flag: &str) -> bool {
@@ -544,6 +564,9 @@ impl NodeService {
 
     /// `staged` for a volume whose object is gone: the minor is taken from the
     /// mount table. True when `staging` is an `ext4` mount of `<dev_dir>/drbd<digits>`.
+    /// Without the object the minor cannot be compared with the volume's, so any
+    /// DRBD device of this node passes; the check is the shape of the source
+    /// and the filesystem.
     async fn staged_without_object(&self, staging: &Path) -> Result<bool, Status> {
         let path = staging.to_path_buf();
         let (_, entry) = self
@@ -864,18 +887,13 @@ impl NodeService {
         .await
     }
 
-    /// Undoes the join of a stage that failed for good (module doc), under the
-    /// volume lock. Nothing is done when the staging path is mounted after all
-    /// or when this node is not a `Client` of the object (any more).
-    async fn abandon_join(&self, volume: String, staging: PathBuf) -> Result<(), Status> {
+    /// The teardown after a stage that failed for good (module doc), under the
+    /// volume lock and on a fresh read. The membership goes only when this node
+    /// is a `Client` of the object, the staging path is not a mount, and no mount
+    /// of this node has the volume's device as its source (another pod of the
+    /// same PVC keeps it). A `Replica` or a `Witness` is never touched.
+    async fn teardown_after_failed_stage(&self, volume: String, staging: PathBuf) -> Result<(), Status> {
         let _guard = self.agent.locks.lock(&volume).await;
-        let (_, entry) = self
-            .mount_raw(move |m| entry_at(m.mountinfo, &staging))
-            .await
-            .map_err(mount_status)?;
-        if entry.is_some() {
-            return Ok(());
-        }
         let Some(object) = self
             .agent
             .volumes
@@ -891,6 +909,23 @@ impl NodeService {
             .iter()
             .any(|n| n.name == self.agent.node && n.kind == NodeKind::Client);
         if !is_client {
+            return Ok(());
+        }
+        let device = self.device(&object).to_string_lossy().into_owned();
+        let (staged, in_use) = self
+            .mount_raw(move |m| {
+                let (_, entry) = entry_at(m.mountinfo, &staging)?;
+                let text = std::fs::read_to_string(m.mountinfo).map_err(|source| MountError::Io {
+                    action: "read",
+                    path: m.mountinfo.display().to_string(),
+                    source,
+                })?;
+                let in_use = parse_mountinfo(&text).iter().any(|entry| entry.source == device);
+                Ok((entry.is_some(), in_use))
+            })
+            .await
+            .map_err(mount_status)?;
+        if staged || in_use {
             return Ok(());
         }
         self.retire_client(&volume, &object).await
@@ -933,21 +968,21 @@ impl Node for NodeService {
             }
             Some(_) => {}
         }
-        let joined = self.join(&volume).await?;
+        self.join(&volume).await?;
         let result = self.stage_after_join(volume.clone(), staging.clone(), options).await;
-        if let (Err(status), Join::Added) = (&result, joined)
+        if let Err(status) = &result
             && is_final(status.code())
         {
             let this = self.clone();
             let name = volume.clone();
             let undone = detached(self.log.clone(), "NodeStageVolume", &name, async move {
-                this.abandon_join(volume, staging).await
+                this.teardown_after_failed_stage(volume, staging).await
             })
             .await;
             if let Err(failure) = undone {
                 (self.log)(&format!(
-                    "ambar-node: NodeStageVolume: volume {name:?}: the membership added by this call could not be \
-                     removed after the error {:?}: {}",
+                    "ambar-node: NodeStageVolume: volume {name:?}: the membership of this node could not be removed \
+                     after the error {:?}: {}",
                     failure.code(),
                     failure.message()
                 ));

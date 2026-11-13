@@ -123,10 +123,16 @@ pub fn find_loops(runner: &dyn Runner, file: &Path) -> Result<Vec<String>, Backi
 
 /// A loop device that holds an image, and whether it holds the file under its
 /// live path or only the deleted inode (`losetup` prints `<path> (deleted)`).
+/// `confirmed` is true when the line names the image by a full path or when the
+/// inode confirmed a name-only line; it is false for a name-only line that was
+/// kept without that confirmation (the image is missing, or the line says
+/// `(deleted)`). An unconfirmed holder is a reason to keep a copy, never a
+/// proof that a device reads this image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopHolder {
     pub device: String,
     pub deleted: bool,
+    pub confirmed: bool,
 }
 
 /// The loop devices attached to the backing file `image`, also when the file
@@ -182,9 +188,9 @@ pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>
     }
     let args = ["--list", "--noheadings", "--output", "NAME,BACK-FILE"];
     let listing = checked(runner, "losetup", &args)?;
-    // The holders and, for each, whether only the name form matched it and
-    // the inode still has to confirm it.
-    let mut holders: Vec<(LoopHolder, bool)> = Vec::new();
+    // Every match; `confirmed` starts true for a match by path and false for a
+    // match by the name form alone.
+    let mut holders: Vec<LoopHolder> = Vec::new();
     for line in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let unexpected = || BackingError::UnexpectedOutput {
             command: command_line("losetup", &args),
@@ -202,15 +208,16 @@ pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>
         let by_path = candidates.iter().any(|candidate| candidate == path);
         let by_name = detached_form.as_deref() == Some(path);
         if by_path || by_name {
-            let holder = LoopHolder {
+            holders.push(LoopHolder {
                 device: device.to_string(),
                 deleted,
-            };
-            holders.push((holder, !by_path && !deleted));
+                confirmed: by_path,
+            });
         }
     }
-    if !holders.iter().any(|(_, unconfirmed)| *unconfirmed) {
-        return Ok(holders.into_iter().map(|(holder, _)| holder).collect());
+    // The inode confirms a name-only match of a live line while the image exists.
+    if !holders.iter().any(|holder| !holder.confirmed && !holder.deleted) {
+        return Ok(holders);
     }
     let exists = image.try_exists().map_err(|source| BackingError::Io {
         action: "inspect",
@@ -221,13 +228,20 @@ pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>
     let same_inode = if exists { Some(find_loops(runner, image)?) } else { None };
     Ok(holders
         .into_iter()
-        .filter(|(holder, unconfirmed)| {
-            !*unconfirmed
-                || same_inode
-                    .as_ref()
-                    .is_none_or(|devices| devices.contains(&holder.device))
+        .filter_map(|mut holder| {
+            if holder.confirmed || holder.deleted {
+                return Some(holder);
+            }
+            match &same_inode {
+                // The image exists: a name-only line is ours only if the inode says so.
+                Some(devices) => devices.contains(&holder.device).then(|| {
+                    holder.confirmed = true;
+                    holder
+                }),
+                // No image to compare with: kept, unconfirmed.
+                None => Some(holder),
+            }
         })
-        .map(|(holder, _)| holder)
         .collect())
 }
 

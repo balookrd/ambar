@@ -290,7 +290,10 @@ async fn kept_while_primary(edit: impl FnOnce(&mut Value), expected_reason: &str
     e.volumes.put(spike("Done"));
     e.volumes.delete(VOLUME).await.unwrap();
 
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    // A Primary goes away without any event on the object: look again in 5 s.
+    let outcome = e.agent.reconcile_one(VOLUME).await;
+    assert_eq!(outcome.as_ref().unwrap(), &Outcome::KeptDrbd);
+    assert_eq!(settle(VOLUME, &outcome), Some(Duration::from_secs(5)));
 
     assert!(
         commands(&e.runner, &["drbdadm down", "losetup -d"]).is_empty(),
@@ -369,7 +372,10 @@ async fn a_status_that_fails_under_the_lock_stops_the_deletion() {
     e.volumes.put(spike("Done"));
     e.volumes.delete(VOLUME).await.unwrap();
 
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    // A status that cannot be read is not a DRBD state that changes by itself: 30 s.
+    let outcome = e.agent.reconcile_one(VOLUME).await;
+    assert_eq!(outcome.as_ref().unwrap(), &Outcome::Kept);
+    assert_eq!(settle(VOLUME, &outcome), Some(Duration::from_secs(30)));
     assert!(commands(&e.runner, &["drbdadm down", "losetup -d"]).is_empty());
     assert!(e.paths.image(VOLUME).exists());
     assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
@@ -552,7 +558,9 @@ async fn a_resource_that_is_not_configured_is_brought_up_and_then_kept_while_ano
     let e = deleting_unconfigured(after_up, &[DV2], "Witness").await;
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert!(e.paths.image(VOLUME).exists());
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    let outcome = e.agent.reconcile_one(VOLUME).await;
+    assert_eq!(outcome.as_ref().unwrap(), &Outcome::KeptDrbd);
+    assert_eq!(settle(VOLUME, &outcome), Some(Duration::from_secs(5)));
     assert_kept(&e, &[DV2, "not connected", "has not reported cleanup"]);
 }
 
@@ -578,7 +586,7 @@ async fn a_peer_that_is_connecting_and_has_an_entry_keeps_the_copy() {
         &[(DV2, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
     );
     let e = deleting(&kernel, &[DV2], "Witness").await;
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert_kept(&e, &[DV2, "not connected", "has not reported cleanup"]);
 }
 
@@ -611,7 +619,7 @@ async fn a_connected_peer_with_an_unknown_role_and_an_entry_keeps_the_copy() {
         &[(DV2, "Connected", "Unknown"), (DV3, "Connected", "Secondary")],
     );
     let e = deleting(&kernel, &[DV2], "Witness").await;
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert_kept(&e, &[DV2, "connected with the role Unknown"]);
 }
 
@@ -623,7 +631,7 @@ async fn a_connected_primary_peer_keeps_the_copy_with_or_without_an_entry() {
             &[(DV2, "Connected", "Primary"), (DV3, "Connected", "Secondary")],
         );
         let e = deleting(&kernel, entries, "Witness").await;
-        assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+        assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
         assert_kept(&e, &["peer lima-dv-2 is Primary"]);
     }
 }
@@ -635,7 +643,7 @@ async fn a_client_peer_that_is_primary_keeps_the_copy() {
         &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Primary")],
     );
     let e = deleting(&kernel, &[DV3], "Client").await;
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert_kept(&e, &["peer lima-dv-3 is Primary"]);
 }
 
@@ -646,8 +654,21 @@ async fn the_reason_names_every_node_that_blocks() {
         &[(DV2, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
     );
     let e = deleting(&kernel, &[DV2], "Witness").await;
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert_kept(&e, &["this node is Primary", DV2]);
+}
+
+#[tokio::test]
+async fn a_peer_that_is_not_connected_and_has_reported_is_looked_at_again_in_five_seconds() {
+    let kernel = kernel_peers(
+        "Secondary",
+        &[(DV2, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
+    );
+    let e = deleting(&kernel, &[DV2], "Witness").await;
+    let outcome = e.agent.reconcile_one(VOLUME).await;
+    assert_eq!(outcome.as_ref().unwrap(), &Outcome::KeptDrbd);
+    assert_eq!(settle(VOLUME, &outcome), Some(Duration::from_secs(5)));
+    assert_kept(&e, &[DV2, "not connected"]);
 }
 
 #[tokio::test]
@@ -684,7 +705,10 @@ async fn a_peer_that_becomes_primary_before_the_lock_keeps_the_copy() {
     e.volumes.put(spike("Done"));
     e.volumes.delete(VOLUME).await.unwrap();
 
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    // The reason comes from the guard under the lock: also a DRBD state, also 5 s.
+    let outcome = e.agent.reconcile_one(VOLUME).await;
+    assert_eq!(outcome.as_ref().unwrap(), &Outcome::KeptDrbd);
+    assert_eq!(settle(VOLUME, &outcome), Some(Duration::from_secs(5)));
     assert_kept(&e, &["peer lima-dv-2 is Primary"]);
 }
 
@@ -1014,8 +1038,8 @@ async fn the_scenario_of_a_reboot_with_three_replicas_ends_with_all_three_delete
     let [b, c] = others;
 
     // Before dv-1 is up nobody can delete.
-    assert_eq!(b.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
-    assert_eq!(c.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(b.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
+    assert_eq!(c.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert!(b.paths.image(VOLUME).exists() && c.paths.image(VOLUME).exists());
 
     // dv-1 brings the resource up and keeps its copy.
@@ -1157,7 +1181,7 @@ async fn a_copy_without_data_is_kept_while_this_node_is_primary() {
         };
         assert_eq!(
             e.agent.reconcile_one(VOLUME).await.unwrap(),
-            Outcome::Kept,
+            Outcome::KeptDrbd,
             "pending={pending}"
         );
         assert!(commands(&e.runner, &["drbdadm down"]).is_empty());
@@ -1267,7 +1291,7 @@ async fn a_node_that_becomes_primary_before_the_lock_keeps_a_copy_without_data()
     e.volumes.put(spike("Done"));
     e.volumes.delete(VOLUME).await.unwrap();
 
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert!(commands(&e.runner, &["drbdadm down", "losetup -d"]).is_empty());
     assert!(e.paths.image(VOLUME).exists());
     let entry = e.volumes.entry_of(VOLUME, DV1).unwrap();
@@ -1505,7 +1529,7 @@ async fn a_pending_file_under_a_configured_resource_with_a_primary_peer_is_kept(
     let script = Script::new(&calm_kernel("Primary"), Script::no_metadata());
     let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
 
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert_copy_kept(&e, "peer lima-dv-2 is Primary");
     assert!(e.paths.image(VOLUME).exists());
     assert!(commands(&e.runner, &["drbdadm dump-md"]).is_empty());
@@ -1528,7 +1552,7 @@ async fn a_missing_file_under_a_configured_resource_with_a_primary_peer_is_kept(
     let script = Script::new(&calm_kernel("Primary"), Script::no_metadata());
     let e = deleting_with(Backing::Absent, &script, &[]).await;
 
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
     assert_copy_kept(&e, "peer lima-dv-2 is Primary");
     assert!(commands(&e.runner, &["losetup"]).is_empty());
 }
@@ -1700,6 +1724,28 @@ async fn a_pending_file_whose_loop_in_the_detached_mount_form_is_not_confirmed_b
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert_copy_kept(&e, "no loop device holds");
     assert_no_dump_md(&e, &script);
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_loop_is_matched_by_name_only_while_the_image_goes_missing_is_kept() {
+    // The listing shows the loop device as `/<name>.img`; the image is removed after the
+    // listing was read, so `loop_holders` cannot confirm the name by inode and keeps the
+    // holder unconfirmed. A name-only match is no proof that `dump-md` reads this file.
+    let (script, e) = fresh_pending_copy().await;
+    script.detached_form(true, false);
+    let image = e.paths.image(VOLUME);
+    script.after(move |command, n| {
+        if command == "losetup" && n == 0 {
+            fs::remove_file(&image).unwrap();
+        }
+    });
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the reason is in the status");
+    assert!(entry.message.contains("by its name"), "{}", entry.message);
+    assert!(commands(&e.runner, &["drbdadm dump-md"]).is_empty());
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 0);
+    assert!(commands(&e.runner, &["drbdadm down", "losetup -d"]).is_empty());
 }
 
 #[tokio::test]
@@ -2472,6 +2518,7 @@ fn the_delay_after_a_pass_depends_on_its_outcome() {
     assert_eq!(settle("v", &Ok(Outcome::Progress)), Some(Duration::from_secs(1)));
     assert_eq!(settle("v", &Ok(Outcome::Settled)), Some(Duration::from_secs(30)));
     assert_eq!(settle("v", &Ok(Outcome::Kept)), Some(Duration::from_secs(30)));
+    assert_eq!(settle("v", &Ok(Outcome::KeptDrbd)), Some(Duration::from_secs(5)));
     assert_eq!(
         settle("v", &Ok(Outcome::Refused(Refusal::OrphanImage))),
         Some(Duration::from_secs(60))
