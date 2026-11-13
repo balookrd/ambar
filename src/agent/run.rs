@@ -10,16 +10,36 @@
 //!
 //! | Path | Task | Checked before the lock | Guard, under the lock |
 //! |---|---|---|---|
-//! | `delete_replica` | `DeleteReplica` | the DRBD status can be read; rules 1-3 below on the object read at the start of the pass | the DRBD status is read again; rules 1-3a below; 3b uses the same object |
+//! | `delete_replica`, copy with data | `DeleteReplica`, backing file with the ready marker, resource configured | the DRBD status can be read; rules 1-3 below on the object read at the start of the pass | the DRBD status is read again; rules 1-3a below; 3b uses the same object |
+//! | `delete_replica`, no data | `DeleteReplica`, no backing file or one without the ready marker | the DRBD status can be read and does not show this node `Primary` | the file state is read again and is still not "ready marker"; the DRBD status is read again and does not show this node `Primary` |
 //! | `clean_diskless` | `CleanDiskless` | nothing | no backing file exists |
+//!
+//! `DeleteReplica` by what this node holds (`local::file_state`):
+//!
+//! | Backing file | Resource in the kernel | Action |
+//! |---|---|---|
+//! | absent (only traces) | any | nothing can be lost here: removed without the peer checks, guard as in the table |
+//! | present, no ready marker | any | the copy never held data: removed without the peer checks, same guard |
+//! | present, ready marker | not configured | `bring_up`: `Reconciler::apply` with the object's description and `initialSync: Done`, status written, `Progress` (1 s); nothing is deleted. A description that cannot be converted or a failed `apply`: the copy is kept, the error is in the status `message`, `Kept` (30 s) |
+//! | present, ready marker | configured | rules 1-3 below |
+//!
+//! Why the bring-up: after a reboot the resource of a deleting object is not
+//! configured, so this node sees no peers and the peers see it not connected
+//! with its entry still in `status.nodes`; each waits for the other and nobody
+//! deletes (Task 8 fix round 1, stand scenario 3). With the resource up the
+//! peers see this node `Connected` and `Secondary` and this node sees theirs.
+//! `apply` of a ready file plans an attach of the loop device, the device
+//! link, the resource file, `up` or `adjust`; it never plans `create-md`, and
+//! `new-current-uuid` only for `initialSync: Skip`, which the bring-up turns
+//! off.
 //!
 //! `ambar remove` (the CLI) calls `Reconciler::remove`, which has no guard:
 //! it is an operator's decision and bypasses these checks by design.
 //!
-//! `Task::DeleteReplica` (extends R18, R10). The copy is deleted only if all
-//! of these hold; otherwise it is kept, the reason goes into the `message` of
-//! this node's `status.nodes` entry and the pass is repeated after 30 s (or
-//! earlier, when the object changes):
+//! `Task::DeleteReplica` for a copy with data (extends R18, R10). The copy is
+//! deleted only if all of these hold; otherwise it is kept, the reason goes
+//! into the `message` of this node's `status.nodes` entry and the pass is
+//! repeated after 30 s (or earlier, when the object changes):
 //!
 //! 1. the local DRBD status was read without error;
 //! 2. this node is not `Primary`;
@@ -31,26 +51,20 @@
 //!    `Client` when it cleans up for a deleting object), and a node that never
 //!    reported never had the volume up.
 //!
-//!    A node that is not `Connected` (or the resource is not configured here at
-//!    all) and still has an entry blocks the deletion, whatever role the entry
-//!    shows. A connection whose `peer_role` is `Primary` blocks in every
-//!    connection state and whatever the entries say: that is the old R18 check
-//!    and 3b does not weaken it.
+//!    A node that is not `Connected` and still has an entry blocks the
+//!    deletion, whatever role the entry shows. A connection whose `peer_role`
+//!    is `Primary` blocks in every connection state and whatever the entries
+//!    say: that is the old R18 check and 3b does not weaken it.
 //!
-//! A node that is dead for good keeps its entry and so blocks the deletion of
-//! the copies of the others. The way out is manual and deliberate: the
-//! operator checks that nobody uses the volume, removes the dead node's entry
-//! from `status.nodes` (`kubectl patch rv <name> --subresource=status
-//! --type=json -p '[{"op":"remove","path":"/status/nodes/<index>"}]'`) and its
-//! finalizer from `metadata.finalizers`; the remaining nodes then delete.
-//!
-//! Known limit (stand, Task 8 fix round 1): a node that holds a copy but whose
-//! resource is not configured (after `drbdadm down` or a reboot) while the
-//! object is deleting waits for the entries of all the others (3b), and the
-//! others, seeing it not connected with its entry still there, wait for it.
-//! Nobody deletes until an operator breaks the cycle as above (or
-//! `ambar remove` on that node). The rule keeps the copies in this case, which
-//! is the safe side.
+//! Known limit: a node that is dead for good keeps its entry and so blocks the
+//! deletion of the copies of the others (they see it not connected with its
+//! entry present). The way out is manual and deliberate: the operator checks
+//! that nobody uses the volume, removes the dead node's entry from
+//! `status.nodes` (`kubectl patch rv <name> --subresource=status --type=json
+//! -p '[{"op":"remove","path":"/status/nodes/<index>"}]'`) and its finalizer
+//! from `metadata.finalizers`; the remaining nodes then delete. A node that is
+//! alive but was restarted does not need this: it brings its resource up as
+//! above.
 //!
 //! Other rules:
 //!
@@ -86,18 +100,18 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use crate::crd::{NodeStatus, ReplicatedVolume, ReplicatedVolumeSpec};
+use crate::crd::{NodeStatus, ReplicatedVolume, ReplicatedVolumeSpec, to_volume_spec};
 use crate::drbd::adm::Drbd;
 use crate::drbd::status::{ConnectionState, ResourceStatus, Role};
 use crate::exec::Runner;
 use crate::membership::{collisions, replica_finalizer};
-use crate::model::valid_volume_name;
+use crate::model::{InitialSync, valid_volume_name};
 use crate::paths::Paths;
-use crate::reconcile::{ReconcileError, Reconciler};
+use crate::reconcile::{FileState, ReconcileError, Reconciler};
 
 use super::decide::{Local, ObjectView, Refusal, Task, decide};
 use super::kube::{ApiError, Volumes};
-use super::local::{local, local_volumes};
+use super::local::{file_state, local, local_volumes};
 use super::status::node_status;
 
 /// Next pass after one that ran a node-level action or changed the status.
@@ -254,6 +268,36 @@ fn keep_reasons(
         }
     }
     reasons
+}
+
+/// What has to hold before the copy of a deleting volume is deleted, by what
+/// the node holds (module doc).
+enum Check {
+    /// A backing file with the ready marker: rules 2 and 3, with the
+    /// `status.nodes` the pass read.
+    Peers(Vec<NodeStatus>),
+    /// No backing file, or one without the ready marker: this node holds no
+    /// data, so only rule 2 applies (the resource is not in use here).
+    NoData,
+}
+
+impl Check {
+    fn needs_no_data(&self) -> bool {
+        matches!(self, Check::NoData)
+    }
+
+    fn reasons(&self, node: &str, spec: &ReplicatedVolumeSpec, status: Option<&ResourceStatus>) -> Vec<String> {
+        match self {
+            Check::Peers(reported) => keep_reasons(node, spec, reported, status),
+            Check::NoData => {
+                if status.is_some_and(|s| s.role == Role::Primary) {
+                    vec!["this node is Primary".to_string()]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
 }
 
 fn uid_of(object: &ReplicatedVolume) -> Result<String, AgentError> {
@@ -496,7 +540,13 @@ impl Agent {
     }
 
     async fn delete_replica(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
-        // Rules 1-3 of the module doc on the object this pass read.
+        let file = {
+            let name = volume.to_string();
+            self.blocking(move |paths, _| file_state(paths, &name))
+                .await?
+                .map_err(|e| Self::reconcile_error(volume, e))?
+        };
+        // Rule 1 on the object this pass read.
         let status = match self.read_status(volume).await {
             Ok(status) => status,
             Err(error) => {
@@ -509,7 +559,12 @@ impl Agent {
             }
         };
         let reported = object.status.clone().unwrap_or_default().nodes;
-        let reasons = keep_reasons(&self.node, &object.spec, &reported, status.as_ref());
+        let check = match file {
+            FileState::Absent | FileState::Pending => Check::NoData,
+            FileState::Ready if status.is_none() => return self.bring_up(volume, object).await,
+            FileState::Ready => Check::Peers(reported),
+        };
+        let reasons = check.reasons(&self.node, &object.spec, status.as_ref());
         if !reasons.is_empty() {
             let message = format!("the local copy is kept: {}", reasons.join("; "));
             let entry = node_status(&self.node, status.as_ref(), &message);
@@ -518,17 +573,29 @@ impl Agent {
             }
             return Ok(Outcome::Kept);
         }
-        // The same rules again under the volume lock, on a status read there.
+        // The same checks again under the volume lock, on a status read there.
         let name = volume.to_string();
         let node = self.node.clone();
         let spec = object.spec.clone();
         let removed = self
             .blocking(move |paths, runner| {
                 let guard = || {
+                    if check.needs_no_data() {
+                        // The file may have appeared since the decision.
+                        match file_state(paths, &name) {
+                            Ok(FileState::Ready) => {
+                                return Err(
+                                    "a backing file with the ready marker has appeared since the decision".to_string()
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => return Err(format!("cannot inspect the backing file: {e}")),
+                        }
+                    }
                     let status = Drbd { runner }
                         .status(&name)
                         .map_err(|e| format!("cannot read the DRBD status: {e}"))?;
-                    let reasons = keep_reasons(&node, &spec, &reported, status.as_ref());
+                    let reasons = check.reasons(&node, &spec, status.as_ref());
                     if reasons.is_empty() {
                         Ok(())
                     } else {
@@ -563,6 +630,68 @@ impl Agent {
                 Ok(Outcome::Kept)
             }
         }
+    }
+
+    /// A copy with data whose resource is not configured here (after a reboot
+    /// or `drbdadm down`): the checks of the module doc cannot see the peers
+    /// and the peers cannot see this node, so each waits for the other. The
+    /// resource is brought up with the same `Reconciler::apply` the `Apply`
+    /// task uses, and the decision is made on a later pass. Nothing is deleted
+    /// here. The description is converted without `initialSync: Skip`: a
+    /// deleting object must not run `new-current-uuid`, and the ready backing
+    /// file means `create-md` is not planned either.
+    async fn bring_up(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
+        let kept =
+            |why: String| format!("the local copy is kept: cannot bring the resource up before deleting it: {why}");
+        let mut spec = match to_volume_spec(volume, &object.spec) {
+            Ok(spec) => spec,
+            Err(error) => {
+                let message = kept(error.to_string());
+                if self.report_message(volume, Some(object), &message).await? {
+                    log_error(volume, &message);
+                }
+                return Ok(Outcome::Kept);
+            }
+        };
+        spec.initial_sync = InitialSync::Done;
+        let node = self.node.clone();
+        let applied = self
+            .blocking(move |paths, runner| Reconciler { paths, runner }.apply(&spec, &node))
+            .await?;
+        match applied {
+            Ok(actions) => log_info(
+                volume,
+                format!("the resource was not configured; applied {actions:?} before deciding on the deletion"),
+            ),
+            Err(ReconcileError::Busy { .. }) => return Ok(Outcome::Progress),
+            Err(error) => {
+                let message = kept(error.to_string());
+                if self
+                    .report_message(volume, Some(object), &message)
+                    .await
+                    .unwrap_or(false)
+                {
+                    log_error(volume, &message);
+                }
+                return Ok(Outcome::Kept);
+            }
+        }
+        let status = match self.read_status(volume).await {
+            Ok(status) => status,
+            Err(error) => {
+                self.report_message(volume, Some(object), &kept(error.to_string()))
+                    .await
+                    .ok();
+                return Err(Self::reconcile_error(volume, error));
+            }
+        };
+        let entry = node_status(
+            &self.node,
+            status.as_ref(),
+            "the resource is up; the copy is deleted when no other node can use it",
+        );
+        self.report(volume, Some(object), Some(entry)).await?;
+        Ok(Outcome::Progress)
     }
 
     async fn clean_diskless(&self, volume: &str, object: Option<&ReplicatedVolume>) -> Result<Outcome, AgentError> {

@@ -201,3 +201,29 @@ fn a_name_with_no_file_of_ambars_is_neither_a_local_volume_nor_a_trace() {
     let state = local(&paths, "foreign").unwrap();
     assert!(!state.traces && !state.image, "{state:?}");
 }
+
+// ---- file_state ----
+
+#[test]
+fn file_state_tells_absent_pending_and_ready_apart() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Absent);
+    // Markers without the file do not make one.
+    touch(paths.ready_marker("vol"));
+    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Absent);
+    fs::remove_file(paths.ready_marker("vol")).unwrap();
+    touch(paths.image("vol"));
+    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Pending);
+    touch(paths.synced_marker("vol"));
+    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Pending);
+    touch(paths.ready_marker("vol"));
+    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Ready);
+}
+
+#[test]
+fn file_state_refuses_a_name_that_is_not_a_valid_volume_name() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    assert!(file_state(&paths, "../x").is_err());
+}
