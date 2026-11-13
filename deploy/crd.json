@@ -1,0 +1,218 @@
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "replicatedvolumes.ambar.balookrd.github.io"
+  },
+  "spec": {
+    "group": "ambar.balookrd.github.io",
+    "names": {
+      "kind": "ReplicatedVolume",
+      "plural": "replicatedvolumes",
+      "shortNames": [
+        "rv"
+      ],
+      "singular": "replicatedvolume"
+    },
+    "scope": "Cluster",
+    "versions": [
+      {
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for ReplicatedVolumeSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "initialSync": {
+                    "default": "Done",
+                    "description": "Whether the leader may declare the copies identical without copying.",
+                    "enum": [
+                      "Skip",
+                      "Done"
+                    ],
+                    "type": "string"
+                  },
+                  "maxPeers": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "minor": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "nodes": {
+                    "items": {
+                      "properties": {
+                        "address": {
+                          "description": "Address on the replication network; parsed as an IP address by the agent.",
+                          "maxLength": 45,
+                          "type": "string"
+                        },
+                        "kind": {
+                          "enum": [
+                            "Replica",
+                            "Witness",
+                            "Client"
+                          ],
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Kubernetes node name, equal to `uname -n` of the node.",
+                          "maxLength": 63,
+                          "type": "string"
+                        },
+                        "nodeId": {
+                          "format": "uint32",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "address",
+                        "kind",
+                        "name",
+                        "nodeId"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 32,
+                    "type": "array",
+                    "x-kubernetes-list-map-keys": [
+                      "name"
+                    ],
+                    "x-kubernetes-list-type": "map"
+                  },
+                  "port": {
+                    "format": "uint16",
+                    "maximum": 65535.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "protocol": {
+                    "enum": [
+                      "A",
+                      "C"
+                    ],
+                    "type": "string"
+                  },
+                  "sizeBytes": {
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "maxPeers",
+                  "minor",
+                  "nodes",
+                  "port",
+                  "protocol",
+                  "sizeBytes"
+                ],
+                "type": "object",
+                "x-kubernetes-validations": [
+                  {
+                    "message": "sizeBytes, minor, port, maxPeers and protocol are immutable",
+                    "rule": "self.sizeBytes == oldSelf.sizeBytes && self.minor == oldSelf.minor && self.port == oldSelf.port && self.maxPeers == oldSelf.maxPeers && self.protocol == oldSelf.protocol"
+                  },
+                  {
+                    "message": "the set of Replica and Witness nodes is immutable",
+                    "rule": "self.nodes.filter(n, n.kind != 'Client').size() == oldSelf.nodes.filter(o, o.kind != 'Client').size() && self.nodes.filter(n, n.kind != 'Client').all(n, oldSelf.nodes.exists(o, o.name == n.name && o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind)) && oldSelf.nodes.filter(o, o.kind != 'Client').all(o, self.nodes.exists(n, o.name == n.name && o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind))"
+                  },
+                  {
+                    "message": "a member node cannot change nodeId, address or kind",
+                    "rule": "self.nodes.all(n, oldSelf.nodes.all(o, o.name != n.name || (o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind)))"
+                  },
+                  {
+                    "message": "initialSync cannot go back to Skip",
+                    "rule": "!(oldSelf.initialSync == 'Done' && self.initialSync == 'Skip')"
+                  }
+                ]
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "nodes": {
+                    "default": [],
+                    "items": {
+                      "properties": {
+                        "connections": {
+                          "items": {
+                            "properties": {
+                              "peer": {
+                                "type": "string"
+                              },
+                              "peerDisk": {
+                                "type": "string"
+                              },
+                              "state": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "peer",
+                              "peerDisk",
+                              "state"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "disk": {
+                          "description": "DRBD disk state of the local volume 0; `Diskless` for a node without a disk.",
+                          "type": "string"
+                        },
+                        "message": {
+                          "default": "",
+                          "description": "Last error of the reconcile on this node; empty when the last pass succeeded.",
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "quorum": {
+                          "type": "boolean"
+                        },
+                        "role": {
+                          "description": "`Primary`, `Secondary` or `Unknown`.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "connections",
+                        "disk",
+                        "name",
+                        "quorum",
+                        "role"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array",
+                    "x-kubernetes-list-map-keys": [
+                      "name"
+                    ],
+                    "x-kubernetes-list-type": "map"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "ReplicatedVolume",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
