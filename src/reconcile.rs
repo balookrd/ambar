@@ -13,15 +13,23 @@
 //!    `DrbdError::MetadataCheck`. The check runs in `execute`, right before
 //!    `create-md`; `plan` does not depend on it. After a check that found no
 //!    metadata the executor writes the creating marker
-//!    `<volume>.img.creating` (durably) before it starts `create-md`; while
-//!    that marker exists the check is skipped, because metadata on the file
-//!    is this agent's own from an interrupted run. `MarkReady` writes the
-//!    ready marker and then removes the creating marker. A creating marker
-//!    next to a ready marker (a crash between the two steps) is removed at
-//!    the start of the next pass of `apply`, so it cannot outlive the ready
-//!    marker and skip the check later; `remove` and `ClearStaleMarkers` (the
-//!    markers outlived the image) remove it as well. The marker never makes
-//!    `plan` choose `CreateMd`: that depends on the ready marker alone.
+//!    `<volume>.img.creating` (durably) before it starts `create-md`. The
+//!    marker holds `<dev>:<ino>` of the backing file. The check is skipped only
+//!    when the marker exists and its content equals the identity of the current
+//!    file: then metadata on the file is this agent's own from an interrupted
+//!    run. A marker with another identity (the image was replaced), empty or
+//!    unparsable content is removed (directory synced) and the check runs. The
+//!    marker also never outlives a configured resource: `apply` removes it
+//!    under the volume lock when the resource is configured in the kernel
+//!    (the copy may already hold data after an operator's `drbdadm up`), so
+//!    after `drbdadm down` the check runs again and stops with
+//!    `MetadataPresent`. `MarkReady` writes the ready marker and then removes
+//!    the creating marker. A creating marker next to a ready marker (a crash
+//!    between the two steps) is removed at the start of the next pass of
+//!    `apply`, so it cannot outlive the ready marker and skip the check
+//!    later; `remove` and `ClearStaleMarkers` (the markers outlived the image)
+//!    remove it as well. The marker never makes `plan` choose `CreateMd`: that
+//!    depends on the ready marker alone.
 //! 2. `drbdadm new-current-uuid --clear-bitmap <volume>/0` declares all copies
 //!    identical without copying data: only the leader (lowest `nodeId` among
 //!    nodes with a copy) runs it, only when the description says
@@ -323,12 +331,17 @@ impl Reconciler<'_> {
         let mut done = Vec::new();
         for _ in 0..MAX_ROUNDS {
             let obs = self.observe(spec, node_name)?;
-            if obs.file == FileState::Ready && remove_if_present(&self.paths.creating_marker(&spec.name))? {
-                // Left by a crash between writing the ready marker and
-                // removing this one. With the ready marker the file is never
-                // initialised again, and a stale creating marker must not
-                // outlive it: if the ready marker were lost later, the marker
-                // would skip the metadata check.
+            if (obs.file == FileState::Ready || obs.status.is_some())
+                && remove_if_present(&self.paths.creating_marker(&spec.name))?
+            {
+                // With the ready marker (a crash between writing it and
+                // removing this one) the file is never initialised again, and
+                // a stale creating marker must not outlive it: if the ready
+                // marker were lost later, the marker would skip the metadata
+                // check. With the resource configured in the kernel the copy
+                // can already take part in replication and hold data, which
+                // the marker knows nothing about; once the operator has
+                // taken the resource down, the metadata check must run.
                 sync_dir(&self.paths.volumes_dir)?;
             }
             let actions = plan(spec, node_name, &obs)?;
@@ -431,17 +444,24 @@ impl Reconciler<'_> {
                 // The file has no ready marker, but it may still hold
                 // metadata (a marker lost, or metadata written by something
                 // else): `create-md --force` would destroy it. The one
-                // exception is the creating marker: this agent wrote it
-                // after a check that found no metadata, right before it
-                // started `create-md`, so metadata on the file is its own.
+                // exception is the creating marker of this very file: this
+                // agent wrote it after a check that found no metadata, right
+                // before it started `create-md`, so metadata on the file is
+                // its own. The marker holds `<dev>:<ino>` of the file; any
+                // other content (another file, empty, garbage) is dropped
+                // and the check runs.
                 let creating = self.paths.creating_marker(volume);
-                if !exists(&creating)? {
+                let identity = file_identity(&self.paths.image(volume))?;
+                if !marker_matches(&creating, &identity)? {
+                    if remove_if_present(&creating)? {
+                        sync_dir(&self.paths.volumes_dir)?;
+                    }
                     if drbd.metadata(volume)? == Metadata::Present {
                         return Err(ReconcileError::MetadataPresent {
                             volume: volume.to_string(),
                         });
                     }
-                    write_atomically(&creating, "")?;
+                    write_atomically(&creating, &identity)?;
                 }
                 drbd.create_md(volume, spec.max_peers, spec.size_bytes)?;
                 // `create-md` writes through the loop device; flush the
@@ -640,6 +660,30 @@ fn exists(path: &Path) -> Result<bool, ReconcileError> {
         path: path.display().to_string(),
         source,
     })
+}
+
+/// `<dev>:<ino>` of the file at `path`: what the creating marker holds.
+fn file_identity(path: &Path) -> Result<String, ReconcileError> {
+    let meta = fs::metadata(path).map_err(|source| ReconcileError::Io {
+        action: "inspect",
+        path: path.display().to_string(),
+        source,
+    })?;
+    Ok(format!("{}:{}", meta.dev(), meta.ino()))
+}
+
+/// Whether the marker at `path` exists and holds exactly `identity`. A
+/// missing marker is `false`; an unreadable one is an error.
+fn marker_matches(path: &Path, identity: &str) -> Result<bool, ReconcileError> {
+    match fs::read(path) {
+        Ok(content) => Ok(content == identity.as_bytes()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(ReconcileError::Io {
+            action: "read",
+            path: path.display().to_string(),
+            source,
+        }),
+    }
 }
 
 /// `true` when `path` still names the open `file`: same device and inode.

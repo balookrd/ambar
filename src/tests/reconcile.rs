@@ -1,4 +1,6 @@
 use std::fs;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1508,6 +1510,12 @@ fn apply_does_not_create_the_volumes_directory() {
 
 // ---- the creating marker ----
 
+/// The `<dev>:<ino>` text the creating marker holds for the file at `path`.
+fn identity_of(path: &Path) -> String {
+    let meta = fs::metadata(path).unwrap();
+    format!("{}:{}", meta.dev(), meta.ino())
+}
+
 fn md_calls(runner: &FakeRunner) -> Vec<String> {
     runner.calls().into_iter().filter(|c| c.contains("-md")).collect()
 }
@@ -1575,9 +1583,10 @@ fn a_creating_marker_skips_the_metadata_check_and_runs_create_md() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     fs::create_dir_all(&paths.volumes_dir).unwrap();
-    // This agent started `create-md` earlier: metadata may exist by now.
-    fs::write(paths.creating_marker("spike"), "").unwrap();
+    // This agent started `create-md` earlier on this very file: metadata may
+    // exist by now.
     fs::write(paths.image("spike"), "").unwrap();
+    fs::write(paths.creating_marker("spike"), identity_of(&paths.image("spike"))).unwrap();
     let runner = node_with_dump_md(out(0, "# DRBD meta data dump\n", ""));
     let reconciler = Reconciler {
         paths: &paths,
@@ -1766,4 +1775,149 @@ fn an_atomic_write_does_not_create_a_missing_directory() {
     let err = write_atomically(&paths.ready_marker("spike"), "").unwrap_err();
     assert!(matches!(err, ReconcileError::Io { action: "create", .. }), "{err}");
     assert!(!paths.volumes_dir.exists());
+}
+
+// ---- the creating marker and a configured resource (G1) ----
+
+/// A node where the copy is attached to /dev/loop7, `drbdsetup status`
+/// prints `status`, and `drbdadm dump-md` answers with `dump_md`.
+fn node_with_status_and_dump_md(status: Arc<Mutex<String>>, dump_md: Output) -> FakeRunner {
+    FakeRunner::new(move |program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+        ("drbdadm", ["dump-md", _]) => dump_md.clone(),
+        ("drbdsetup", _) => out(0, &status.lock().unwrap(), ""),
+        _ => out(0, "", ""),
+    })
+}
+
+#[test]
+fn a_creating_marker_does_not_survive_a_configured_resource() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_copy(&paths, true, false);
+    fs::remove_file(paths.ready_marker("spike")).unwrap();
+    // A pass wrote the marker and ran `create-md`, then died before the
+    // ready marker; the operator brought the resource up by hand.
+    fs::write(paths.creating_marker("spike"), identity_of(&paths.image("spike"))).unwrap();
+    let status = Arc::new(Mutex::new(THREE_INCONSISTENT.to_string()));
+    let runner = node_with_status_and_dump_md(Arc::clone(&status), out(0, "# DRBD meta data dump\n", ""));
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ReconcileError::Plan(PlanError::UninitialisedFileWithLiveResource { .. })
+        ),
+        "{err}"
+    );
+    assert!(!paths.creating_marker("spike").exists());
+
+    // The operator follows the message and takes the resource down: the
+    // check runs again and stops on the metadata.
+    *status.lock().unwrap() = "[\n]\n\n".to_string();
+    let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+    assert!(matches!(err, ReconcileError::MetadataPresent { .. }), "{err}");
+    assert_eq!(md_calls(&runner), ["drbdadm dump-md spike"]);
+}
+
+// ---- the creating marker is bound to the backing file (G2) ----
+
+/// Runs one `apply` on a pending file with the given marker text and
+/// `dump-md` answering "metadata present"; returns the result and the calls.
+fn apply_with_marker(text: &str, replace_image: bool) -> (Result<Vec<Action>, ReconcileError>, Vec<String>, bool) {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    fs::write(paths.image("spike"), "").unwrap();
+    let text = if text == "<identity>" {
+        identity_of(&paths.image("spike"))
+    } else {
+        text.to_string()
+    };
+    if replace_image {
+        // The new file exists while the old one does, so the inode differs.
+        let other = paths.volumes_dir.join("other");
+        fs::write(&other, "").unwrap();
+        fs::rename(&other, paths.image("spike")).unwrap();
+    }
+    fs::write(paths.creating_marker("spike"), text).unwrap();
+    let runner = node_with_dump_md(out(0, "# DRBD meta data dump\n", ""));
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let result = reconciler.apply(&spec(), "lima-dv-1");
+    (result, md_calls(&runner), paths.creating_marker("spike").exists())
+}
+
+#[test]
+fn a_marker_of_the_same_file_skips_the_check() {
+    let (result, calls, _) = apply_with_marker("<identity>", false);
+    result.unwrap();
+    assert_eq!(calls, ["drbdadm create-md --force --max-peers=7 spike"]);
+}
+
+#[test]
+fn a_marker_of_another_inode_runs_the_check_and_is_removed() {
+    let (result, calls, exists) = apply_with_marker("<identity>", true);
+    assert!(
+        matches!(result, Err(ReconcileError::MetadataPresent { .. })),
+        "{result:?}"
+    );
+    assert_eq!(calls, ["drbdadm dump-md spike"]);
+    assert!(!exists);
+}
+
+#[test]
+fn an_empty_marker_runs_the_check() {
+    let (result, calls, exists) = apply_with_marker("", false);
+    assert!(
+        matches!(result, Err(ReconcileError::MetadataPresent { .. })),
+        "{result:?}"
+    );
+    assert_eq!(calls, ["drbdadm dump-md spike"]);
+    assert!(!exists);
+}
+
+#[test]
+fn a_garbage_marker_runs_the_check() {
+    for text in ["garbage", "1:2:3", "a:b", "12", ":"] {
+        let (result, calls, exists) = apply_with_marker(text, false);
+        assert!(
+            matches!(result, Err(ReconcileError::MetadataPresent { .. })),
+            "{text}: {result:?}"
+        );
+        assert_eq!(calls, ["drbdadm dump-md spike"], "{text}");
+        assert!(!exists, "{text}");
+    }
+}
+
+#[test]
+fn the_marker_a_pass_writes_holds_the_identity_of_the_file() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    let marker = paths.creating_marker("spike");
+    let image = paths.image("spike");
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen_by_runner = Arc::clone(&seen);
+    let runner = FakeRunner::new(move |program, args| match (program, args) {
+        ("drbdadm", ["dump-md", _]) => out(255, "", P7_NO_METADATA_STDERR),
+        ("drbdadm", ["create-md", ..]) => {
+            *seen_by_runner.lock().unwrap() = fs::read_to_string(&marker).unwrap_or_default();
+            out(0, "", "")
+        }
+        ("losetup", ["--find", ..]) => out(0, "/dev/loop7\n", ""),
+        ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
+        _ => out(0, "", ""),
+    });
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let _ = reconciler.apply(&spec(), "lima-dv-1");
+    assert_eq!(*seen.lock().unwrap(), identity_of(&image));
 }

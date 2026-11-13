@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Instant;
 
@@ -97,9 +99,6 @@ fn a_command_that_fills_both_pipes_does_not_hang() {
 
 // ---- process tree, pipes held after exit, explicit limits ----
 
-use std::fs;
-use std::path::Path;
-
 /// Whether a process still runs. A zombie counts as gone: in a container
 /// without an init process an orphan is not reaped by anyone, but it no
 /// longer runs.
@@ -149,12 +148,14 @@ fn read_pid(file: &Path) -> i32 {
 fn the_killed_command_no_longer_exists_after_the_timeout() {
     let tmp = tempfile::TempDir::new().unwrap();
     let file = tmp.path().join("pid");
-    let script = format!("echo $$ > {}; sleep 5", file.display());
+    let script = format!("echo $$ > {}; sleep 30", file.display());
     let started = Instant::now();
-    let err = runner_with(Duration::from_millis(500))
+    // 2 s leave a loaded machine time to start `sh` and write the PID before
+    // the kill; the bound is the timeout plus 3 s, far below the 30 s sleep.
+    let err = runner_with(Duration::from_secs(2))
         .run("sh", &["-c", &script])
         .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     assert!(gone_soon(read_pid(&file)));
 }
@@ -165,10 +166,10 @@ fn a_grandchild_that_keeps_the_pipes_open_is_killed_too() {
     let file = tmp.path().join("pid");
     let script = format!("sleep 30 & echo $! > {}; wait", file.display());
     let started = Instant::now();
-    let err = runner_with(Duration::from_millis(500))
+    let err = runner_with(Duration::from_secs(2))
         .run("sh", &["-c", &script])
         .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     assert!(gone_soon(read_pid(&file)));
 }
@@ -179,12 +180,12 @@ fn a_background_process_that_holds_the_pipes_after_exit_does_not_block_past_the_
     let file = tmp.path().join("pid");
     let script = format!("sleep 30 & echo $! > {}; exit 0", file.display());
     let started = Instant::now();
-    let err = runner_with(Duration::from_millis(500))
+    let err = runner_with(Duration::from_secs(2))
         .run("sh", &["-c", &script])
         .unwrap_err();
-    // Deadline 0.5 s plus the 1 s grace for the readers; far below the 30 s
-    // the background process would hold the pipes.
-    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    // Deadline 2 s plus the 1 s grace for the readers, plus 3 s of slack;
+    // far below the 30 s the background process would hold the pipes.
+    assert!(started.elapsed() < Duration::from_secs(6), "{:?}", started.elapsed());
     assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     assert!(err.to_string().contains("sh -c"), "{err}");
     assert!(gone_soon(read_pid(&file)));
@@ -219,4 +220,46 @@ fn a_runner_that_ignores_limits_runs_commands_through_run() {
     }
     let out = Plain.run_with_timeout("x", &[], Duration::from_secs(1)).unwrap();
     assert_eq!(out.stdout, "x");
+}
+
+#[test]
+fn the_timeout_error_carries_the_stderr_captured_so_far() {
+    let err = runner_with(Duration::from_millis(500))
+        .run("sh", &["-c", "echo partial-diagnostic >&2; sleep 30"])
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    assert!(err.to_string().contains("partial-diagnostic"), "{err}");
+}
+
+#[test]
+fn the_stderr_in_a_timeout_error_is_truncated_to_2_kib() {
+    let err = runner_with(Duration::from_secs(2))
+        .run("sh", &["-c", "head -c 100000 /dev/zero | tr '\\0' e >&2; sleep 30"])
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains(&"e".repeat(2048)), "{}", text.len());
+    assert!(!text.contains(&"e".repeat(2049)), "{}", text.len());
+    assert!(text.len() < 4096, "{}", text.len());
+}
+
+#[test]
+fn a_timeout_without_stderr_says_so() {
+    let err = runner_with(Duration::from_millis(300))
+        .run("sleep", &["30"])
+        .unwrap_err();
+    assert!(err.to_string().contains("stderr was empty"), "{err}");
+}
+
+#[test]
+fn an_exited_child_is_seen_without_being_reaped() {
+    let mut child = std::process::Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !exited_without_reaping(child.id()).unwrap() {
+        assert!(Instant::now() < deadline, "the child did not exit");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Still there to be reaped: the check did not consume the exit status,
+    // and calling it again reports the same.
+    assert!(exited_without_reaping(child.id()).unwrap());
+    assert_eq!(child.wait().unwrap().code(), Some(7));
 }

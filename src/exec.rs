@@ -78,13 +78,22 @@ impl Runner for SystemRunner {
             .process_group(0)
             .spawn()?;
         let group = child.id();
-        let timed_out = || {
+        let timed_out = |stderr: Option<Vec<u8>>| {
+            let captured = match stderr {
+                Some(bytes) if !bytes.is_empty() => format!(
+                    "; stderr so far: {}",
+                    truncate_utf8(String::from_utf8_lossy(&bytes).trim(), STDERR_IN_ERROR)
+                ),
+                Some(_) => "; stderr was empty".to_string(),
+                None => "; its output was not available".to_string(),
+            };
             io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "`{}` did not finish within {:?} and was killed",
+                    "`{}` did not finish within {:?} and was killed{}",
                     command_line(program, args),
-                    timeout
+                    timeout,
+                    captured
                 ),
             )
         };
@@ -94,10 +103,15 @@ impl Runner for SystemRunner {
         drain(Stream::Stdout, child.stdout.take(), sender.clone());
         drain(Stream::Stderr, child.stderr.take(), sender);
         let deadline = Instant::now() + timeout;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {}
+        // The direct child is only observed here, never reaped, until the
+        // group has been dealt with: while the leader is an unreaped zombie
+        // its pid cannot be reused, so `kill(-group)` can only reach our own
+        // group. Reaping first would free the pid and let the kill hit an
+        // unrelated process group.
+        loop {
+            match exited_without_reaping(group) {
+                Ok(true) => break,
+                Ok(false) => {}
                 Err(e) => {
                     kill_group(group);
                     let _ = child.wait();
@@ -107,10 +121,10 @@ impl Runner for SystemRunner {
             if Instant::now() >= deadline {
                 kill_group(group);
                 let _ = child.wait();
-                return Err(timed_out());
+                return Err(timed_out(stderr_after_kill(&results, None)));
             }
             thread::sleep(POLL_INTERVAL);
-        };
+        }
         // The command has exited, but a background process it started can
         // still hold the pipes open; the readers then never see the end of
         // the stream. Wait for them no longer than the deadline plus a grace.
@@ -121,20 +135,88 @@ impl Runner for SystemRunner {
                 Ok((Stream::Stdout, bytes)) => stdout = Some(bytes?),
                 Ok((Stream::Stderr, bytes)) => stderr = Some(bytes?),
                 Err(RecvTimeoutError::Timeout) => {
+                    // The leader is still unreaped, so the group id is ours.
                     kill_group(group);
-                    return Err(timed_out());
+                    let _ = child.wait();
+                    return Err(timed_out(stderr_after_kill(&results, stderr)));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
+                    kill_group(group);
+                    let _ = child.wait();
                     return Err(io::Error::other("output reader thread panicked"));
                 }
             }
         }
+        let status = child.wait()?;
         Ok(Output {
             code: status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&stdout.unwrap_or_default()).into_owned(),
             stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
         })
     }
+}
+
+/// How much of the captured stderr a timeout error carries.
+const STDERR_IN_ERROR: usize = 2048;
+
+/// The first `max` bytes of `text`, cut at a character boundary.
+fn truncate_utf8(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &text[..end])
+}
+
+/// After the group was killed the pipes close and the readers finish; waits
+/// up to `READER_GRACE` for the stderr reader. `None` when it did not
+/// deliver (a process that left the group still holds the pipe) or failed.
+fn stderr_after_kill(
+    results: &mpsc::Receiver<(Stream, io::Result<Vec<u8>>)>,
+    have: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if have.is_some() {
+        return have;
+    }
+    let until = Instant::now() + READER_GRACE;
+    loop {
+        match results.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok((Stream::Stderr, bytes)) => return bytes.ok(),
+            Ok((Stream::Stdout, _)) => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Whether the child `pid` has exited, without reaping it (`WNOWAIT`): the
+/// zombie stays, so the pid and the group id stay reserved until the caller
+/// calls `Child::wait`.
+fn exited_without_reaping(pid: u32) -> io::Result<bool> {
+    let id = libc::id_t::from(pid);
+    // SAFETY: `siginfo_t` is plain data for which all-zero is valid; `waitid`
+    // writes into it. `P_PID` with the pid of our own child.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            id,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // With WNOHANG and nothing to report `si_pid` stays zero.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    // SAFETY: filled in by a successful `waitid`.
+    let reported = unsafe { info.si_pid() };
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let reported = info.si_pid;
+    Ok(reported != 0)
 }
 
 #[derive(Debug, Clone, Copy)]
