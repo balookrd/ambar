@@ -25,4 +25,9 @@ run "grep -q 'usage-count no' /etc/drbd.conf" || fail "usage-count is not disabl
 run "command -v losetup mkfs.ext4 modprobe insmod >/dev/null" || fail "host tools are missing"
 run "test -x /opt/ambar/load-module.sh" || fail "load-module.sh is missing"
 
+agent="$(run "ambar --version" 2>&1)" || fail "ambar binary: $agent"
+[[ "$agent" == "ambar "* ]] || fail "ambar binary: $agent"
+run "grep -q '^install drbd /bin/false' /etc/modprobe.d/ambar-blacklist-drbd.conf" \
+  || fail "the in-tree drbd module is not blacklisted in the image"
+
 echo "OK: $IMAGE module $modver for $KVER, drbd-utils $admver"

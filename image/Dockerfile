@@ -54,4 +54,6 @@ COPY --from=utils /stage/usr/sbin/drbdadm /stage/usr/sbin/drbdsetup \
      /stage/usr/sbin/drbdmeta /usr/sbin/
 COPY drbd.conf /etc/drbd.conf
 COPY --chmod=0755 load-module.sh /opt/ambar/load-module.sh
+COPY modprobe-blacklist.conf /etc/modprobe.d/ambar-blacklist-drbd.conf
+COPY --chmod=0755 ambar /usr/local/bin/ambar
 RUN mkdir -p /etc/drbd.d /var/lib/drbd /var/run/drbd
