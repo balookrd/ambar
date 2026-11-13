@@ -60,6 +60,12 @@
 //! removed the pass is `Kept` (30 s), the finalizer of this node stays, and
 //! the next pass tries again.
 //!
+//! The delay after a kept copy. `Outcome::KeptDrbd` (5 s) is returned when the
+//! reason is a DRBD state that changes without an event on the object: this
+//! node is Primary, a peer is Primary, a peer is not connected (the reasons of
+//! `keep_reasons`, before and under the lock). Every other kept copy is
+//! `Outcome::Kept` (30 s). The delay does not change when a copy may be deleted.
+//!
 //! `ambar remove` (the CLI) calls `Reconciler::remove`, which has no guard:
 //! it is an operator's decision and bypasses these checks by design.
 //!
@@ -122,6 +128,7 @@
 //! on the API 3 times; the loop serves events meanwhile, so a name that keeps
 //! failing delays nothing else.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::fs;
@@ -159,6 +166,11 @@ const SETTLED_DELAY: Duration = Duration::from_secs(30);
 /// the deletion (a Primary, a peer that has not cleaned up) does not go away
 /// in a second, and a change of the object queues the name at once.
 const KEPT_DELAY: Duration = Duration::from_secs(30);
+/// Next pass after a copy was kept because of a DRBD state that changes without
+/// any event on the object: this node or a peer is Primary, a peer is not
+/// connected. Nothing queues the name when such a state ends, so the pass looks
+/// again soon; the rule about when a copy may be deleted is not affected.
+const KEPT_DRBD_DELAY: Duration = Duration::from_secs(5);
 /// Next pass after a refusal.
 const REFUSED_DELAY: Duration = Duration::from_secs(60);
 /// Next pass after an error.
@@ -197,6 +209,10 @@ pub enum Outcome {
     /// The local copy of a deleting volume was kept because deleting it is
     /// not safe yet (the reason is in the status `message`).
     Kept,
+    /// Kept for a reason in the DRBD state (`keep_reasons`), which changes
+    /// without an event on the object: the pass is repeated after
+    /// `KEPT_DRBD_DELAY`, not `KEPT_DELAY`.
+    KeptDrbd,
     Refused(Refusal),
 }
 
@@ -385,8 +401,10 @@ fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileSta
 /// Shows that `drbdadm dump-md <volume>` would read this volume's backing
 /// file: the device link `<dev_dir>/<volume>` is a symbolic link that points
 /// at a loop device which `loop_holders` reports for the image under its live
-/// path. A missing link, a link elsewhere, a loop device that holds only the
-/// deleted inode and a listing that cannot be read all fail the proof.
+/// path, matched by a full path or confirmed by inode (`LoopHolder::confirmed`).
+/// A missing link, a link elsewhere, a loop device that holds only the deleted
+/// inode, one matched by name alone and a listing that cannot be read all fail
+/// the proof.
 fn prove_device_link(paths: &Paths, runner: &dyn Runner, volume: &str) -> Result<(), String> {
     let link = paths.device_link(volume);
     let target = match fs::read_link(&link) {
@@ -407,8 +425,16 @@ fn prove_device_link(paths: &Paths, runner: &dyn Runner, volume: &str) -> Result
     };
     let holders = loop_holders(runner, &paths.image(volume))
         .map_err(|e| format!("cannot tell which loop device holds the backing file: {e}"))?;
-    if holders.iter().any(|h| h.device == target && !h.deleted) {
+    if holders.iter().any(|h| h.device == target && !h.deleted && h.confirmed) {
         return Ok(());
+    }
+    // Matched by the name `/<name>.img` alone, with nothing to confirm it by inode.
+    if holders.iter().any(|h| h.device == target && !h.deleted) {
+        return Err(format!(
+            "the device link {} points at {target}, which is matched to the backing file by its name only and is not \
+             confirmed by inode (the file is missing); check it by hand",
+            link.display()
+        ));
     }
     if holders.iter().any(|h| h.device == target) {
         return Err(format!(
@@ -716,20 +742,22 @@ impl Agent {
     }
 
     /// Keeps the copy: the reason goes into this node's status entry and the
-    /// log, the next pass is in `KEPT_DELAY`.
+    /// log, the next pass is in `KEPT_DELAY`, or in `KEPT_DRBD_DELAY` when
+    /// `drbd_state` says the reason is a DRBD state (`Outcome::KeptDrbd`).
     async fn keep(
         &self,
         volume: &str,
         object: &ReplicatedVolume,
         status: Option<&ResourceStatus>,
         why: &str,
+        drbd_state: bool,
     ) -> Result<Outcome, AgentError> {
         let message = format!("the local copy is kept: {why}");
         let entry = node_status(&self.node, status, &message);
         if self.report(volume, Some(object), Some(entry)).await? {
             log_error(volume, &message);
         }
-        Ok(Outcome::Kept)
+        Ok(if drbd_state { Outcome::KeptDrbd } else { Outcome::Kept })
     }
 
     async fn delete_replica(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
@@ -746,6 +774,7 @@ impl Agent {
                         object,
                         None,
                         &format!("cannot inspect the backing file: {error}"),
+                        false,
                     )
                     .await;
             }
@@ -755,7 +784,13 @@ impl Agent {
             Ok(status) => status,
             Err(error) => {
                 return self
-                    .keep(volume, object, None, &format!("cannot read the DRBD status: {error}"))
+                    .keep(
+                        volume,
+                        object,
+                        None,
+                        &format!("cannot read the DRBD status: {error}"),
+                        false,
+                    )
                     .await;
             }
         };
@@ -771,7 +806,7 @@ impl Agent {
                         .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file))
                         .await?;
                     if let Err(why) = proof {
-                        return self.keep(volume, object, None, &why).await;
+                        return self.keep(volume, object, None, &why, false).await;
                     }
                     Check::NoData(file)
                 }
@@ -780,7 +815,9 @@ impl Agent {
         if let Check::Peers(reported) = &check {
             let reasons = keep_reasons(&self.node, &object.spec, reported, status.as_ref());
             if !reasons.is_empty() {
-                return self.keep(volume, object, status.as_ref(), &reasons.join("; ")).await;
+                return self
+                    .keep(volume, object, status.as_ref(), &reasons.join("; "), true)
+                    .await;
             }
         }
         // The same checks again under the volume lock, on facts read there.
@@ -789,6 +826,8 @@ impl Agent {
         let spec = object.spec.clone();
         let removed = self
             .blocking(move |paths, runner| {
+                // Set when the guard refuses for a reason in the DRBD state.
+                let drbd_state = Cell::new(false);
                 let guard = || {
                     let status = Drbd { runner }
                         .status(&name)
@@ -799,6 +838,7 @@ impl Agent {
                             if reasons.is_empty() {
                                 Ok(())
                             } else {
+                                drbd_state.set(true);
                                 Err(reasons.join("; "))
                             }
                         }
@@ -813,13 +853,15 @@ impl Agent {
                     }
                 };
                 let reconciler = Reconciler { paths, runner };
-                match &check {
+                let result = match &check {
                     // The resource must still be absent when the files go.
                     Check::NoData(_) => reconciler.remove_unconfigured(&name, &guard),
                     Check::Peers(_) => reconciler.remove_checked(&name, &guard),
-                }
+                };
+                (result, drbd_state.get())
             })
             .await?;
+        let (removed, refused_by_drbd_state) = removed;
         match removed {
             Ok(steps) => {
                 log_info(volume, format!("removed the local copy {steps:?}"));
@@ -837,7 +879,11 @@ impl Agent {
                 if self.report_message(volume, Some(object), &message).await? {
                     log_error(volume, &message);
                 }
-                Ok(Outcome::Kept)
+                Ok(if refused_by_drbd_state {
+                    Outcome::KeptDrbd
+                } else {
+                    Outcome::Kept
+                })
             }
             Err(error) => {
                 // `drbdadm down` is refused while the volume is mounted, for
@@ -1090,6 +1136,7 @@ fn settle(name: &str, result: &Result<Outcome, AgentError>) -> Option<Duration> 
         Ok(Outcome::Settled) => SETTLED_DELAY,
         Ok(Outcome::Gone) => return None,
         Ok(Outcome::Kept) => KEPT_DELAY,
+        Ok(Outcome::KeptDrbd) => KEPT_DRBD_DELAY,
         Ok(Outcome::Refused(_)) => REFUSED_DELAY,
         Err(error) => {
             log_error(name, error);

@@ -974,14 +974,16 @@ async fn stage_row8_another_filesystem_is_failed_precondition_and_is_not_formatt
 }
 
 #[test]
-fn stage_row8_a_device_open_on_another_node_is_failed_precondition() {
+fn stage_row8_a_device_open_on_another_node_is_unavailable_and_kubelet_retries() {
     let open = |in_use| MountError::Open {
         device: "/dev/drbd1000".into(),
         in_use,
         source: io::Error::other("Wrong medium type"),
     };
+    // A pod move: the old node still holds the device. A final code would make every retry
+    // join, fail and tear down again.
     let status = plan_format(Err(open(true)), false).unwrap_err();
-    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert_eq!(status.code(), Code::Unavailable);
     assert!(status.message().contains("another node"), "{}", status.message());
     assert_eq!(
         plan_format(Err(open(false)), false).unwrap_err().code(),
@@ -1652,7 +1654,7 @@ fn rule_i_mount_errors_map_to_codes() {
                 in_use: true,
                 source: io_error(),
             },
-            Code::FailedPrecondition,
+            Code::Unavailable,
         ),
         (
             MountError::Open {
@@ -1741,11 +1743,8 @@ fn mount_options_accept_the_allow_list() {
         "commit=60",
         "commit=0123456789",
         "data=ordered",
-        "data=writeback",
-        "barrier=0",
         "barrier=1",
         "errors=remount-ro",
-        "errors=continue",
     ];
     for flag in allowed {
         assert_eq!(
@@ -1782,6 +1781,10 @@ fn mount_options_reject_everything_else() {
         "NOATIME",
         "x-a.b_c",
         "data=journal",
+        // They weaken crash and error handling of the tenant's filesystem.
+        "data=writeback",
+        "barrier=0",
+        "errors=continue",
         "barrier=2",
         "errors=remount-ro,loop",
     ] {
@@ -1940,9 +1943,53 @@ async fn a_device_that_never_becomes_usable_keeps_the_client() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_client_of_an_earlier_call_is_not_removed_by_a_failed_stage() {
+async fn a_client_of_an_earlier_call_is_removed_by_a_failed_stage() {
+    // Replaces `a_client_of_an_earlier_call_is_not_removed_by_a_failed_stage`: the teardown
+    // is decided by the state, not by who added the membership.
     let e = env();
     e.client_up().await;
+    e.set_device(Dev::Other("xfs"));
+    let status = e.stage().await.unwrap_err();
+    assert_rolled_back(&e, &status, Code::FailedPrecondition, "xfs");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retriable_error_keeps_a_client_of_an_earlier_call() {
+    let e = env();
+    e.client_up().await;
+    e.set_device(Dev::Ambiguous);
+    assert_eq!(code(e.stage().await), Code::Unavailable);
+    assert!(is_client(&e));
+    assert!(e.volumes.entry_of(VOLUME, NODE).is_some());
+    assert!(e.calls(&["drbdadm down"]).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retriable_error_and_then_a_final_one_leave_no_client() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Ambiguous);
+    assert_eq!(code(e.stage().await), Code::Unavailable);
+    assert!(is_client(&e));
+    assert!(e.calls(&["drbdadm down"]).is_empty());
+    // The retry finds the node as a member (`AlreadyMember`) and ends final.
+    e.set_device(Dev::Other("xfs"));
+    let status = e.stage().await.unwrap_err();
+    assert_rolled_back(&e, &status, Code::FailedPrecondition, "xfs");
+}
+
+/// The volume is mounted at `other` on this node (another pod of the same PVC).
+fn mount_elsewhere(e: &Env, other: &str, source: &str) {
+    fs::create_dir_all(other).unwrap();
+    e.sim.add_mount(source, other, "/", false, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_whose_volume_is_mounted_elsewhere_on_this_node_is_kept() {
+    let e = env();
+    e.client_up().await;
+    let other = e._tmp.path().join("other-staging");
+    mount_elsewhere(&e, &other.to_string_lossy(), &e.device_source());
     e.set_device(Dev::Other("xfs"));
     let status = e.stage().await.unwrap_err();
     assert_eq!(status.code(), Code::FailedPrecondition);
@@ -1950,7 +1997,36 @@ async fn a_client_of_an_earlier_call_is_not_removed_by_a_failed_stage() {
     assert!(e.volumes.entry_of(VOLUME, NODE).is_some());
     assert!(e.sim.up.load(SeqCst));
     assert!(e.calls(&["drbdadm down"]).is_empty());
-    assert_eq!(e.patches(), 0);
+    assert!(e.logs.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_mount_of_another_device_does_not_keep_the_client() {
+    let e = env();
+    e.client_up().await;
+    let other = e._tmp.path().join("other-staging");
+    let foreign = e.dev_dir.join("drbd1001").to_string_lossy().into_owned();
+    mount_elsewhere(&e, &other.to_string_lossy(), &foreign);
+    e.set_device(Dev::Other("xfs"));
+    let status = e.stage().await.unwrap_err();
+    assert_rolled_back(&e, &status, Code::FailedPrecondition, "xfs");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_teardown_does_nothing_when_the_staging_path_is_a_mount_of_another_source() {
+    // Only the staging-path condition applies: the other source is not this volume's device.
+    let e = env();
+    e.client_up().await;
+    fs::create_dir_all(&e.staging).unwrap();
+    e.sim
+        .add_mount("/dev/other", &e.staging.to_string_lossy(), "/", false, None);
+    e.svc
+        .teardown_after_failed_stage(VOLUME.to_string(), e.staging.clone())
+        .await
+        .unwrap();
+    assert!(is_client(&e));
+    assert!(e.calls(&["drbdadm down"]).is_empty());
+    assert!(e.volumes.entry_of(VOLUME, NODE).is_some());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1968,6 +2044,16 @@ async fn a_replica_and_a_witness_are_not_touched_by_a_failed_stage() {
         assert_eq!(e.volumes.object(VOLUME).unwrap().spec.nodes, before, "{node}");
         assert!(e.calls(&["drbdadm down"]).is_empty(), "{node}");
         assert_eq!(e.patches(), 0, "{node}");
+        // Not even an attempt at a teardown (its refusal would be logged).
+        assert!(
+            e.logs.lock().unwrap().is_empty(),
+            "{node}: {:?}",
+            e.logs.lock().unwrap()
+        );
+        if kind == NodeKind::Replica {
+            assert!(e.paths.image(VOLUME).exists(), "{node}");
+            assert!(e.paths.res_file(VOLUME).exists(), "{node}");
+        }
     }
 }
 
@@ -1985,10 +2071,13 @@ async fn a_failed_teardown_returns_the_original_error_and_keeps_the_membership()
     let logs = e.logs.lock().unwrap().clone();
     assert_eq!(logs.len(), 1, "{logs:?}");
     assert!(logs[0].contains("held open") && logs[0].contains("pv1"), "{logs:?}");
-    // The next attempt sees a member, fails the same way and leaves it alone.
+    // The next attempt sees a member, fails the same way and, the cleanup working now,
+    // tears it down: the decision is by state, not by who added the membership.
     e.sim.failing.lock().unwrap().clear();
-    assert_eq!(code(e.stage().await), Code::FailedPrecondition);
-    assert!(is_client(&e), "an earlier call's membership is never torn down");
+    let status = e.stage().await.unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(!is_client(&e), "{:?}", e.members());
+    assert!(e.volumes.entry_of(VOLUME, NODE).is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1996,7 +2085,10 @@ async fn the_teardown_does_nothing_when_the_staging_path_is_mounted() {
     let e = env();
     e.client_up().await;
     e.stage_mount();
-    e.svc.abandon_join(VOLUME.to_string(), e.staging.clone()).await.unwrap();
+    e.svc
+        .teardown_after_failed_stage(VOLUME.to_string(), e.staging.clone())
+        .await
+        .unwrap();
     assert!(is_client(&e));
     assert!(e.calls(&["drbdadm down"]).is_empty());
     assert_eq!(e.sim.mounted_at(&e.staging).len(), 1);
@@ -2248,5 +2340,11 @@ async fn a_stage_without_object_and_without_this_volumes_mount_is_not_found() {
     assert_eq!(code(e.stage().await), Code::NotFound);
     write_mountinfo_line(&e, &e.device_source(), "xfs");
     assert_eq!(code(e.stage().await), Code::NotFound);
+    // The source must be `<dev_dir>/drbd<digits>`: nothing else counts as this volume's device.
+    for name in ["drbd", "drbdx", "drbd10x0", "drbd-1", "drbd1000/x"] {
+        let source = e.dev_dir.join(name).to_string_lossy().into_owned();
+        write_mountinfo_line(&e, &source, "ext4");
+        assert_eq!(code(e.stage().await), Code::NotFound, "{name}");
+    }
     assert!(e.runner_calls().is_empty());
 }

@@ -252,10 +252,11 @@ fn linking_leaves_no_temporary_behind_and_clears_a_stale_one() {
 
 // ---- loop_holders: the one listing of the loop devices of an image ----
 
-fn holder(device: &str, deleted: bool) -> LoopHolder {
+fn holder(device: &str, deleted: bool, confirmed: bool) -> LoopHolder {
     LoopHolder {
         device: device.to_string(),
         deleted,
+        confirmed,
     }
 }
 
@@ -273,7 +274,10 @@ fn loop_holders_tell_a_live_file_from_a_deleted_one() {
         dir.display()
     ));
     let found = loop_holders(&runner, &dir.join("spike.img")).unwrap();
-    assert_eq!(found, [holder("/dev/loop2", false), holder("/dev/loop7", true)]);
+    assert_eq!(
+        found,
+        [holder("/dev/loop2", false, true), holder("/dev/loop7", true, true)]
+    );
     assert_eq!(runner.calls(), ["losetup --list --noheadings --output NAME,BACK-FILE"]);
 }
 
@@ -292,7 +296,10 @@ fn loop_holders_match_the_path_as_given_and_with_the_directory_resolved() {
         link.display()
     );
     let found = loop_holders(&listing(text), &link.join("vol.img")).unwrap();
-    assert_eq!(found, [holder("/dev/loop4", true), holder("/dev/loop5", false)]);
+    assert_eq!(
+        found,
+        [holder("/dev/loop4", true, true), holder("/dev/loop5", false, true)]
+    );
 }
 
 #[test]
@@ -358,7 +365,10 @@ fn a_name_only_line_of_an_existing_image_is_a_holder_when_losetup_j_lists_the_de
     let tmp = TempDir::new().unwrap();
     let image = image_in(&tmp, true);
     let runner = detached_node("/dev/loop0 /vol.img\n".to_string(), &["/dev/loop0"]);
-    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", false)]);
+    assert_eq!(
+        loop_holders(&runner, &image).unwrap(),
+        [holder("/dev/loop0", false, true)]
+    );
     assert_eq!(runner.calls().len(), 2);
     assert!(runner.calls()[1].starts_with("losetup -j "), "{:?}", runner.calls());
 }
@@ -379,7 +389,10 @@ fn a_deleted_name_only_line_is_a_deleted_holder_of_a_missing_image() {
     let tmp = TempDir::new().unwrap();
     let image = image_in(&tmp, false);
     let runner = detached_node("/dev/loop0 /vol.img (deleted)\n".to_string(), &[]);
-    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", true)]);
+    assert_eq!(
+        loop_holders(&runner, &image).unwrap(),
+        [holder("/dev/loop0", true, false)]
+    );
     assert_eq!(runner.calls().len(), 1, "no inode lookup for a missing image");
 }
 
@@ -388,7 +401,10 @@ fn a_name_only_line_of_a_missing_image_is_kept_without_an_inode_lookup() {
     let tmp = TempDir::new().unwrap();
     let image = image_in(&tmp, false);
     let runner = detached_node("/dev/loop0 /vol.img\n".to_string(), &[]);
-    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", false)]);
+    assert_eq!(
+        loop_holders(&runner, &image).unwrap(),
+        [holder("/dev/loop0", false, false)]
+    );
     assert_eq!(runner.calls().len(), 1);
 }
 
@@ -398,7 +414,10 @@ fn a_deleted_name_only_line_is_kept_even_when_the_image_exists() {
     let tmp = TempDir::new().unwrap();
     let image = image_in(&tmp, true);
     let runner = detached_node("/dev/loop0 /vol.img (deleted)\n".to_string(), &[]);
-    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", true)]);
+    assert_eq!(
+        loop_holders(&runner, &image).unwrap(),
+        [holder("/dev/loop0", true, false)]
+    );
 }
 
 #[test]
@@ -423,9 +442,9 @@ fn the_name_form_is_confirmed_once_for_all_unconfirmed_lines() {
     assert_eq!(
         loop_holders(&runner, &image).unwrap(),
         [
-            holder("/dev/loop1", false),
-            holder("/dev/loop2", false),
-            holder("/dev/loop3", true)
+            holder("/dev/loop1", false, true),
+            holder("/dev/loop2", false, true),
+            holder("/dev/loop3", true, false)
         ]
     );
     assert_eq!(runner.calls().iter().filter(|c| c.starts_with("losetup -j")).count(), 1);
