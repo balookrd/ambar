@@ -73,7 +73,7 @@ fn rejects_an_empty_list() {
 
 #[test]
 fn rejects_an_invalid_node_name() {
-    for bad in ["", "-a", "a b", "a;b", "a/b", &"x".repeat(64)] {
+    for bad in ["", "-a", "a b", "a;b", "a/b", "a-", &"x".repeat(56)] {
         let json = list(&[one(bad, "192.0.2.1", 0)]);
         assert_eq!(
             ClusterNodes::from_json(&json),

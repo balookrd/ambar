@@ -201,7 +201,7 @@ fn the_drbdadm_keyword_all_is_not_a_volume_name() {
 
 #[test]
 fn node_name_rules() {
-    let long = "a".repeat(64);
+    let long = "a".repeat(56);
     for bad in [
         "",
         " a",
@@ -214,6 +214,9 @@ fn node_name_rules() {
         "a\nb",
         "-a",
         ".a",
+        "a-",
+        "a.",
+        "a_",
         long.as_str(),
     ] {
         assert_eq!(
@@ -222,8 +225,8 @@ fn node_name_rules() {
             "{bad:?}"
         );
     }
-    let ok63 = "a".repeat(63);
-    for good in ["k3s-1", "lima-dv-1", "Node_1.example", ok63.as_str()] {
+    let ok55 = "a".repeat(55);
+    for good in ["k3s-1", "lima-dv-1", "Node_1.example", ok55.as_str()] {
         assert_eq!(with(|s| s.nodes[0].name = good.into()), Ok(()), "{good:?}");
     }
 }
@@ -249,7 +252,7 @@ fn error_messages_are_stable() {
         ),
         (
             SpecError::NodeName("a;b".into()),
-            "invalid node name \"a;b\": use 1-63 characters A-Z, a-z, 0-9, '.', '_' and '-', starting with a letter or digit",
+            "invalid node name \"a;b\": use 1-55 characters A-Z, a-z, 0-9, '.', '_' and '-', starting and ending with a letter or digit",
         ),
         (
             SpecError::Size(7),

@@ -6,6 +6,7 @@ pub mod config;
 pub mod crd;
 pub mod drbd;
 pub mod exec;
+pub mod membership;
 pub mod model;
 pub mod module_loader;
 pub mod paths;

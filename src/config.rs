@@ -27,7 +27,7 @@ pub enum ConfigError {
     #[error("invalid nodes json: {0}")]
     Json(String),
     #[error(
-        "invalid node name {0:?}: use 1-63 characters A-Z, a-z, 0-9, '.', '_' and '-', starting with a letter or digit"
+        "invalid node name {0:?}: use 1-55 characters A-Z, a-z, 0-9, '.', '_' and '-', starting and ending with a letter or digit"
     )]
     NodeName(String),
     #[error("node name {0:?} appears more than once")]
