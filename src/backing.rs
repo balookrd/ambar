@@ -31,16 +31,18 @@ pub enum BackingError {
 
 /// Size of DRBD's internal metadata on a backing device of `device_bytes`
 /// for `max_peers` peers: 8 sectors of bitmap per extent and peer, plus 72
-/// sectors of fixed overhead. Matches three measurements on the stand: a
-/// 1 GiB file lost 100 KiB with two peers, 68 KiB with one peer and 260 KiB
-/// with `--max-peers=7`.
+/// sectors of fixed overhead. The result is a whole number of 4 KiB, because
+/// `(8 * k + 72) * 512 = 4096 * (k + 9)`. Matches three measurements on the
+/// stand: a 1 GiB file lost 100 KiB with two peers, 68 KiB with one peer and
+/// 260 KiB with `--max-peers=7`.
 ///
 /// Inputs are bounded: `validate` keeps the volume size at or below
-/// `MAX_SIZE_BYTES` (2^50) and `max_peers` at 31, so the backing device is
-/// below 2^50 plus a few MiB. That is under 2^23 + 1 extents, the product
-/// `extents * 8 * peers` stays below 2^23 * 8 * 32 = 2^31, and the final
-/// multiplication by 512 stays below 2^40. No `u64` operation here can
-/// overflow.
+/// `MAX_SIZE_BYTES` (2^50) and `max_peers` at 31. At the maximum size the
+/// metadata is about 31 * 2^35 bytes (below 2^40), so the backing device is
+/// below 2^50 + 2^40 bytes: about 2^23 + 2^13 extents of 2^18 sectors. The
+/// product `extents * 8 * peers` stays below (2^23 + 2^13 + 1) * 8 * 31,
+/// which is below 2^32, and the final multiplication by 512 stays below
+/// 2^41. No `u64` operation here can overflow.
 pub fn metadata_bytes(device_bytes: u64, max_peers: u32) -> u64 {
     let extents = device_bytes.div_ceil(SECTOR).div_ceil(SECTORS_PER_EXTENT);
     (extents * 8 * u64::from(max_peers) + 72) * SECTOR
@@ -52,8 +54,10 @@ pub fn metadata_bytes(device_bytes: u64, max_peers: u32) -> u64 {
 /// Same bounds as `metadata_bytes`: `size_bytes <= MAX_SIZE_BYTES` (2^50)
 /// and `max_peers <= 31`. The file is below 2^50 plus the metadata (below
 /// 2^40), so `size_bytes + metadata_bytes(..)` and `next_multiple_of(4096)`
-/// stay far below 2^64. The loop converges because the metadata grows by at
-/// most one 8-sector step per 128 MiB extent, much slower than the file.
+/// stay far below 2^64. The loop converges because each extent (128 MiB)
+/// added to the file adds 8 * `max_peers` sectors (4 KiB * `max_peers`, at
+/// most 124 KiB) of metadata: under 0.1% of the extent, so the growth per
+/// iteration shrinks geometrically.
 pub fn backing_file_bytes(size_bytes: u64, max_peers: u32) -> u64 {
     let mut file = size_bytes;
     loop {

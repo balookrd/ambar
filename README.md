@@ -13,7 +13,7 @@ design, the groundwork it rests on and the node agent:
 
 | Part | State |
 |---|---|
-| Design spec | written, five open questions listed at its end |
+| Design spec | written, six open questions listed at its end |
 | Image with a prebuilt DRBD 9.3.4 module and drbd-utils 9.35.0 | builds, has tests |
 | Test stand: three Lima VMs with k3s | scripts in `stand/` |
 | DRBD 9 failure experiments on the stand | recorded with raw outputs |
@@ -40,7 +40,7 @@ Nothing here has been run on a production cluster.
 |---|---|
 | `docs/superpowers/specs/2026-11-12-ambar-design.md` | design spec (Russian) |
 | `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | record of the DRBD 9 experiments (Russian) |
-| `docs/superpowers/plans/` | executed plan of the groundwork phase (Russian, historical) |
+| `docs/superpowers/plans/` | executed plans of phases 0 and 1 (Russian, historical) |
 | `src/` | the `ambar` agent (Rust) |
 | `image/` | Dockerfile, module loader, image tests |
 | `stand/` | test stand scripts; see `stand/README.md` (Russian) |
@@ -54,6 +54,7 @@ Nothing here has been run on a production cluster.
 | Lima | 2.3.0, `vmType: vz` |
 | Docker | `docker buildx`, `linux/arm64` |
 | Kernel the module is built for | `6.12.116+deb13-arm64` (Debian 13 stock kernel) |
+| For `image/build.sh` on the host | Rust stable 1.89 or newer (the `rust-version` of the crate), `cargo-zigbuild`, `zig`, and the target added with `rustup target add aarch64-unknown-linux-musl` (checked with zig 0.17.1 and rustc 1.99.1) |
 
 ## Build and test the image
 
@@ -83,7 +84,7 @@ Linux kernel.
 cargo test
 ```
 
-Expected line: `test result: ok. 137 passed`. The agent is checked on the stand
+Expected line: `test result: ok. 144 passed`. The agent is checked on the stand
 with `stand/agent-smoke.sh`, see `stand/README.md`.
 
 Bringing up the stand is described in `stand/README.md`.

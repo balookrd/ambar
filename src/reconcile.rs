@@ -52,14 +52,14 @@
 //!
 //! The executor re-reads the status after `Up` (the resource must be
 //! configured), after `Adjust` (the exit code must be zero, the resource must
-//! be configured and match the description) and after `drbdadm down` in `remove` (it must be gone); it
-//! stops with `NotApplied` otherwise. The pass that runs `SkipInitialSync`
-//! is the last pass of an `apply`: the synced marker is written by a later
-//! `apply` once the status shows the local disk `UpToDate`, or a peer's disk
-//! in a state that holds data. When the skip gate holds, every peer disk is
-//! `Inconsistent` or the peer has no disk, so the two rules never both apply.
-//! After `Adjust` a non-zero exit code of `drbdadm adjust` is a failure too:
-//! the status cannot show every field of the resource file.
+//! be configured and match the description) and after `drbdadm down` in
+//! `remove` (it must be gone); it stops with `NotApplied` otherwise. The exit
+//! code of `adjust` is checked because the status cannot show every field of
+//! the resource file. The pass that runs `SkipInitialSync` is the last pass
+//! of an `apply`: the synced marker is written by a later `apply` once the
+//! status shows the local disk `UpToDate`, or a peer's disk in a state that
+//! holds data. When the skip gate holds, every peer disk is `Inconsistent` or
+//! the peer has no disk, so the two rules never both apply.
 
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
@@ -320,9 +320,9 @@ impl Reconciler<'_> {
         let volume = spec.name.as_str();
         let diskful = spec.node(node_name).is_some_and(|n| n.diskful);
         let image = self.paths.image(volume);
-        let image_exists = image.exists();
-        let ready = self.paths.ready_marker(volume).exists();
-        let synced = self.paths.synced_marker(volume).exists();
+        let image_exists = exists(&image)?;
+        let ready = exists(&self.paths.ready_marker(volume))?;
+        let synced = exists(&self.paths.synced_marker(volume))?;
 
         let file = match (image_exists, ready) {
             (false, _) => FileState::Absent,
@@ -369,7 +369,13 @@ impl Reconciler<'_> {
                 remove_if_present(&self.paths.synced_marker(volume))?;
                 sync_dir(&self.paths.volumes_dir)?;
             }
-            Action::CreateFile { bytes } => backing::create_sparse_file(&self.paths.image(volume), *bytes)?,
+            Action::CreateFile { bytes } => {
+                // Made durable before the ready marker can exist, so the
+                // marker never outlives a file that a power loss shortened.
+                backing::create_sparse_file(&self.paths.image(volume), *bytes)?;
+                sync_file(&self.paths.image(volume))?;
+                sync_dir(&self.paths.volumes_dir)?;
+            }
             Action::AttachLoop => *loop_device = Some(backing::attach_loop(self.runner, &self.paths.image(volume))?),
             Action::LinkDevice => {
                 let device = loop_device.as_deref().ok_or_else(|| ReconcileError::NoLoopDevice {
@@ -378,7 +384,12 @@ impl Reconciler<'_> {
                 backing::link_device(&self.paths.device_link(volume), device)?;
             }
             Action::WriteRes => write_atomically(&self.paths.res_file(volume), &self.rendered(spec))?,
-            Action::CreateMd => drbd.create_md(volume, spec.max_peers)?,
+            Action::CreateMd => {
+                drbd.create_md(volume, spec.max_peers)?;
+                // `create-md` writes through the loop device; flush the
+                // backing file itself before `MarkReady` records the result.
+                sync_file(&self.paths.image(volume))?;
+            }
             Action::MarkReady => write_atomically(&self.paths.ready_marker(volume), "")?,
             Action::Up => {
                 drbd.up(volume)?;
@@ -430,7 +441,7 @@ impl Reconciler<'_> {
             steps.push("down");
         }
         let image = self.paths.image(volume);
-        let devices = if image.exists() {
+        let devices = if exists(&image)? {
             backing::find_loops(self.runner, &image)?
         } else {
             self.loop_of_missing_image(volume)?.into_iter().collect()
@@ -467,7 +478,7 @@ impl Reconciler<'_> {
                 steps.push(step);
             }
         }
-        if self.paths.res_dir.exists() {
+        if exists(&self.paths.res_dir)? {
             sync_dir(&self.paths.res_dir)?;
         }
         // Last step, still under the lock.
@@ -539,6 +550,18 @@ impl Reconciler<'_> {
     }
 }
 
+/// Whether `path` exists. A failed `stat` (permission denied, a loop of
+/// symbolic links, a component that is not a directory) is an error, not
+/// "absent": a marker that cannot be read must stop the pass, because
+/// treating it as missing leads to `drbdadm create-md --force` over data.
+fn exists(path: &Path) -> Result<bool, ReconcileError> {
+    path.try_exists().map_err(|source| ReconcileError::Io {
+        action: "inspect",
+        path: path.display().to_string(),
+        source,
+    })
+}
+
 /// `true` when `path` still names the open `file`: same device and inode.
 /// `false` when the path was removed or replaced by another file.
 fn still_linked(file: &File, path: &Path) -> io::Result<bool> {
@@ -579,6 +602,17 @@ fn temp_path(path: &Path) -> PathBuf {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     path.with_file_name(format!(".{name}.tmp"))
+}
+
+/// Flushes the data and metadata of the file at `path` to storage.
+fn sync_file(path: &Path) -> Result<(), ReconcileError> {
+    File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(|source| ReconcileError::Io {
+            action: "sync",
+            path: path.display().to_string(),
+            source,
+        })
 }
 
 /// Makes the creation, renaming and removal of entries in `dir` durable.

@@ -17,7 +17,7 @@ impl Output {
     }
 }
 
-pub trait Runner {
+pub trait Runner: Send + Sync {
     /// Runs a program and waits for it. `Err` means it could not be started.
     fn run(&self, program: &str, args: &[&str]) -> io::Result<Output>;
 }
