@@ -22,7 +22,11 @@ admver="$(run "drbdadm --version | sed -n 's/^DRBDADM_VERSION=//p'")"
 [[ "$admver" == 9.35.0 ]] || fail "drbdadm version: $admver"
 
 run "grep -q 'usage-count no' /etc/drbd.conf" || fail "usage-count is not disabled"
-run "command -v losetup mkfs.ext4 modprobe insmod >/dev/null" || fail "host tools are missing"
+run "command -v losetup mkfs.ext4 blkid mount umount modprobe insmod drbdadm drbdsetup drbdmeta >/dev/null" \
+  || fail "host tools are missing"
+# The agent formats a new volume with this exact option set.
+run "f=\$(mktemp) && truncate -s 16M \$f && mkfs.ext4 -q -F -E nodiscard \$f && blkid -p -o value -s TYPE \$f | grep -qx ext4" \
+  || fail "mkfs.ext4 -E nodiscard does not work"
 run "test -x /opt/ambar/load-module.sh" || fail "load-module.sh is missing"
 
 agent="$(run "ambar --version" 2>&1)" || fail "ambar binary: $agent"

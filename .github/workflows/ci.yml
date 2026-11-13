@@ -44,3 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: image/test-loader.sh
       - run: bash -n image/*.sh stand/*.sh stand/spike/*.sh
+      - name: Manifests parse
+        run: |
+          python3 -c 'import sys,yaml; [list(yaml.safe_load_all(open(f))) for f in sys.argv[1:]]' deploy/*.yaml
+          python3 -c 'import json; json.load(open("deploy/crd.json"))'

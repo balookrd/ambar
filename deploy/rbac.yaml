@@ -1,0 +1,152 @@
+# The ServiceAccount `ambar` is used by the whole DaemonSet pod: the agent and
+# both CSI sidecars.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ambar
+  namespace: ambar-system
+---
+# Agent rights, only what the code calls (src/agent/kube.rs):
+#   get, list, watch  Api::get_opt, Api::list, the watcher
+#   create            Api::create (CreateVolume)
+#   delete            Api::delete (DeleteVolume, with a uid precondition)
+#   patch             JSON patches of finalizers, spec.initialSync, spec.nodes
+#                     and annotations
+# `update` is not granted: the code never replaces an object.
+# `pods` and `nodes` are not granted: phase 3 needs them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ambar-agent
+rules:
+  - apiGroups: ["ambar.balookrd.github.io"]
+    resources: ["replicatedvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # Server-side apply and JSON patch of status.nodes.
+  - apiGroups: ["ambar.balookrd.github.io"]
+    resources: ["replicatedvolumes/status"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ambar-agent
+subjects:
+  - kind: ServiceAccount
+    name: ambar
+    namespace: ambar-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ambar-agent
+---
+# The node map ConfigMap (src/agent/nodes.rs: Api::get_opt on every call).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ambar-agent
+  namespace: ambar-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["ambar-nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ambar-agent
+  namespace: ambar-system
+subjects:
+  - kind: ServiceAccount
+    name: ambar
+    namespace: ambar-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ambar-agent
+---
+# external-provisioner rights. Source: deploy/kubernetes/rbac.yaml of
+# https://github.com/kubernetes-csi/external-provisioner at the tag v6.4.0
+# (the pinned release of the csi-provisioner image in daemonset.yaml). The
+# ClusterRole and Role are copied under other names and bound to the
+# ServiceAccount `ambar`.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ambar-external-provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ambar-external-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: ambar
+    namespace: ambar-system
+roleRef:
+  kind: ClusterRole
+  name: ambar-external-provisioner
+  apiGroup: rbac.authorization.k8s.io
+---
+# Leader election (Leases) and CSIStorageCapacity rules of the same file.
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: ambar-system
+  name: ambar-external-provisioner
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csistoragecapacities"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ambar-external-provisioner
+  namespace: ambar-system
+subjects:
+  - kind: ServiceAccount
+    name: ambar
+    namespace: ambar-system
+roleRef:
+  kind: Role
+  name: ambar-external-provisioner
+  apiGroup: rbac.authorization.k8s.io

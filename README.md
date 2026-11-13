@@ -42,6 +42,7 @@ Nothing here has been run on a production cluster.
 | `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | record of the DRBD 9 experiments (Russian) |
 | `docs/superpowers/plans/` | executed plans of phases 0 and 1 (Russian, historical) |
 | `src/` | the `ambar` agent (Rust) |
+| `deploy/` | Kubernetes manifests: CRD, CSIDriver, RBAC, DaemonSet, StorageClasses |
 | `image/` | Dockerfile, module loader, image tests |
 | `stand/` | test stand scripts; see `stand/README.md` (Russian) |
 | `stand/spike/` | experiment scripts and `drbdsetup status --json` samples |

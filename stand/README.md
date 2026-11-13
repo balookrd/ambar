@@ -109,3 +109,71 @@ bash -c 'source stand/lib.sh
 время `ambar apply` должен завершиться с кодом 75, а после освобождения
 блокировки с кодом 0. После шага c скрипт также проверяет, что
 `blockdev --getsize64 /dev/drbd1010` на `dv-1` не меньше 1073741824.
+
+## Установка драйвера
+
+Скрипт `stand/install.sh` ставит драйвер из `deploy/` на стенд. Перед ним нужны
+образ агента и k3s: `image/build.sh && stand/k3s.sh`.
+
+```bash
+stand/install.sh
+```
+
+Ожидаемая последняя строка: `OK: ambar installed on 3 nodes`. Скрипт выполняет по
+порядку:
+
+1. Создаёт на каждом узле `/var/lib/rancher/ambar/volumes` (0700) и
+   `/var/lib/rancher/ambar/res`.
+2. Удаляет DaemonSet `toolbox` из `ambar-spike` и ждёт завершения его подов: два
+   процесса не должны управлять одними ресурсами DRBD.
+3. Импортирует образ `IMAGE` в containerd каждого узла. Образы сайдкаров узлы
+   тянут сами с `registry.k8s.io`.
+4. Применяет `deploy/namespace.yaml`, `deploy/crd.json`, `deploy/csidriver.yaml`,
+   `deploy/rbac.yaml`.
+5. Создаёт `ConfigMap ambar-nodes` из `NODES`: имя `vm_host`, адрес `vm_ip`,
+   `nodeId` по порядку в `NODES`, `capacityBytes` 8 ГиБ.
+6. Применяет `deploy/daemonset.yaml` и `deploy/storageclass.yaml` и ждёт
+   `rollout status ds/ambar`. Если DaemonSet уже был, перезапускает его, чтобы
+   поды взяли пересобранный образ с тем же тегом.
+7. Проверяет, что `CSINode` каждого узла содержит драйвер
+   `ambar.balookrd.github.io`.
+
+Повторный запуск безопасен. Переменные:
+
+| Переменная | По умолчанию | Что задаёт |
+|---|---|---|
+| `IMAGE` | `ambar-drbd:dev` | Образ агента; подставляется в `deploy/daemonset.yaml` вместо `AMBAR_IMAGE` |
+| `PULL_POLICY` | `Never` | `imagePullPolicy` агента; подставляется вместо `AMBAR_IMAGE_PULL_POLICY` |
+
+На кластере без стенда подставьте оба значения сами (образ должен лежать в
+реестре, который видят узлы):
+
+```bash
+sed -e 's|AMBAR_IMAGE_PULL_POLICY|IfNotPresent|' \
+    -e 's|AMBAR_IMAGE|registry.example.com/ambar-drbd:1.0|' \
+    deploy/daemonset.yaml | kubectl apply -f -
+```
+
+`ConfigMap ambar-nodes` на таком кластере создаётся по образцу
+`deploy/nodes-configmap.example.yaml`.
+
+Удаление:
+
+```bash
+stand/install.sh --remove
+```
+
+Скрипт удаляет StorageClass, DaemonSet, RBAC, `CSIDriver`, CRD и пространство
+имён `ambar-system`, затем возвращает DaemonSet `toolbox`. Если в кластере есть
+объекты `ReplicatedVolume`, скрипт ничего не удаляет и завершается с кодом 1,
+печатая список объектов: удаление CRD удалило бы их, и агенты увидели бы тома без
+объектов. Сначала удалите PVC, которые на них ссылаются.
+
+### Права и сайдкары
+
+Агент работает под `ServiceAccount ambar` без прав `cluster-admin`; права
+перечислены в `deploy/rbac.yaml` с указанием места в коде, которому нужно каждое.
+Сайдкары: `csi-provisioner` v6.4.0 и `csi-node-driver-registrar` v2.18.0, оба
+закреплены по digest в `deploy/daemonset.yaml`. Provisioner запускается в каждом
+поде DaemonSet с выбором лидера (Lease `ambar-balookrd-github-io` в
+`ambar-system`), активен один.

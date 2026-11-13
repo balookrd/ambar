@@ -1,0 +1,20 @@
+# Node map of the cluster. The key `nodes` holds a JSON array; one entry per
+# Kubernetes node:
+#   name          Kubernetes node name, equal to `uname -n` on the node
+#   address       IP address of the node on the replication network
+#   nodeId        DRBD node id, 0..31, unique, never changed for a node
+#   capacityBytes bytes of volume images the node may hold
+# The addresses below are documentation addresses (RFC 5737). `stand/install.sh`
+# generates this object for the stand; on another cluster copy and edit it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ambar-nodes
+  namespace: ambar-system
+data:
+  nodes: |
+    [
+      {"name": "node-a", "address": "192.0.2.11", "nodeId": 0, "capacityBytes": 8589934592},
+      {"name": "node-b", "address": "192.0.2.12", "nodeId": 1, "capacityBytes": 8589934592},
+      {"name": "node-c", "address": "192.0.2.13", "nodeId": 2, "capacityBytes": 8589934592}
+    ]
