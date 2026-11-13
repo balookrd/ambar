@@ -12,7 +12,7 @@ use crate::crd::NodeStatus;
 use crate::csi::proto::volume_capability::{AccessMode, MountVolume};
 use crate::csi::proto::{CapacityRange, Topology, TopologyRequirement, VolumeContentSource};
 use crate::membership::replica_finalizer;
-use crate::tests::volumes::{FakeNodes, FakeVolumes, cluster};
+use crate::tests::volumes::{FakeNodes, FakeVolumes, T0, cluster, time};
 
 const GIB: u64 = 1 << 30;
 
@@ -285,14 +285,14 @@ async fn step4_a_bad_parameter_is_invalid_and_named() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn step4_a_negative_size_is_invalid_a_huge_one_is_out_of_range() {
+async fn step4_a_negative_size_and_a_huge_one_are_out_of_range() {
     let h = harness();
     let mut req = request("vol");
     req.capacity_range = Some(CapacityRange {
         required_bytes: -1,
         limit_bytes: 0,
     });
-    assert_eq!(code_of(create(&h, req).await).0, Code::InvalidArgument);
+    assert_eq!(code_of(create(&h, req).await).0, Code::OutOfRange);
     let mut req = request("vol");
     req.capacity_range = Some(CapacityRange {
         required_bytes: i64::MAX,
@@ -564,22 +564,307 @@ async fn an_object_being_deleted_still_holds_its_minor_and_budget() {
 
 // ---- concurrency ----
 
+/// A cache that never shows the objects `names` (as far as any test can count).
+fn blind_cache(h: &Harness, names: &[&str]) {
+    let mut hidden = h.volumes.hidden.lock().unwrap();
+    for name in names {
+        hidden.insert(name.to_string(), u32::MAX);
+    }
+}
+
+fn indices(h: &Harness, names: &[&str]) -> Vec<(u32, u16)> {
+    let mut found: Vec<(u32, u16)> = names
+        .iter()
+        .map(|n| {
+            let o = h.volumes.object(n).unwrap();
+            (o.spec.minor, o.spec.port)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+// V1: placement reads the live list, never the cache.
+
 #[tokio::test(start_paused = true)]
-async fn concurrent_creates_of_different_names_get_different_indices() {
+async fn v1_two_sequential_creates_get_different_indices_while_the_cache_lags() {
+    let h = harness();
+    blind_cache(&h, &["vol-a", "vol-b"]);
+    let _agents = agents_report(&h.volumes);
+    create(&h, request("vol-a")).await.unwrap();
+    create(&h, request("vol-b")).await.unwrap();
+    assert_eq!(indices(&h, &["vol-a", "vol-b"]), [(1000, 7000), (1001, 7001)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn v1_two_interleaved_creates_get_different_indices_while_the_cache_lags() {
     let h = harness();
     h.volumes.yields.store(true, Ordering::SeqCst);
-    // The first object is slow to show in the list, as in a lagging cache.
-    h.volumes.hidden.lock().unwrap().insert("vol-a".to_string(), 3);
+    blind_cache(&h, &["vol-a", "vol-b"]);
     let _agents = agents_report(&h.volumes);
     let (a, b) = tokio::join!(create(&h, request("vol-a")), create(&h, request("vol-b")));
     a.unwrap();
     b.unwrap();
-    let (a, b) = (h.volumes.object("vol-a").unwrap(), h.volumes.object("vol-b").unwrap());
-    assert_ne!(a.spec.minor, b.spec.minor);
-    assert_ne!(a.spec.port, b.spec.port);
-    let mut minors = [a.spec.minor, b.spec.minor];
-    minors.sort();
-    assert_eq!(minors, [1000, 1001]);
+    assert_eq!(indices(&h, &["vol-a", "vol-b"]), [(1000, 7000), (1001, 7001)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn v1_a_handler_dropped_right_after_the_create_leaves_its_indices_taken() {
+    let h = harness();
+    h.volumes.yields.store(true, Ordering::SeqCst);
+    blind_cache(&h, &["vol-a", "vol-b"]);
+    // The call is cancelled (the caller went away) as soon as the object is stored.
+    tokio::select! {
+        biased;
+        _ = create(&h, request("vol-a")) => panic!("the call must be cancelled before it ends"),
+        _ = h.volumes.created.notified() => {}
+    }
+    assert!(h.volumes.object("vol-a").is_some());
+    h.volumes.yields.store(false, Ordering::SeqCst);
+    let _agents = agents_report(&h.volumes);
+    create(&h, request("vol-b")).await.unwrap();
+    assert_eq!(indices(&h, &["vol-a", "vol-b"]), [(1000, 7000), (1001, 7001)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn v1_placement_does_not_wait_for_the_cache() {
+    let h = harness();
+    blind_cache(&h, &["vol-a"]);
+    let _agents = agents_report(&h.volumes);
+    let started = tokio::time::Instant::now();
+    create(&h, request("vol-a")).await.unwrap();
+    // The only time spent is the wait for the replicas (one agent tick), not for a listing.
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+}
+
+// V2: two Controller instances; the later object withdraws.
+
+/// A rival object `name` with the given minor and port, created at `stamp` (None: no timestamp).
+fn rival(name: &str, minor: u32, port: u16, stamp: Option<&str>) -> ReplicatedVolume {
+    let mut object = object_json(name, GIB, "C", 7, minor, port, 3);
+    object.metadata.creation_timestamp = stamp.map(time);
+    object
+}
+
+/// The rival appears between the live list of the placement and the create.
+fn rival_appears(h: &Harness, object: ReplicatedVolume) {
+    *h.volumes.on_create.lock().unwrap() = Some(Box::new(move |fake| fake.put(object)));
+}
+
+const OLDER: &str = "2025-12-31T23:00:00Z";
+const NEWER: &str = "2026-01-01T01:00:00Z";
+
+#[tokio::test(start_paused = true)]
+async fn v2_a_later_object_with_the_same_minor_or_port_is_deleted_and_aborted() {
+    for (minor, port) in [(1000, 7999), (1999, 7000), (1000, 7000)] {
+        let h = harness();
+        rival_appears(&h, rival("rival", minor, port, Some(OLDER)));
+        let (code, message) = code_of(create(&h, request("vol")).await);
+        assert_eq!(code, Code::Aborted, "{minor} {port}: {message}");
+        assert!(message.contains("rival"), "{message}");
+        assert_eq!(*h.volumes.deleted.lock().unwrap(), ["vol"], "{minor} {port}");
+        assert!(h.volumes.object("vol").unwrap().metadata.deletion_timestamp.is_some());
+        assert!(h.volumes.object("rival").unwrap().metadata.deletion_timestamp.is_none());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_an_earlier_object_is_kept_and_the_call_goes_to_the_wait() {
+    let h = harness();
+    rival_appears(&h, rival("rival", 1000, 7000, Some(NEWER)));
+    let _agents = agents_report(&h.volumes);
+    create(&h, request("vol")).await.unwrap();
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+    assert!(h.volumes.object("vol").unwrap().metadata.deletion_timestamp.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_equal_timestamps_are_decided_by_the_name() {
+    // "aaa" sorts before "vol": the rival wins and "vol" withdraws.
+    let h = harness();
+    rival_appears(&h, rival("aaa", 1000, 7000, Some(T0)));
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Aborted);
+    assert_eq!(*h.volumes.deleted.lock().unwrap(), ["vol"]);
+    // "zzz" sorts after "vol": "vol" stays.
+    let h = harness();
+    rival_appears(&h, rival("zzz", 1000, 7000, Some(T0)));
+    let _agents = agents_report(&h.volumes);
+    create(&h, request("vol")).await.unwrap();
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_no_collision_deletes_nothing() {
+    let h = harness();
+    rival_appears(&h, rival("rival", 1001, 7001, Some(OLDER)));
+    let _agents = agents_report(&h.volumes);
+    create(&h, request("vol")).await.unwrap();
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_a_rival_without_a_timestamp_is_unclear_and_nothing_is_deleted() {
+    let h = harness();
+    rival_appears(&h, rival("rival", 1000, 7000, None));
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::Aborted, "{message}");
+    assert!(message.contains("rival"), "{message}");
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_an_object_created_again_under_the_name_is_never_deleted() {
+    let h = harness();
+    rival_appears(&h, rival("rival", 1000, 7000, Some(OLDER)));
+    // Between the create and the check somebody replaces "vol" (another uid).
+    *h.volumes.after_create.lock().unwrap() = Some(Box::new(|fake| {
+        let mut again = fake.object("vol").unwrap();
+        again.metadata.uid = Some("uid-of-somebody-else".to_string());
+        fake.put(again);
+    }));
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::Aborted, "{message}");
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+    assert_eq!(
+        h.volumes.object("vol").unwrap().metadata.uid.as_deref(),
+        Some("uid-of-somebody-else")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_an_object_missing_from_the_check_is_unclear_and_nothing_is_deleted() {
+    let h = harness();
+    rival_appears(&h, rival("rival", 1000, 7000, Some(OLDER)));
+    *h.volumes.after_create.lock().unwrap() = Some(Box::new(|fake| {
+        fake.objects.lock().unwrap().remove("vol");
+    }));
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Aborted);
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_the_withdrawal_deletes_with_the_uid_of_the_create() {
+    let h = harness();
+    rival_appears(&h, rival("rival", 1000, 7000, Some(OLDER)));
+    code_of(create(&h, request("vol")).await);
+    let uid = h.volumes.object("vol").unwrap().metadata.uid.unwrap();
+    assert_eq!(*h.volumes.exact_deletes.lock().unwrap(), [("vol".to_string(), uid)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn v2_a_failing_withdrawal_is_unavailable() {
+    let h = harness();
+    rival_appears(&h, rival("rival", 1000, 7000, Some(OLDER)));
+    *h.volumes.fail_exact.lock().unwrap() = Some(ApiError::Other("the API server is down".into()));
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Unavailable);
+}
+
+// V3: error mapping and small cases.
+
+#[tokio::test(start_paused = true)]
+async fn v3_a_negative_capacity_is_out_of_range_and_names_the_field() {
+    let h = harness();
+    for (required, limit, field) in [(-1, 0, "required_bytes"), (0, -5, "limit_bytes")] {
+        let mut req = request("vol");
+        req.capacity_range = Some(CapacityRange {
+            required_bytes: required,
+            limit_bytes: limit,
+        });
+        let (code, message) = code_of(create(&h, req).await);
+        assert_eq!(code, Code::OutOfRange, "{field}: {message}");
+        assert!(message.contains(field), "{message}");
+    }
+    assert!(h.volumes.objects.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn v3_a_second_delete_of_an_object_that_is_going_away_makes_no_delete_call() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    delete(&h, "vol").await.unwrap_err();
+    assert_eq!(*h.volumes.deleted.lock().unwrap(), ["vol"]);
+    let (code, _) = code_of(delete(&h, "vol").await);
+    assert_eq!(code, Code::DeadlineExceeded);
+    assert_eq!(h.volumes.deleted.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn v3_a_rejected_create_is_internal() {
+    let h = harness();
+    *h.volumes.fail_create.lock().unwrap() = Some(ApiError::Rejected("spec.minor: Invalid value".into()));
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::Internal, "{message}");
+    assert!(message.contains("spec.minor"), "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn v3_a_failing_get_live_list_or_create_is_unavailable() {
+    let h = harness();
+    h.volumes.failing.lock().unwrap().insert("vol".to_string());
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Unavailable);
+    h.volumes.failing.lock().unwrap().clear();
+
+    h.volumes.fail_fresh.store(true, Ordering::SeqCst);
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Unavailable);
+    h.volumes.fail_fresh.store(false, Ordering::SeqCst);
+
+    *h.volumes.fail_create.lock().unwrap() = Some(ApiError::Other("the API server is down".into()));
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Unavailable);
+    assert!(h.volumes.objects.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn v3_the_cached_list_failing_does_not_matter_to_create() {
+    let h = harness();
+    h.volumes.fail_list.store(true, Ordering::SeqCst);
+    let _agents = agents_report(&h.volumes);
+    create(&h, request("vol")).await.unwrap();
+    assert_eq!(h.volumes.list_failures.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn v3_a_retry_with_another_selected_node_goes_to_the_wait() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    let _agents = agents_report(&h.volumes);
+    let mut req = request("vol");
+    req.accessibility_requirements = Some(TopologyRequirement {
+        preferred: vec![topology("n3")],
+        ..Default::default()
+    });
+    assert_eq!(create(&h, req).await.unwrap().volume.unwrap().volume_id, "vol");
+    assert_eq!(h.volumes.objects.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn v3_every_place_error_leaves_no_object() {
+    let h = harness();
+    let mut unknown_node = request("a");
+    unknown_node.accessibility_requirements = Some(TopologyRequirement {
+        preferred: vec![topology("ghost")],
+        ..Default::default()
+    });
+    let mut huge = request("b");
+    huge.capacity_range = Some(CapacityRange {
+        required_bytes: 200 * GIB as i64,
+        limit_bytes: 0,
+    });
+    let requests = [
+        unknown_node,
+        huge,
+        with_params(request("c"), &[("replicas", "1")]),
+        with_params(request("d"), &[("replicas", "4")]),
+        with_params(request("e"), &[("maxPeers", "1")]),
+    ];
+    for req in requests {
+        let name = req.name.clone();
+        code_of(create(&h, req).await);
+        assert!(h.volumes.objects.lock().unwrap().is_empty(), "{name}");
+    }
 }
 
 #[tokio::test(start_paused = true)]

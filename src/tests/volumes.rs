@@ -56,7 +56,36 @@ pub(crate) struct FakeVolumes {
     pub(crate) yields: AtomicBool,
     /// An object listed here is left out of the next this-many `list` calls,
     /// as a cache that has not seen it yet would.
+    /// Only the cached `list` is affected: `list_fresh` always returns the true state.
     pub(crate) hidden: Mutex<BTreeMap<String, u32>>,
+    /// `list_fresh` fails while set.
+    pub(crate) fail_fresh: AtomicBool,
+    /// Number of `list_fresh` calls.
+    pub(crate) fresh_lists: AtomicU32,
+    /// The next `create` fails with this error.
+    pub(crate) fail_create: Mutex<Option<ApiError>>,
+    /// Runs once in the next `create`, before the object is stored.
+    pub(crate) on_create: Mutex<Option<Hook>>,
+    /// Runs once in the next `create`, right after the object is stored.
+    pub(crate) after_create: Mutex<Option<Hook>>,
+    /// Notified after every stored `create`.
+    pub(crate) created: tokio::sync::Notify,
+    /// `creationTimestamp` the next `create`s give (RFC 3339); default 2026-01-01T00:00:00Z.
+    pub(crate) created_at: Mutex<Option<String>>,
+    /// `(name, uid)` of every `delete_exact` call, whether it deleted or not.
+    pub(crate) exact_deletes: Mutex<Vec<(String, String)>>,
+    /// The next `delete_exact` fails with this error.
+    pub(crate) fail_exact: Mutex<Option<ApiError>>,
+}
+
+/// A one-shot action of the fake on its own state.
+pub(crate) type Hook = Box<dyn FnOnce(&FakeVolumes) + Send>;
+
+/// `creationTimestamp` of an object created by the fake unless `created_at` says otherwise.
+pub(crate) const T0: &str = "2026-01-01T00:00:00Z";
+
+pub(crate) fn time(rfc3339: &str) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::Time {
+    serde_json::from_value(json!(rfc3339)).unwrap()
 }
 
 pub(crate) fn typed(value: &Value) -> ReplicatedVolume {
@@ -273,14 +302,61 @@ impl Volumes for FakeVolumes {
         Ok(visible)
     }
 
+    async fn list_fresh(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
+        self.turn().await;
+        self.fresh_lists.fetch_add(1, Ordering::SeqCst);
+        if self.fail_fresh.load(Ordering::SeqCst) {
+            return Err(ApiError::Other("the API server is down".into()));
+        }
+        Ok(self.objects.lock().unwrap().values().map(typed).collect())
+    }
+
     async fn create(&self, volume: &ReplicatedVolume) -> Result<Created, ApiError> {
         self.turn().await;
+        let failure = self.fail_create.lock().unwrap().take();
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        let hook = self.on_create.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
         let name = volume.metadata.name.clone().unwrap();
         if self.object(&name).is_some() {
             return Ok(Created::Exists);
         }
-        self.put(volume.clone());
-        Ok(Created::New)
+        let mut volume = volume.clone();
+        let stamp = self
+            .created_at
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| T0.to_string());
+        volume.metadata.creation_timestamp = Some(time(&stamp));
+        self.put(volume);
+        let uid = self.object(&name).and_then(|o| o.metadata.uid).unwrap();
+        let hook = self.after_create.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
+        self.created.notify_one();
+        Ok(Created::New(uid))
+    }
+
+    async fn delete_exact(&self, name: &str, uid: &str) -> Result<(), ApiError> {
+        self.exact_deletes
+            .lock()
+            .unwrap()
+            .push((name.to_string(), uid.to_string()));
+        let failure = self.fail_exact.lock().unwrap().take();
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        match self.object(name) {
+            None => Ok(()),
+            Some(object) if object.metadata.uid.as_deref() == Some(uid) => self.delete(name).await,
+            Some(_) => Err(ApiError::Conflict("the uid precondition failed".into())),
+        }
     }
 
     async fn delete(&self, name: &str) -> Result<(), ApiError> {

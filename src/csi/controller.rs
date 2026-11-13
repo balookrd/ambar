@@ -9,14 +9,25 @@
 //! Concurrent `CreateVolume` calls. The part from the read of the object to
 //! the end of its creation runs under `placing`, an async mutex of this
 //! process: two calls for different names cannot both pick the same minor and
-//! port from the same listing, and two calls for the same name see the
-//! object of the first. Before it lets go of the mutex, a call waits until
-//! `Volumes::list` returns the object it has created (`await_listed`): the
-//! agent's `list` reads the reflector cache, which can lag behind a create by
-//! the watch latency. The wait for the volume to become ready runs outside the
-//! mutex. Another Controller instance (a leader handover with a request still
-//! in flight) is not covered by the mutex; the agents refuse to configure two
-//! objects with one minor or port (`membership::collisions`).
+//! port, and two calls for the same name see the object of the first. The
+//! placement reads `Volumes::list_fresh`, a live LIST of the API server: the
+//! agent's `list` is the reflector cache, which can lag behind a create by
+//! the watch latency (or for good while the watch is broken), and a placement
+//! over a lagging list hands out an index that is taken. The wait for the
+//! volume to become ready runs outside the mutex.
+//!
+//! Another Controller instance (a leader handover with a request still in
+//! flight) is not covered by the mutex. Right after a successful create, still
+//! under the mutex, the call reads the live list again (`withdraw_if_lost`):
+//! if another object has the same minor or port and is older by
+//! `(creationTimestamp, name)`, the object this very call created is deleted
+//! (with the uid the create returned as a precondition) and the call answers
+//! `ABORTED`; the retry places against a list that shows the winner. The loser
+//! is new (`initialSync: Skip`, no agent has configured a colliding object:
+//! `membership::collisions`), so it holds no data. An unclear state (own object
+//! missing or with another uid, a missing timestamp) deletes nothing and
+//! answers `ABORTED` as well; the agents keep refusing the colliding objects
+//! until somebody removes one.
 //!
 //! Every step is idempotent: the object name is the volume name, a repeated
 //! call finds the object and goes on to the wait.
@@ -49,6 +60,7 @@ use crate::agent::kube::{ApiError, Created, Volumes};
 use crate::agent::nodes::NodeMap;
 use crate::agent::status::all_replicas_up_to_date;
 use crate::crd::{NodeKind, ReplicatedVolume, ReplicatedVolumeStatus};
+use crate::drbd::status::DiskState;
 use crate::membership::initial_finalizers;
 use crate::model::valid_volume_name;
 use crate::placement::{Existing, PlaceError, Request as PlaceRequest, parse_parameters, place, round_up_size};
@@ -59,9 +71,6 @@ pub const TOPOLOGY_KEY: &str = "ambar.balookrd.github.io/node";
 /// Times a `CreateVolume` goes back to the read of the object after another
 /// writer has created it in between.
 const CREATE_ATTEMPTS: usize = 3;
-/// `await_listed`: how often the list is read and for how long at most.
-const LISTED_POLL: Duration = Duration::from_millis(50);
-const LISTED_WAIT: Duration = Duration::from_secs(5);
 
 pub struct ControllerService {
     pub volumes: Arc<dyn Volumes>,
@@ -102,6 +111,9 @@ fn api_status(context: &str, error: ApiError) -> Status {
 fn check_capability(capability: &VolumeCapability) -> Result<(), String> {
     match &capability.access_type {
         Some(AccessType::Mount(mount)) => {
+            // `mount_flags` is not checked here: the Node service applies the
+            // flags at mount time, and `ValidateVolumeCapabilities` confirms
+            // the capability as given.
             if !mount.fs_type.is_empty() && mount.fs_type != "ext4" {
                 return Err(format!("fs_type {:?} is not supported, only ext4", mount.fs_type));
             }
@@ -206,11 +218,11 @@ impl ControllerService {
                 .load()
                 .await
                 .map_err(|e| api_status("cannot read the node map", e))?;
-            // Objects that are being deleted count: their minor, port and
-            // budget are in use until they are gone.
+            // A live list, not the cache. Objects that are being deleted
+            // count: their minor, port and budget are in use until they are gone.
             let existing: Vec<Existing> = self
                 .volumes
-                .list()
+                .list_fresh()
                 .await
                 .map_err(|e| api_status("cannot list the volumes", e))?
                 .iter()
@@ -225,10 +237,7 @@ impl ControllerService {
                 .await
                 .map_err(|e| api_status("cannot create the volume", e))?
             {
-                Created::New => {
-                    self.await_listed(name).await;
-                    return Ok(());
-                }
+                Created::New(uid) => return self.withdraw_if_lost(name, &uid).await,
                 // Somebody else has created it since the read: compare again.
                 Created::Exists => {}
             }
@@ -238,18 +247,52 @@ impl ControllerService {
         )))
     }
 
-    /// Waits until the list shows the object `name` (or `LISTED_WAIT` has
-    /// passed): the next placement must see its minor and port. A failing list
-    /// ends the wait too; the next call reads the list again anyway.
-    async fn await_listed(&self, name: &str) {
-        let deadline = Instant::now() + LISTED_WAIT;
-        loop {
-            match self.volumes.list().await {
-                Ok(list) if list.iter().any(|o| o.metadata.name.as_deref() == Some(name)) => return,
-                Ok(_) if Instant::now() < deadline => sleep(LISTED_POLL).await,
-                _ => return,
+    /// After a create: another object with the same minor or port that wins
+    /// by `(creationTimestamp, name)` makes this call delete its own object
+    /// (`uid` is the one the create returned) and answer `ABORTED`. See the
+    /// module comment for the cases that delete nothing.
+    async fn withdraw_if_lost(&self, name: &str, uid: &str) -> Result<(), Status> {
+        let list = self
+            .volumes
+            .list_fresh()
+            .await
+            .map_err(|e| api_status("cannot list the volumes after the create", e))?;
+        let Some(own) = list.iter().find(|o| o.metadata.name.as_deref() == Some(name)) else {
+            return Err(Status::aborted(format!(
+                "volume {name:?} is not in the list right after its creation; retry"
+            )));
+        };
+        if own.metadata.uid.as_deref() != Some(uid) {
+            return Err(Status::aborted(format!(
+                "volume {name:?} was created again by somebody else right after this call created it; retry"
+            )));
+        }
+        let Some(own_stamp) = own.metadata.creation_timestamp.as_ref() else {
+            return Err(Status::aborted(format!(
+                "volume {name:?} has no creationTimestamp; cannot compare it with the other volumes, retry"
+            )));
+        };
+        for other in list.iter().filter(|o| o.metadata.name.as_deref() != Some(name)) {
+            if other.spec.minor != own.spec.minor && other.spec.port != own.spec.port {
+                continue;
+            }
+            let other_name = other.metadata.name.as_deref().unwrap_or_default();
+            let Some(other_stamp) = other.metadata.creation_timestamp.as_ref() else {
+                return Err(Status::aborted(format!(
+                    "volume {other_name:?} uses the same minor or port as {name:?} and has no creationTimestamp; cannot tell which one is older, retry"
+                )));
+            };
+            if (other_stamp, other_name) < (own_stamp, name) {
+                self.volumes
+                    .delete_exact(name, uid)
+                    .await
+                    .map_err(|e| api_status("cannot withdraw the volume that lost the placement", e))?;
+                return Err(Status::aborted(format!(
+                    "volume {other_name:?} was placed with the same minor or port at the same time and is older; {name:?} was withdrawn, retry"
+                )));
             }
         }
+        Ok(())
     }
 
     /// Step 8: reads the object every `poll` until all Replica nodes report
@@ -288,7 +331,12 @@ fn not_ready_message(name: &str, spec: &crate::crd::ReplicatedVolumeSpec, status
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Replica)
-        .filter(|n| !status.nodes.iter().any(|s| s.name == n.name && s.disk == "UpToDate"))
+        .filter(|n| {
+            !status
+                .nodes
+                .iter()
+                .any(|s| s.name == n.name && s.disk == DiskState::UpToDate.to_string())
+        })
         .map(|n| n.name.as_str())
         .collect();
     format!(
@@ -364,15 +412,18 @@ impl Controller for ControllerService {
         let (required, limit) = request
             .capacity_range
             .map_or((0, 0), |range| (range.required_bytes, range.limit_bytes));
+        // CSI: a capacity_range the driver cannot honour is OUT_OF_RANGE.
+        for (field, value) in [("required_bytes", required), ("limit_bytes", limit)] {
+            if value < 0 {
+                return Err(Status::out_of_range(format!(
+                    "capacity_range.{field} {value} is negative"
+                )));
+            }
+        }
         let size_bytes = round_up_size(required).map_err(|e| match e {
             crate::placement::ParamError::SizeTooLarge(_) => Status::out_of_range(format!("capacity_range: {e}")),
             other => Status::invalid_argument(format!("capacity_range: {other}")),
         })?;
-        if limit < 0 {
-            return Err(Status::invalid_argument(format!(
-                "capacity_range.limit_bytes {limit} is negative"
-            )));
-        }
         if limit != 0 && u64::try_from(limit).is_ok_and(|limit| limit < size_bytes) {
             return Err(Status::out_of_range(format!(
                 "capacity_range.limit_bytes {limit} is below the size {size_bytes} (the requested size rounded up to 4096)"
@@ -405,13 +456,16 @@ impl Controller for ControllerService {
             return Ok(Response::new(DeleteVolumeResponse {}));
         }
         let read = |context: &'static str| async { self.volumes.get(&id).await.map_err(|e| api_status(context, e)) };
-        if read("cannot read the volume").await?.is_none() {
+        let Some(object) = read("cannot read the volume").await? else {
             return Ok(Response::new(DeleteVolumeResponse {}));
+        };
+        // An object that is already going away needs no second delete call.
+        if object.metadata.deletion_timestamp.is_none() {
+            self.volumes
+                .delete(&id)
+                .await
+                .map_err(|e| api_status("cannot delete the volume", e))?;
         }
-        self.volumes
-            .delete(&id)
-            .await
-            .map_err(|e| api_status("cannot delete the volume", e))?;
         let deadline = Instant::now() + self.delete_wait;
         loop {
             if read("cannot read the volume").await?.is_none() {
