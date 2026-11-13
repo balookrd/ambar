@@ -1,4 +1,5 @@
 # Parameters: replicas (number of nodes with a copy), protocol (A or C),
+# maxPeers (DRBD metadata sides, default 7, not changed after creation),
 # csi.storage.k8s.io/fstype (ext4 only). See the design spec, "StorageClass".
 apiVersion: storage.k8s.io/v1
 kind: StorageClass

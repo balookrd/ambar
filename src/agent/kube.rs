@@ -34,8 +34,8 @@
 //! value being changed makes the edit apply only to the state it was computed
 //! from. `/metadata/resourceVersion` is not tested: every status write of
 //! every node changes it, and the edits do not depend on anything else.
-//! A failed `test` is HTTP 422 (checked on the stand); the edit is computed
-//! again from a fresh read.
+//! A failed `test` is HTTP 422 (observed during development, not recorded in
+//! the results document); the edit is computed again from a fresh read.
 //!
 //! Why `remove_node_entry` exists next to `apply_node_status(.., None)`.
 //! Server-side apply of an empty list removes only the fields this field
