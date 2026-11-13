@@ -18,6 +18,9 @@ spec:
   selector:
     matchLabels:
       app: ambar
+  # A rolling update moves to the next node only after the agent of the
+  # previous one has been Ready for 10 s (see the readiness probe below).
+  minReadySeconds: 10
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -40,8 +43,26 @@ spec:
           image: AMBAR_IMAGE
           imagePullPolicy: AMBAR_IMAGE_PULL_POLICY
           command: ["ambar", "agent"]
+          # The same path as in the probe below and in the two sidecars:
+          # /csi/csi.sock in their containers is this file (hostPath
+          # socket-dir). It is also the default of `ambar agent`.
+          args:
+            - --csi-socket=/var/lib/kubelet/plugins/ambar/csi.sock
           securityContext:
             privileged: true
+          # Ready means the CSI socket exists: the agent binds it after the
+          # reconcile loop and the other services are up (it is renamed into
+          # place when bound, so a half-created socket is not seen). The probe
+          # does not talk to the socket. A socket file left by a killed
+          # (SIGKILL) agent would make the probe pass early; a normal stop
+          # removes the file.
+          # There is NO liveness probe on purpose: one reconcile pass may run
+          # an external command for up to 120 s, and a liveness restart would
+          # cut it in the middle (see terminationGracePeriodSeconds).
+          readinessProbe:
+            exec:
+              command: ["test", "-S", "/var/lib/kubelet/plugins/ambar/csi.sock"]
+            periodSeconds: 5
           env:
             - name: NODE_NAME
               valueFrom:
@@ -55,16 +76,26 @@ spec:
             - {name: dev, mountPath: /dev}
             - {name: modules, mountPath: /lib/modules, readOnly: true}
             - {name: res, mountPath: /etc/drbd.d}
+            # Mount exactly the volumes directory, at the same path as on the
+            # host: not a parent directory, not another path. After a pod is
+            # replaced, the kernel lists the backing file of a loop device
+            # relative to this mount (`/<name>.img`), and `loop_holders` in
+            # src/backing.rs recognises exactly that form. A wider mount would
+            # show the file under another path, the agent would not see its
+            # loop devices, and its deletion rules would break.
             - {name: volumes, mountPath: /var/lib/rancher/ambar/volumes}
             # Mounts made by the agent (NodeStageVolume, NodePublishVolume)
             # must be visible to kubelet and the container runtime on the host.
             # The CSI socket directory /var/lib/kubelet/plugins/ambar is part of
-            # this mount: do NOT add a second mount of it below
-            # /var/lib/kubelet. With Bidirectional propagation that bind mount
-            # propagates to the host and the next pod start binds the stack
-            # again: the number of mounts doubles with every start of the agent
-            # pod (observed on the stand: 32767 mounts of plugins/ambar on a
-            # node after 15 starts, container starts of 40 s and more).
+            # this mount; it is not mounted a second time below
+            # /var/lib/kubelet. Observed on the stand with such a second mount
+            # (hostPath socket-dir at that path) next to this Bidirectional
+            # one: the number of mounts of plugins/ambar on a node was 2^n - 1,
+            # 4095 to 32767 on four nodes, doubling with every start of the
+            # agent pod; container creation took up to ~100 s and
+            # `rollout status` timed out. After the second mount was removed,
+            # three restarts left the counts unchanged. The mechanism is
+            # [not isolated by a separate experiment].
             - name: kubelet
               mountPath: /var/lib/kubelet
               mountPropagation: Bidirectional

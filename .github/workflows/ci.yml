@@ -46,5 +46,6 @@ jobs:
       - run: bash -n image/*.sh stand/*.sh stand/spike/*.sh
       - name: Manifests parse
         run: |
-          python3 -c 'import sys,yaml; [list(yaml.safe_load_all(open(f))) for f in sys.argv[1:]]' deploy/*.yaml
+          # Ruby 3.2.3 is on the ubuntu-latest image (PyYAML is not).
+          ruby -ryaml -e 'ARGV.each { |f| YAML.load_stream(File.read(f)) }' deploy/*.yaml
           python3 -c 'import json; json.load(open("deploy/crd.json"))'
