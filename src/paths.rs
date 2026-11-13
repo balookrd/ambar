@@ -34,16 +34,11 @@ impl Paths {
         self.volumes_dir.join(format!("{volume}.img.ready"))
     }
 
-    /// Marker written right before `drbdadm create-md` runs on a file
-    /// that the metadata check found without metadata, and removed once the
-    /// ready marker exists. It records that this agent itself started
-    /// `create-md`; its content is `<dev>:<ino>` of the backing file, and a
-    /// marker of another file is ignored. A crash in between leaves metadata on a file without the
-    /// ready marker, and with this marker the next `apply` finishes the
-    /// initialisation instead of treating its own metadata as foreign. It
-    /// never makes `plan` choose `create-md`: that needs a file without the
-    /// ready marker, as before.
-    pub fn creating_marker(&self, volume: &str) -> PathBuf {
+    /// `<volume>.img.creating`, written by an intermediate build of the
+    /// agent. Nothing reads or writes it any more and no decision depends on
+    /// it; `remove` and the clearing of stale markers delete it so that no
+    /// stray file stays on a node that ran that build.
+    pub fn leftover_creating_file(&self, volume: &str) -> PathBuf {
         self.volumes_dir.join(format!("{volume}.img.creating"))
     }
 
