@@ -263,11 +263,11 @@ impl Reconciler<'_> {
             steps.push("down");
         }
         let image = self.paths.image(volume);
-        if image.exists()
-            && let Some(device) = backing::find_loop(self.runner, &image)?
-        {
-            backing::detach_loop(self.runner, &device)?;
-            steps.push("detach-loop");
+        if image.exists() {
+            for device in backing::find_loops(self.runner, &image)? {
+                backing::detach_loop(self.runner, &device)?;
+                steps.push("detach-loop");
+            }
         }
         let files = [
             (self.paths.device_link(volume), "remove-link"),

@@ -25,8 +25,8 @@ pub struct Drbd<'a> {
 
 impl Drbd<'_> {
     /// Writes fresh metadata onto the backing device of `volume`.
-    /// Destroys existing metadata: call only for a backing file that was
-    /// just created.
+    /// Destroys existing metadata: call only for a backing file without the
+    /// readiness marker `<volume>.img.ready`; the reconcile logic enforces it.
     pub fn create_md(&self, volume: &str, max_peers: u32) -> Result<(), DrbdError> {
         let peers = format!("--max-peers={max_peers}");
         self.checked("drbdadm", &["create-md", "--force", &peers, volume])
@@ -59,18 +59,18 @@ impl Drbd<'_> {
     pub fn status(&self, volume: &str) -> Result<Option<ResourceStatus>, DrbdError> {
         let args = ["status", "--json"];
         let out = self.run("drbdsetup", &args)?;
+        if !out.success() {
+            return Err(DrbdError::Command {
+                command: command_line("drbdsetup", &args),
+                code: out.code,
+                stderr: out.stderr.trim().to_string(),
+            });
+        }
         let text = out.stdout.trim();
         if !text.starts_with('[') {
             // Observed on the stand: with nothing configured drbdsetup still
             // prints a JSON array (empty) and returns 0, so any other output
             // is an error.
-            if !out.success() {
-                return Err(DrbdError::Command {
-                    command: command_line("drbdsetup", &args),
-                    code: out.code,
-                    stderr: out.stderr.trim().to_string(),
-                });
-            }
             let first_line = text.lines().next().unwrap_or("");
             return Err(DrbdError::Status(format!("unexpected output: {first_line}")));
         }

@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_NODE_ID: u32 = 31;
 /// Largest device minor number the kernel accepts (20 bits).
 pub const MAX_MINOR: u32 = (1 << 20) - 1;
+/// Largest volume the agent accepts: 1 PiB.
+pub const MAX_SIZE_BYTES: u64 = 1 << 50;
 /// A volume keeps at least two copies; single-copy volumes stay on local-path.
 pub const MIN_DISKFUL: usize = 2;
 
@@ -53,7 +55,7 @@ pub enum SpecError {
         "invalid node name {0:?}: use 1-63 characters A-Z, a-z, 0-9, '.', '_' and '-', starting with a letter or digit"
     )]
     NodeName(String),
-    #[error("sizeBytes {0} must be a positive multiple of 4096")]
+    #[error("sizeBytes {0} must be a positive multiple of 4096, at most 1125899906842624")]
     Size(u64),
     #[error("minor {0} is above 1048575")]
     Minor(u32),
@@ -83,7 +85,7 @@ impl VolumeSpec {
         if !valid_name(&self.name) {
             return Err(SpecError::Name(self.name.clone()));
         }
-        if self.size_bytes == 0 || !self.size_bytes.is_multiple_of(4096) {
+        if self.size_bytes == 0 || !self.size_bytes.is_multiple_of(4096) || self.size_bytes > MAX_SIZE_BYTES {
             return Err(SpecError::Size(self.size_bytes));
         }
         if self.minor > MAX_MINOR {
