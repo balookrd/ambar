@@ -2,7 +2,7 @@
 
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -77,83 +77,178 @@ impl Runner for SystemRunner {
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()?;
-        let group = child.id();
-        let timed_out = |stderr: Option<Vec<u8>>| {
-            let captured = match stderr {
-                Some(bytes) if !bytes.is_empty() => format!(
-                    "; stderr so far: {}",
-                    truncate_utf8(String::from_utf8_lossy(&bytes).trim(), STDERR_IN_ERROR)
-                ),
-                Some(_) => "; stderr was empty".to_string(),
-                None => "; its output was not available".to_string(),
-            };
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "`{}` did not finish within {:?} and was killed{}",
-                    command_line(program, args),
-                    timeout,
-                    captured
-                ),
-            )
-        };
         // The pipes are drained while the process runs: a command that fills
         // a pipe buffer would otherwise block on write and never exit.
         let (sender, results) = mpsc::channel();
         drain(Stream::Stdout, child.stdout.take(), sender.clone());
         drain(Stream::Stderr, child.stderr.take(), sender);
-        let deadline = Instant::now() + timeout;
-        // The direct child is only observed here, never reaped, until the
-        // group has been dealt with: while the leader is an unreaped zombie
-        // its pid cannot be reused, so `kill(-group)` can only reach our own
-        // group. Reaping first would free the pid and let the kill hit an
-        // unrelated process group.
-        loop {
-            match exited_without_reaping(group) {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(e) => {
-                    kill_group(group);
-                    let _ = child.wait();
-                    return Err(e);
-                }
-            }
-            if Instant::now() >= deadline {
-                kill_group(group);
-                let _ = child.wait();
-                return Err(timed_out(stderr_after_kill(&results, None)));
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-        // The command has exited, but a background process it started can
-        // still hold the pipes open; the readers then never see the end of
-        // the stream. Wait for them no longer than the deadline plus a grace.
-        let (mut stdout, mut stderr) = (None, None);
-        while stdout.is_none() || stderr.is_none() {
-            let wait = (deadline + READER_GRACE).saturating_duration_since(Instant::now());
-            match results.recv_timeout(wait) {
-                Ok((Stream::Stdout, bytes)) => stdout = Some(bytes?),
-                Ok((Stream::Stderr, bytes)) => stderr = Some(bytes?),
-                Err(RecvTimeoutError::Timeout) => {
-                    // The leader is still unreaped, so the group id is ours.
-                    kill_group(group);
-                    let _ = child.wait();
-                    return Err(timed_out(stderr_after_kill(&results, stderr)));
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    kill_group(group);
-                    let _ = child.wait();
-                    return Err(io::Error::other("output reader thread panicked"));
-                }
-            }
-        }
-        let status = child.wait()?;
-        Ok(Output {
-            code: status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&stdout.unwrap_or_default()).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
-        })
+        supervise(&mut child, &results, Instant::now() + timeout, program, args, timeout)
     }
+}
+
+/// Waits for the leader `child` (already started in its own group, its pipes
+/// drained into `results`) until `deadline`, then collects its output. Kills
+/// the group and reaps the leader on every failure path.
+fn supervise(
+    child: &mut Child,
+    results: &mpsc::Receiver<(Stream, io::Result<Vec<u8>>)>,
+    deadline: Instant,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> io::Result<Output> {
+    let group = child.id();
+    // The direct child is only observed here, never reaped, until the
+    // group has been dealt with: while the leader is an unreaped zombie
+    // its pid cannot be reused, so `kill(-group)` can only reach our own
+    // group. Reaping first would free the pid and let the kill hit an
+    // unrelated process group.
+    loop {
+        match exited_without_reaping(group) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(e) => {
+                // ECHILD: the child was reaped by someone else, so its
+                // pid may belong to an unrelated process group by now.
+                if may_signal_group(&e) {
+                    kill_and_reap(child, group);
+                }
+                return Err(e);
+            }
+        }
+        if Instant::now() >= deadline {
+            let reaped = kill_and_reap(child, group);
+            return Err(timeout_error(
+                program,
+                args,
+                timeout,
+                stderr_after_kill(results, None),
+                reaped,
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    // The command has exited, but a background process it started can
+    // still hold the pipes open; the readers then never see the end of
+    // the stream. Wait for them no longer than the deadline plus a grace.
+    match collect_output(results, deadline) {
+        Collected::Done(stdout, stderr) => {
+            let status = child.wait()?;
+            Ok(Output {
+                code: status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            })
+        }
+        Collected::TimedOut(stderr) => {
+            // The leader is still unreaped, so the group id is ours.
+            let reaped = kill_and_reap(child, group);
+            Err(timeout_error(
+                program,
+                args,
+                timeout,
+                stderr_after_kill(results, stderr),
+                reaped,
+            ))
+        }
+        Collected::Failed(e) => {
+            // The leader has exited but is not reaped yet: reap it so no
+            // zombie is left, and stop the rest of the group.
+            kill_and_reap(child, group);
+            Err(e)
+        }
+    }
+}
+
+/// How long to wait for a killed child to be reaped.
+const REAP_LIMIT: Duration = Duration::from_secs(5);
+
+/// Result of waiting for both readers once the leader has exited.
+#[derive(Debug)]
+enum Collected {
+    Done(Vec<u8>, Vec<u8>),
+    /// Not both readers delivered before the deadline plus the grace; carries
+    /// the stderr if that one did.
+    TimedOut(Option<Vec<u8>>),
+    /// A reader failed or its thread is gone.
+    Failed(io::Error),
+}
+
+fn collect_output(results: &mpsc::Receiver<(Stream, io::Result<Vec<u8>>)>, deadline: Instant) -> Collected {
+    let (mut stdout, mut stderr) = (None, None);
+    while stdout.is_none() || stderr.is_none() {
+        let wait = (deadline + READER_GRACE).saturating_duration_since(Instant::now());
+        match results.recv_timeout(wait) {
+            Ok((Stream::Stdout, Ok(bytes))) => stdout = Some(bytes),
+            Ok((Stream::Stderr, Ok(bytes))) => stderr = Some(bytes),
+            Ok((_, Err(e))) => return Collected::Failed(e),
+            Err(RecvTimeoutError::Timeout) => return Collected::TimedOut(stderr),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Collected::Failed(io::Error::other("output reader thread panicked"));
+            }
+        }
+    }
+    Collected::Done(stdout.unwrap_or_default(), stderr.unwrap_or_default())
+}
+
+/// `false` for ECHILD from `waitid`: the child is not ours any more (reaped
+/// elsewhere), so its group id may have been reused and must not be signalled.
+fn may_signal_group(error: &io::Error) -> bool {
+    error.raw_os_error() != Some(libc::ECHILD)
+}
+
+/// SIGKILL to the group, then reap the leader, waiting at most `REAP_LIMIT`.
+/// `false` when the leader had not exited by then (a process stuck in the
+/// kernel ignores SIGKILL until it returns); it stays a zombie of ours.
+fn kill_and_reap(child: &mut Child, group: u32) -> bool {
+    kill_group(group);
+    reap_within(child, REAP_LIMIT)
+}
+
+/// Polls `try_wait` for up to `limit`. A child that is already gone (reaped
+/// by someone else, `try_wait` fails) counts as reaped.
+fn reap_within(child: &mut Child, limit: Duration) -> bool {
+    let until = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => return true,
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// The error for a command that was killed after its time limit.
+fn timeout_error(program: &str, args: &[&str], timeout: Duration, stderr: Option<Vec<u8>>, reaped: bool) -> io::Error {
+    let captured = match stderr {
+        Some(bytes) if !bytes.is_empty() => format!(
+            "; stderr so far: {}",
+            truncate_utf8(String::from_utf8_lossy(&bytes).trim(), STDERR_IN_ERROR)
+        ),
+        Some(_) => "; stderr was empty".to_string(),
+        None => "; its output was not available".to_string(),
+    };
+    let zombie = if reaped {
+        String::new()
+    } else {
+        format!(
+            "; the process could not be reaped within {REAP_LIMIT:?} after SIGKILL and stays as a zombie until the \
+             agent exits"
+        )
+    };
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "`{}` did not finish within {:?} and was killed{}{}",
+            command_line(program, args),
+            timeout,
+            captured,
+            zombie
+        ),
+    )
 }
 
 /// How much of the captured stderr a timeout error carries.
