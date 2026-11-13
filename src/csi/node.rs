@@ -18,9 +18,9 @@
 //! | Step | Condition | Code |
 //! |---|---|---|
 //! | 1 | the agent has not finished its first pass (`ready`) | `UNAVAILABLE` |
-//! | 2 | empty or relative path, a name that is not a volume name, a capability that is not `mount` or whose `fs_type` is not empty or `ext4`, a mount flag outside `[A-Za-z0-9_=.-]+` | `INVALID_ARGUMENT` |
+//! | 2 | empty or relative path, a name that is not a volume name, a capability that is not `mount` or whose `fs_type` is not empty or `ext4`, a mount flag outside the allow-list of `mount_options` | `INVALID_ARGUMENT` |
 //! | 3 | no object, or the object is being deleted | `NOT_FOUND` |
-//! | 4 | the staging path already has `/dev/drbd<minor>` mounted: done. Another source there | `FAILED_PRECONDITION` |
+//! | 4 | the staging path already has `/dev/drbd<minor>` mounted: done, also when the object is being deleted or gone (checked before step 3). Another source there | `FAILED_PRECONDITION` |
 //! | 5 | this node is not in `spec.nodes`: add it as a `Client` (`join_as_client`, a JSON patch with uid and node-list tests). Not in `ambar-nodes` | `FAILED_PRECONDITION` |
 //! | 5 | no room (`maxPeers`), `nodeId` or address taken by another member | `RESOURCE_EXHAUSTED` |
 //! | 6 | `Agent::reconcile_one` refuses the volume | `FAILED_PRECONDITION` |
@@ -28,6 +28,7 @@
 //! | 8 | (under the volume lock) the object is gone | `NOT_FOUND` |
 //! | 8 | this node has no entry in `status.nodes` of a fresh read | `UNAVAILABLE` |
 //! | 8 | this node is not a member of the fresh object | `FAILED_PRECONDITION` |
+//! | 8 | the resource is not `usable` any more (read again under the lock) | `UNAVAILABLE` |
 //! | 9 | signature, `mkfs`, annotation: see below | |
 //! | 10 | `mount` fails, the staging path is busy with another source | `FAILED_PRECONDITION` |
 //!
@@ -44,6 +45,13 @@
 //!    the volume lock, on the object read in that critical section. Nothing is
 //!    remembered between calls.
 //!
+//! Conditions are only added to these three. Right before `mkfs` the object
+//! is read again: if it is gone, is being deleted, has another uid or now
+//! carries the annotation (another node formatted the volume between the
+//! signature check and now), `mkfs` does not run (`UNAVAILABLE`; the retry
+//! reads `Ext4`). The `usable` check of the wait is repeated under the lock,
+//! before the device is opened.
+//!
 //! After a successful `mkfs` the annotation is set (a JSON patch with a uid
 //! test) and read back; when that fails the call fails and kubelet retries: the
 //! retry reads `Ext4`, sets the annotation and mounts. `Ext4` without the
@@ -57,8 +65,23 @@
 //! `FAILED_PRECONDITION` (the last with stderr); `ModeMismatch` is
 //! `ALREADY_EXISTS`.
 //!
+//! A failed stage and the membership. A node that this very call added as a
+//! `Client` (`Join::Added`) is removed again when the call ends in a final
+//! error (`is_final`: any code except `UNAVAILABLE`, `ABORTED`,
+//! `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, `CANCELLED`) while the staging
+//! path is not mounted: kubelet does not call `NodeUnstageVolume` after a final
+//! error of the stage, and the membership would occupy a `maxPeers` slot for
+//! good. The teardown is the one of the unstage (local cleanup, verified
+//! removal of the status entry, `leave_as_client`); a teardown failure is
+//! logged and the original error is returned. After a retriable error the
+//! membership stays, so that kubelet's retries do not flap the peers'
+//! configuration. A node that was a member before the call (`Replica`,
+//! `Witness`, a `Client` of an earlier call) is never touched by a failed stage.
+//!
 //! `NodePublishVolume`: empty paths or a bad capability are `INVALID_ARGUMENT`;
-//! no mount at the staging path is `FAILED_PRECONDITION`; the target directory
+//! no mount at the staging path, or a mount that is not this volume's
+//! `<dev_dir>/drbd<minor>` (minor from a fresh read of the object) with `ext4`,
+//! is `FAILED_PRECONDITION`; no object is `NOT_FOUND`; the target directory
 //! is created and the staging path is bind-mounted into it, read-only when the
 //! request says so; an existing bind of the other mode is `ALREADY_EXISTS`.
 //! `NodeUnpublishVolume` unmounts the target and removes the directory when it
@@ -98,6 +121,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep};
 use tonic::{Code, Request, Response, Status};
 
@@ -140,6 +164,8 @@ pub struct NodeService {
     pub stage_wait: Duration,
     /// Interval between the status reads of that wait.
     pub poll: Duration,
+    /// Where one-line diagnostics go (stderr in production).
+    pub log: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 impl NodeService {
@@ -153,6 +179,7 @@ impl NodeService {
             allow_regular_files: false,
             stage_wait: Duration::from_secs(30),
             poll: Duration::from_millis(500),
+            log: Arc::new(|line| eprintln!("{line}")),
         }
     }
 }
@@ -198,6 +225,16 @@ fn membership_status(error: MembershipError) -> Status {
             Status::resource_exhausted(error.to_string())
         }
     }
+}
+
+/// Whether a stage that ended with `code` will not be helped by a retry of
+/// kubelet. A retriable error leaves a membership that this call added in
+/// place (module doc).
+pub fn is_final(code: Code) -> bool {
+    !matches!(
+        code,
+        Code::Unavailable | Code::Aborted | Code::DeadlineExceeded | Code::ResourceExhausted | Code::Cancelled
+    )
 }
 
 // ---- the decision about `mkfs` ----
@@ -277,19 +314,51 @@ fn mount_capability(capability: Option<&VolumeCapability>) -> Result<&MountVolum
     }
 }
 
+/// The ext4 and VFS options a volume may be mounted with. `commit=<digits>`
+/// is the one with a value that is checked by shape.
+const MOUNT_FLAGS: [&str; 20] = [
+    "noatime",
+    "nodiratime",
+    "relatime",
+    "strictatime",
+    "lazytime",
+    "discard",
+    "nodiscard",
+    "ro",
+    "rw",
+    "nosuid",
+    "nodev",
+    "noexec",
+    "sync",
+    "dirsync",
+    "data=ordered",
+    "data=writeback",
+    "barrier=0",
+    "barrier=1",
+    "errors=remount-ro",
+    "errors=continue",
+];
+
+fn allowed_flag(flag: &str) -> bool {
+    MOUNT_FLAGS.contains(&flag)
+        || flag
+            .strip_prefix("commit=")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// `-o` argument for `mount(8)` out of `mount_flags`; `None` for no flags.
-/// No shell is involved, but the flags reach `mount(8)`: every flag must match
-/// `[A-Za-z0-9_=.-]+`. The flags may be sensitive, so a message names the
-/// position, not the text.
+/// Only the flags of `MOUNT_FLAGS` and `commit=<digits>` pass: an option such
+/// as `loop`, `journal_dev=` or `offset=` would let a request change what
+/// `mount` opens. The flags may be sensitive, so the rejected flag is named
+/// in this error only and an error of a failed `mount` has them redacted.
 pub fn mount_options(flags: &[String]) -> Result<Option<String>, Status> {
     for (index, flag) in flags.iter().enumerate() {
-        let valid = !flag.is_empty()
-            && flag
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'=' | b'.' | b'-'));
-        if !valid {
+        if flag.is_empty() {
+            return Err(Status::invalid_argument(format!("mount_flags[{index}] is empty")));
+        }
+        if !allowed_flag(flag) {
             return Err(Status::invalid_argument(format!(
-                "mount_flags[{index}] is empty or has characters outside [A-Za-z0-9_=.-]"
+                "mount_flags[{index}] {flag:?} is not an allowed mount option"
             )));
         }
     }
@@ -343,7 +412,18 @@ fn mount_with_options(mounter: &Mounter<'_>, device: &Path, target: &Path, optio
     }
     let target_name = target.to_string_lossy().into_owned();
     let args = ["-t", "ext4", "-o", options, device_name.as_str(), target_name.as_str()];
-    let command = command_line("mount", &args);
+    // The options of a request may be sensitive: the text of an error shows a placeholder.
+    let command = command_line(
+        "mount",
+        &[
+            "-t",
+            "ext4",
+            "-o",
+            "<redacted>",
+            device_name.as_str(),
+            target_name.as_str(),
+        ],
+    );
     let output = mounter.runner.run("mount", &args).map_err(|e| MountError::Command {
         command: command.clone(),
         code: None,
@@ -370,13 +450,31 @@ fn is_annotated(object: &ReplicatedVolume) -> bool {
 
 /// Runs `work` in a task of its own and waits for it: a handler that is
 /// dropped half way (the client gave up) does not stop the work or release the
-/// lock the work holds.
+/// lock the work holds. When the handler is gone and the work fails, nobody
+/// receives the error: it is written to `log`, one line with the RPC name, the
+/// volume and the error.
 async fn detached<T: Send + 'static>(
+    log: Arc<dyn Fn(&str) + Send + Sync>,
+    rpc: &'static str,
+    volume: &str,
     work: impl Future<Output = Result<T, Status>> + Send + 'static,
 ) -> Result<T, Status> {
-    tokio::spawn(work)
-        .await
-        .map_err(|e| Status::internal(format!("the handler task failed: {e}")))?
+    let (reply, receive) = oneshot::channel();
+    let volume = volume.to_string();
+    tokio::spawn(async move {
+        if let Err(Err(status)) = reply.send(work.await) {
+            log(&detached_failure_line(rpc, &volume, &status));
+        }
+    });
+    receive.await.map_err(|_| Status::internal("the handler task failed"))?
+}
+
+fn detached_failure_line(rpc: &str, volume: &str, status: &Status) -> String {
+    format!(
+        "ambar-node: {rpc}: volume {volume:?}: failed after the caller was gone: {:?}: {}",
+        status.code(),
+        status.message()
+    )
 }
 
 // ---- the service ----
@@ -444,13 +542,33 @@ impl NodeService {
         }
     }
 
-    /// Step 5: this node becomes a `Client` of the volume unless it is a member.
-    async fn join(&self, volume: &str) -> Result<(), Status> {
+    /// `staged` for a volume whose object is gone: the minor is taken from the
+    /// mount table. True when `staging` is an `ext4` mount of `<dev_dir>/drbd<digits>`.
+    async fn staged_without_object(&self, staging: &Path) -> Result<bool, Status> {
+        let path = staging.to_path_buf();
+        let (_, entry) = self
+            .mount_raw(move |m| entry_at(m.mountinfo, &path))
+            .await
+            .map_err(mount_status)?;
+        Ok(entry.is_some_and(|entry| {
+            entry.fstype == "ext4"
+                && Path::new(&entry.source)
+                    .strip_prefix(&self.dev_dir)
+                    .ok()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_prefix("drbd"))
+                    .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()))
+        }))
+    }
+
+    /// Step 5: this node becomes a `Client` of the volume unless it is a
+    /// member. `Join::Added` only when this call made the edit.
+    async fn join(&self, volume: &str) -> Result<Join, Status> {
         let node = &self.agent.node;
         for _ in 0..EDIT_ATTEMPTS {
             let object = self.live_object(volume).await?;
-            if object.spec.nodes.iter().any(|n| n.name == *node) {
-                return Ok(());
+            if let Some(member) = object.spec.nodes.iter().find(|n| n.name == *node) {
+                return Ok(Join::AlreadyMember(member.kind));
             }
             let cluster = self
                 .nodes
@@ -459,7 +577,7 @@ impl NodeService {
                 .map_err(|e| api_status("cannot read the node map", e))?;
             let mut spec = object.spec.clone();
             match join_as_client(&mut spec, node, &cluster) {
-                Ok(Join::AlreadyMember(_)) => return Ok(()),
+                Ok(joined @ Join::AlreadyMember(_)) => return Ok(joined),
                 Ok(Join::Added) => {}
                 Err(e) => return Err(membership_status(e)),
             }
@@ -471,7 +589,7 @@ impl NodeService {
                 .await
                 .map_err(|e| api_status("cannot add this node to the volume", e))?;
             if edited {
-                return Ok(());
+                return Ok(Join::Added);
             }
         }
         Err(Status::unavailable(format!(
@@ -551,6 +669,31 @@ impl NodeService {
         }
     }
 
+    /// Right before `mkfs`: the object is read again. Another node may have
+    /// formatted the volume since the signature check; then it is gone, deleted,
+    /// replaced or annotated, and `mkfs` must not run.
+    async fn still_unformatted(&self, object: &ReplicatedVolume, volume: &str) -> Result<(), Status> {
+        let fresh = self
+            .agent
+            .volumes
+            .get(volume)
+            .await
+            .map_err(|e| api_status("cannot read the volume before formatting it", e))?;
+        match fresh {
+            Some(fresh)
+                if fresh.metadata.deletion_timestamp.is_none()
+                    && fresh.metadata.uid == object.metadata.uid
+                    && !is_annotated(&fresh) =>
+            {
+                Ok(())
+            }
+            _ => Err(Status::unavailable(format!(
+                "volume {volume:?} changed since the signature check (gone, deleting, replaced or already \
+                 formatted); not formatting it, retry"
+            ))),
+        }
+    }
+
     /// Steps 8 to 10, under the volume lock (module doc).
     async fn stage_locked(&self, volume: String, staging: PathBuf, options: Option<String>) -> Result<(), Status> {
         let _guard = self.agent.locks.lock(&volume).await;
@@ -572,12 +715,24 @@ impl NodeService {
         if self.staged(&staging, &device).await? {
             return Ok(());
         }
+        // The wait of the stage ended some time ago: the resource may have lost
+        // its quorum or its disk since. The device is not opened then.
+        match self.agent.read_status(&volume).await {
+            Ok(status) if usable(status.as_ref()) => {}
+            Ok(_) => {
+                return Err(Status::unavailable(format!(
+                    "volume {volume:?} is not usable on this node any more; retry"
+                )));
+            }
+            Err(e) => return Err(Status::unavailable(format!("cannot read the DRBD status: {e}"))),
+        }
         let probe = device.clone();
         let signature = self.mount_raw(move |m| m.signature(&probe)).await;
         match plan_format(signature, is_annotated(&object))? {
             Format::Mount => {}
             Format::MarkThenMount => self.mark_formatted(&object, &volume).await?,
             Format::FormatThenMark => {
+                self.still_unformatted(&object, &volume).await?;
                 let target = device.clone();
                 self.mount_raw(move |m| m.mkfs_ext4(&target))
                     .await
@@ -677,10 +832,16 @@ impl NodeService {
         if !is_client {
             return Ok(());
         }
-        self.clean_local(&volume).await?;
+        self.retire_client(&volume, &object).await
+    }
+
+    /// Steps 3 to 5 of the unstage, under the volume lock: local cleanup,
+    /// verified removal of this node's status entry, removal of the `Client`.
+    async fn retire_client(&self, volume: &str, object: &ReplicatedVolume) -> Result<(), Status> {
+        self.clean_local(volume).await?;
         let cleared = self
             .agent
-            .clear_entry(&volume, &object)
+            .clear_entry(volume, object)
             .await
             .map_err(|e| agent_status("cannot remove this node's entry from status.nodes", e))?;
         if !cleared {
@@ -689,7 +850,50 @@ impl NodeService {
                  kept, retry"
             )));
         }
-        self.leave(&volume).await
+        self.leave(volume).await
+    }
+
+    /// Steps 6 to 10 of the stage, after the join.
+    async fn stage_after_join(&self, volume: String, staging: PathBuf, options: Option<String>) -> Result<(), Status> {
+        self.wait_usable(&volume).await?;
+        let this = self.clone();
+        let name = volume.clone();
+        detached(self.log.clone(), "NodeStageVolume", &name, async move {
+            this.stage_locked(volume, staging, options).await
+        })
+        .await
+    }
+
+    /// Undoes the join of a stage that failed for good (module doc), under the
+    /// volume lock. Nothing is done when the staging path is mounted after all
+    /// or when this node is not a `Client` of the object (any more).
+    async fn abandon_join(&self, volume: String, staging: PathBuf) -> Result<(), Status> {
+        let _guard = self.agent.locks.lock(&volume).await;
+        let (_, entry) = self
+            .mount_raw(move |m| entry_at(m.mountinfo, &staging))
+            .await
+            .map_err(mount_status)?;
+        if entry.is_some() {
+            return Ok(());
+        }
+        let Some(object) = self
+            .agent
+            .volumes
+            .get(&volume)
+            .await
+            .map_err(|e| api_status("cannot read the volume", e))?
+        else {
+            return Ok(());
+        };
+        let is_client = object
+            .spec
+            .nodes
+            .iter()
+            .any(|n| n.name == self.agent.node && n.kind == NodeKind::Client);
+        if !is_client {
+            return Ok(());
+        }
+        self.retire_client(&volume, &object).await
     }
 }
 
@@ -708,15 +912,48 @@ impl Node for NodeService {
         let capability = mount_capability(request.volume_capability.as_ref())?;
         let options = mount_options(&capability.mount_flags)?;
 
-        let object = self.live_object(&volume).await?;
-        if self.staged(&staging, &self.device(&object)).await? {
+        // Already staged is answered before the state of the object is looked at.
+        let object = self
+            .agent
+            .volumes
+            .get(&volume)
+            .await
+            .map_err(|e| api_status("cannot read the volume", e))?;
+        let staged = match &object {
+            Some(object) => self.staged(&staging, &self.device(object)).await?,
+            None => self.staged_without_object(&staging).await?,
+        };
+        if staged {
             return Ok(Response::new(NodeStageVolumeResponse {}));
         }
-        self.join(&volume).await?;
-        self.wait_usable(&volume).await?;
-        let this = self.clone();
-        detached(async move { this.stage_locked(volume, staging, options).await }).await?;
-        Ok(Response::new(NodeStageVolumeResponse {}))
+        match &object {
+            None => return Err(Status::not_found(format!("volume {volume:?} does not exist"))),
+            Some(object) if object.metadata.deletion_timestamp.is_some() => {
+                return Err(Status::not_found(format!("volume {volume:?} is being deleted")));
+            }
+            Some(_) => {}
+        }
+        let joined = self.join(&volume).await?;
+        let result = self.stage_after_join(volume.clone(), staging.clone(), options).await;
+        if let (Err(status), Join::Added) = (&result, joined)
+            && is_final(status.code())
+        {
+            let this = self.clone();
+            let name = volume.clone();
+            let undone = detached(self.log.clone(), "NodeStageVolume", &name, async move {
+                this.abandon_join(volume, staging).await
+            })
+            .await;
+            if let Err(failure) = undone {
+                (self.log)(&format!(
+                    "ambar-node: NodeStageVolume: volume {name:?}: the membership added by this call could not be \
+                     removed after the error {:?}: {}",
+                    failure.code(),
+                    failure.message()
+                ));
+            }
+        }
+        result.map(|()| Response::new(NodeStageVolumeResponse {}))
     }
 
     async fn node_unstage_volume(
@@ -727,7 +964,11 @@ impl Node for NodeService {
         let volume = volume_name(&request.volume_id)?;
         let staging = absolute("staging_target_path", &request.staging_target_path)?;
         let this = self.clone();
-        detached(async move { this.unstage_locked(volume, staging).await }).await?;
+        let name = volume.clone();
+        detached(self.log.clone(), "NodeUnstageVolume", &name, async move {
+            this.unstage_locked(volume, staging).await
+        })
+        .await?;
         Ok(Response::new(NodeUnstageVolumeResponse {}))
     }
 
@@ -736,7 +977,7 @@ impl Node for NodeService {
         request: Request<NodePublishVolumeRequest>,
     ) -> Result<Response<NodePublishVolumeResponse>, Status> {
         let request = request.into_inner();
-        volume_name(&request.volume_id)?;
+        let volume = volume_name(&request.volume_id)?;
         let staging = absolute("staging_target_path", &request.staging_target_path)?;
         let target = absolute("target_path", &request.target_path)?;
         mount_capability(request.volume_capability.as_ref())?;
@@ -747,10 +988,28 @@ impl Node for NodeService {
             .mount_raw(move |m| entry_at(m.mountinfo, &path))
             .await
             .map_err(mount_status)?;
-        if entry.is_none() {
+        let Some(entry) = entry else {
             return Err(Status::failed_precondition(format!(
                 "{} has no mount: the volume is not staged",
                 staging.display()
+            )));
+        };
+        // What is staged must be this volume's device with ext4 on it.
+        let object = self
+            .agent
+            .volumes
+            .get(&volume)
+            .await
+            .map_err(|e| api_status("cannot read the volume", e))?
+            .ok_or_else(|| Status::not_found(format!("volume {volume:?} does not exist")))?;
+        let device = self.device(&object);
+        if entry.source != device.to_string_lossy() || entry.fstype != "ext4" {
+            return Err(Status::failed_precondition(format!(
+                "{} is a mount of {} ({}), not of {} with ext4: the volume is not staged",
+                staging.display(),
+                entry.source,
+                entry.fstype,
+                device.display()
             )));
         }
         std::fs::create_dir_all(&target)
