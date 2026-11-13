@@ -120,6 +120,10 @@ const P10_4_SKIP_UPTODATE: &str = include_str!("fixtures/p10-4-skip-uptodate.txt
 const P10_4_SKIP_UPTODATE_RUN2: &str = include_str!("fixtures/p10-4-skip-uptodate-run2.txt");
 const P10_5_FILESYSTEM_AND_FILE: &str = include_str!("fixtures/p10-5-filesystem-and-file.txt");
 const P10_6_FULL_RESYNC: &str = include_str!("fixtures/p10-6-full-resync.txt");
+/// Not a recorded dump and not produced by `drbdadm`: `p10-1-just-created.txt`
+/// with `max-peers 3` and the bitmaps `[3]`-`[6]` (with their `bits-set`
+/// comments) removed, to check that `Fresh` does not depend on `max-peers 7`.
+const SYNTHETIC_MAX_PEERS_3: &str = include_str!("fixtures/synthetic-1-max-peers-3.txt");
 
 /// Stderr recorded in P10 (2)-(6) for `dump-md` right after `drbdadm down`.
 const P10_UNCLEAN_STDERR: &str = "Found meta data is \"unclean\", please apply-al first\nCommand 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255\n";
@@ -166,15 +170,12 @@ fn a_dump_md_that_succeeds_without_a_readable_dump_is_used() {
 
 #[test]
 fn any_other_failure_of_dump_md_is_a_failed_check() {
-    // Recorded in P7 (3): the resource is up, the device is busy. Recorded in
-    // P10 (2)-(6): the activity log is unclean after `down`; the metadata is
-    // there, so the check must not answer "absent".
+    // Recorded in P7 (3): the resource is up, the device is busy.
     let busy = "open(/dev/ambar/p7) failed: Device or resource busy\nExclusive open failed. Do it anyways?\n";
     for (code, stderr) in [
         (20, busy),
         (20, "Device is configured"),
         (255, ""),
-        (255, P10_UNCLEAN_STDERR),
         (1, "boom"),
         (-1, ""),
     ] {
@@ -186,6 +187,39 @@ fn any_other_failure_of_dump_md_is_a_failed_check() {
                 if volume == "p7" && detail.contains(&format!("code {code}"))),
             "{err:?}"
         );
+    }
+}
+
+#[test]
+fn unclean_metadata_is_used() {
+    // P10 (2)-(6): `dump-md` after `up` and `down`; the activity log was not
+    // applied, so the metadata was attached at least once.
+    let runner = FakeRunner::new(|_, _| out(255, "", P10_UNCLEAN_STDERR));
+    let drbd = Drbd { runner: &runner };
+    assert_eq!(drbd.metadata("p10"), Ok(Metadata::Used));
+    assert_eq!(runner.calls(), ["drbdadm dump-md p10"]);
+}
+
+#[test]
+fn the_unclean_marker_wins_over_the_no_metadata_marker() {
+    let both = format!("{P7_NO_METADATA_STDERR}{P10_UNCLEAN_STDERR}");
+    let reversed = format!("{P10_UNCLEAN_STDERR}{P7_NO_METADATA_STDERR}");
+    for (name, stderr) in [("no-metadata first", both), ("unclean first", reversed)] {
+        let runner = FakeRunner::new(move |_, _| out(255, "", &stderr));
+        let drbd = Drbd { runner: &runner };
+        assert_eq!(drbd.metadata("p10"), Ok(Metadata::Used), "{name}");
+    }
+}
+
+#[test]
+fn stderr_markers_are_not_consulted_after_a_successful_exit() {
+    for stderr in [P10_UNCLEAN_STDERR, P7_NO_METADATA_STDERR] {
+        // A just-created dump stays Fresh whatever stderr says ...
+        let runner = FakeRunner::new(move |_, _| out(0, P10_1_JUST_CREATED, stderr));
+        assert_eq!(Drbd { runner: &runner }.metadata("p10"), Ok(Metadata::Fresh));
+        // ... and an unreadable one is Used, never Absent.
+        let runner = FakeRunner::new(move |_, _| out(0, "", stderr));
+        assert_eq!(Drbd { runner: &runner }.metadata("p10"), Ok(Metadata::Used));
     }
 }
 
@@ -270,14 +304,32 @@ fn a_timeout_and_a_failed_start_both_read_as_a_command_that_did_not_complete() {
 // ---- classify_dump on the P10 dumps ----
 
 #[test]
-fn dumps_of_metadata_that_never_held_data_are_fresh() {
+fn only_the_state_right_after_create_md_is_fresh() {
+    assert_eq!(classify_dump(P10_1_JUST_CREATED), Metadata::Fresh, "1 just created");
+    assert_eq!(
+        classify_dump(P10_1_JUST_CREATED_RUN2),
+        Metadata::Fresh,
+        "1 just created, run 2"
+    );
+}
+
+#[test]
+fn a_dump_of_the_just_created_state_with_another_max_peers_is_fresh() {
+    assert_eq!(classify_dump(SYNTHETIC_MAX_PEERS_3), Metadata::Fresh);
+    // The bitmap count must follow `max-peers` in both directions.
+    let more = SYNTHETIC_MAX_PEERS_3.replacen("max-peers 3;", "max-peers 4;", 1);
+    assert_eq!(classify_dump(&more), Metadata::Used);
+    let fewer = SYNTHETIC_MAX_PEERS_3.replacen("max-peers 3;", "max-peers 2;", 1);
+    assert_eq!(classify_dump(&fewer), Metadata::Used);
+}
+
+#[test]
+fn metadata_that_was_attached_or_connected_is_used() {
     for (name, dump) in [
-        ("1 just created", P10_1_JUST_CREATED),
-        ("1 just created, run 2", P10_1_JUST_CREATED_RUN2),
         ("2 up and down on one node", P10_2_UP_DOWN),
         ("3 connected, Inconsistent, no skip", P10_3_CONNECTED_INCONSISTENT),
     ] {
-        assert_eq!(classify_dump(dump), Metadata::Fresh, "{name}");
+        assert_eq!(classify_dump(dump), Metadata::Used, "{name}");
     }
 }
 
@@ -373,6 +425,53 @@ fn one_changed_identifier_makes_a_fresh_dump_used() {
             "bitmap-dagtag 0x0000000000000001;",
         ),
         ("flags of a slot", "flags 0x00000000;", "flags 0x00000020;"),
+        (
+            "flags of the node, as after up (P10 2)",
+            "flags 0x00000080;",
+            "flags 0x00000480;",
+        ),
+        (
+            "flags of a slot, exists (P10 3)",
+            "flags 0x00000000;",
+            "flags 0x00010000;",
+        ),
+        (
+            "flags of a slot, outdated and seen (P10 3)",
+            "flags 0x00000000;",
+            "flags 0x00000052;",
+        ),
+        (
+            "flags of a slot, any non-zero bit",
+            "flags 0x00000000;",
+            "flags 0x00000001;",
+        ),
+        ("node-id", "node-id -1;", "node-id 0;"),
+        ("members", "members 0x0000000000000000;", "members 0x0000000000000001;"),
+        (
+            "features",
+            "features 0x0000000000000001;",
+            "features 0x0000000000000003;",
+        ),
+        ("bitmap-index of a slot", "bitmap-index -1;", "bitmap-index 0;"),
+        (
+            "la-peer-max-bio-size",
+            "la-peer-max-bio-size 0;",
+            "la-peer-max-bio-size 1048576;",
+        ),
+        ("bm-byte-per-bit", "bm-byte-per-bit 4096;", "bm-byte-per-bit 8192;"),
+        ("al-stripes", "al-stripes 1;", "al-stripes 2;"),
+        ("al-stripe-size-4k", "al-stripe-size-4k 8;", "al-stripe-size-4k 16;"),
+        (
+            "hex with a sign",
+            "current-uuid 0x0000000000000004;",
+            "current-uuid 0x+4;",
+        ),
+        (
+            "hex with a sign in a slot",
+            "bitmap-uuid 0x0000000000000000;",
+            "bitmap-uuid 0x+0;",
+        ),
+        ("hex without digits", "members 0x0000000000000000;", "members 0x;"),
         ("bits set in the bitmap", "# bits-set[0] 0;", "# bits-set[0] 1024;"),
         ("layout version", "version \"v09\";", "version \"v10\";"),
         ("max-peers does not match the bitmaps", "max-peers 7;", "max-peers 6;"),
@@ -444,6 +543,31 @@ fn a_dump_with_an_unknown_line_or_a_missing_field_is_used() {
         1,
     );
     assert_eq!(classify_dump(&two_uuids), Metadata::Used);
+}
+
+#[test]
+fn a_repeated_top_level_key_makes_a_fresh_dump_used() {
+    for (key, line) in [
+        ("version", "version \"v09\";"),
+        ("max-peers", "max-peers 7;"),
+        ("node-id", "node-id -1;"),
+        ("flags", "flags 0x00000080;"),
+        ("members", "members 0x0000000000000000;"),
+        ("features", "features 0x0000000000000001;"),
+        ("la-size-sect", "la-size-sect 0;"),
+        ("bm-byte-per-bit", "bm-byte-per-bit 4096;"),
+        ("device-uuid", "device-uuid 0x9A9C813A219E8F2D;"),
+        ("la-peer-max-bio-size", "la-peer-max-bio-size 0;"),
+        ("al-stripes", "al-stripes 1;"),
+        ("al-stripe-size-4k", "al-stripe-size-4k 8;"),
+    ] {
+        let repeated = P10_1_JUST_CREATED.replacen(line, &format!("{line}\n{line}"), 1);
+        assert_ne!(repeated, P10_1_JUST_CREATED, "no {key} line");
+        assert_eq!(classify_dump(&repeated), Metadata::Used, "{key}");
+    }
+    // A wrong `version` first and the right one after it is not a layout we know.
+    let two = P10_1_JUST_CREATED.replacen("version \"v09\";", "version \"v10\";\nversion \"v09\";", 1);
+    assert_eq!(classify_dump(&two), Metadata::Used);
 }
 
 #[test]

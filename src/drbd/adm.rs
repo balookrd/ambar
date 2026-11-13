@@ -28,45 +28,68 @@ pub enum DrbdError {
 /// перед CSI (P7–P10)" of docs/superpowers/specs/2026-11-12-drbd9-spike-results.md.
 pub const NO_METADATA_MARKER: &str = "No valid meta data found";
 
+/// Start of the text `drbdadm dump-md` prints on stderr, with exit code 255
+/// and an empty stdout, for metadata whose activity log was not applied:
+/// `Found meta data is "unclean", please apply-al first`. Recorded in
+/// experiment P10 (2)-(6), same section of the experiment record. After
+/// `up` and `down` DRBD answers this way, so the metadata was attached at
+/// least once.
+pub const UNCLEAN_METADATA_MARKER: &str = "Found meta data is \"unclean\"";
+
 /// What `drbdadm dump-md` found on the backing device of a resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metadata {
     /// The file holds no DRBD metadata.
     Absent,
-    /// Metadata that has never held data: the state `create-md` leaves, with
-    /// or without a later `up`, as long as no copy was synchronised or
-    /// written (P10 (1)-(3)). Writing it again destroys nothing.
+    /// Metadata exactly as `create-md` leaves it (P10 (1)): the copy was
+    /// never configured in the kernel. Writing it again destroys nothing.
     Fresh,
-    /// Anything else: the metadata is, or may be, that of a copy that took
-    /// part in a volume (P10 (4)-(6)), or the dump is not recognised.
+    /// Anything else: the copy was attached or connected (P10 (2)-(6), also
+    /// "unclean" metadata, which `dump-md` reports after `up` and `down`),
+    /// took part in a volume, or the dump is not recognised.
     Used,
 }
 
-/// `current-uuid` of metadata that was just created and never became part of
-/// a synchronised volume (P10 (1)-(3), both runs).
+/// `current-uuid` of metadata that was just created (P10 (1), both runs).
 const JUST_CREATED_UUID: u64 = 0x4;
 /// Peer slots and `history-uuids` entries in every dump of P10, with
 /// `max-peers 7`.
 const DUMP_SLOTS: usize = 32;
-/// Top-level `flags` seen in the just-created states of P10: (1) `0x80`,
-/// (2) and (3) `0x480`. The states with data have `0x91`.
-const FRESH_FLAGS: [u64; 2] = [0x80, 0x480];
-/// `flags` of a peer slot seen in P10 (1)-(3): none; `0x10000` (exists, own
-/// slot); `0x52` (outdated, seen, one unnamed bit; peers of a node that was
-/// connected). `0x20` (divergence) and a plain `0x10` appear only with data.
-const FRESH_PEER_FLAGS: [u64; 3] = [0x0, 0x1_0000, 0x52];
+/// Top-level fields of the dump right after `create-md` (P10 (1), both runs),
+/// except `version`, `max-peers` (any value that matches the number of
+/// bitmaps) and `device-uuid` (random, any hex value). Numbers are as the
+/// dump prints them: `node-id` in decimal, the others as listed.
+const FRESH_TOP: [(&str, i128); 10] = [
+    ("node-id", -1),
+    ("current-uuid", JUST_CREATED_UUID as i128),
+    ("flags", 0x80),
+    ("members", 0),
+    ("features", 1),
+    ("la-size-sect", 0),
+    ("bm-byte-per-bit", 4096),
+    ("la-peer-max-bio-size", 0),
+    ("al-stripes", 1),
+    ("al-stripe-size-4k", 8),
+];
 
 /// Decides from the stdout of a successful `drbdadm dump-md` whether the
 /// metadata is in the just-created state (`Fresh`) or not (`Used`).
 ///
-/// `Fresh` only when the dump is recognised completely and every identifier
-/// is at its just-created value, as recorded in P10: `current-uuid` is
-/// `0x0000000000000004`, `la-size-sect` is 0, the top-level and peer `flags`
-/// are among the recorded values, `bitmap-uuid` and `bitmap-dagtag` of all 32
-/// peer slots, all `history-uuids` and every bitmap are zero. Anything else
-/// (another value, an unknown line, a missing field, a truncated or empty
-/// dump) is `Used`: a wrong `Fresh` lets `create-md --force` destroy a copy.
-/// Comments (the timestamp, `device-uuid` which differs per run) are ignored.
+/// `Fresh` only when the dump is recognised completely and every field is at
+/// the value it has right after `create-md` (P10 (1), both runs): the
+/// top-level fields of `FRESH_TOP` (`node-id -1`, `current-uuid`
+/// `0x0000000000000004`, `flags 0x00000080`, `members` 0, `features` 1,
+/// `la-size-sect` 0, `bm-byte-per-bit 4096`, `la-peer-max-bio-size` 0,
+/// `al-stripes` 1, `al-stripe-size-4k` 8), and in all 32 peer slots
+/// `bitmap-index -1`, `bitmap-uuid`, `bitmap-dagtag` and `flags` 0; all
+/// `history-uuids` and every bitmap are zero, `version "v09"`, `max-peers`
+/// equals the number of bitmaps. The dumps of the attached or connected
+/// states (P10 (2), (3)) differ in `flags`, `members`, `bitmap-index`,
+/// `la-peer-max-bio-size` and the peer `flags`, so they are `Used`. Anything
+/// else (another value, a repeated key, an unknown line, a missing field, a
+/// truncated or empty dump) is `Used`: a wrong `Fresh` lets `create-md
+/// --force` destroy a copy. Comments (the timestamp, `device-uuid` which
+/// differs per run) are ignored.
 pub fn classify_dump(dump: &str) -> Metadata {
     if is_just_created(dump).is_some() {
         Metadata::Fresh
@@ -75,8 +98,13 @@ pub fn classify_dump(dump: &str) -> Metadata {
     }
 }
 
+/// `0x` followed by hex digits only (no sign, no empty digits).
 fn hex(value: &str) -> Option<u64> {
-    u64::from_str_radix(value.strip_prefix("0x")?, 16).ok()
+    let digits = value.strip_prefix("0x")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(digits, 16).ok()
 }
 
 fn zero_hex(value: &str) -> Option<()> {
@@ -100,13 +128,22 @@ struct Slot {
     flags: bool,
 }
 
+/// Records `value` under `key`; `None` when the key was already seen.
+fn put(fields: &mut Vec<(&'static str, i128)>, key: &'static str, value: i128) -> Option<()> {
+    if fields.iter().any(|(k, _)| *k == key) {
+        return None;
+    }
+    fields.push((key, value));
+    Some(())
+}
+
 /// `Some(())` when the dump is recognised and shows the just-created state.
 fn is_just_created(dump: &str) -> Option<()> {
-    let mut version = false;
+    let mut versions = 0usize;
+    let mut version_ok = false;
     let mut max_peers: Option<usize> = None;
-    let mut current_uuid: Option<u64> = None;
-    let mut node_flags: Option<u64> = None;
-    let mut la_size: Option<u64> = None;
+    let mut device_uuid = false;
+    let mut fields: Vec<(&'static str, i128)> = Vec::new();
     let mut slots = 0usize;
     let mut history: Option<usize> = None;
     let mut bitmaps = 0usize;
@@ -147,35 +184,34 @@ fn is_just_created(dump: &str) -> Option<()> {
                     let (key, value) = line.split_once(' ')?;
                     let value = value.strip_suffix(';')?;
                     match key {
-                        "version" => version = value == "\"v09\"",
+                        "version" => {
+                            versions += 1;
+                            version_ok = value == "\"v09\"";
+                        }
                         "max-peers" => {
                             if max_peers.replace(value.parse().ok()?).is_some() {
                                 return None;
                             }
                         }
-                        "current-uuid" => {
-                            if current_uuid.replace(hex(value)?).is_some() {
-                                return None;
-                            }
-                        }
-                        "flags" => {
-                            if node_flags.replace(hex(value)?).is_some() {
-                                return None;
-                            }
-                        }
-                        "la-size-sect" => {
-                            if la_size.replace(value.parse().ok()?).is_some() {
-                                return None;
-                            }
-                        }
-                        "node-id" => {
-                            value.parse::<i64>().ok()?;
-                        }
-                        "members" | "features" | "device-uuid" => {
+                        "device-uuid" => {
                             hex(value)?;
+                            if std::mem::replace(&mut device_uuid, true) {
+                                return None;
+                            }
                         }
-                        "bm-byte-per-bit" | "la-peer-max-bio-size" | "al-stripes" | "al-stripe-size-4k" => {
-                            value.parse::<u64>().ok()?;
+                        "node-id" => put(&mut fields, "node-id", value.parse::<i64>().ok()?.into())?,
+                        "current-uuid" => put(&mut fields, "current-uuid", hex(value)?.into())?,
+                        "flags" => put(&mut fields, "flags", hex(value)?.into())?,
+                        "members" => put(&mut fields, "members", hex(value)?.into())?,
+                        "features" => put(&mut fields, "features", hex(value)?.into())?,
+                        "la-size-sect" => put(&mut fields, "la-size-sect", value.parse::<u64>().ok()?.into())?,
+                        "bm-byte-per-bit" => put(&mut fields, "bm-byte-per-bit", value.parse::<u64>().ok()?.into())?,
+                        "la-peer-max-bio-size" => {
+                            put(&mut fields, "la-peer-max-bio-size", value.parse::<u64>().ok()?.into())?
+                        }
+                        "al-stripes" => put(&mut fields, "al-stripes", value.parse::<u64>().ok()?.into())?,
+                        "al-stripe-size-4k" => {
+                            put(&mut fields, "al-stripe-size-4k", value.parse::<u64>().ok()?.into())?
                         }
                         _ => return None,
                     }
@@ -194,7 +230,7 @@ fn is_just_created(dump: &str) -> Option<()> {
                 let value = value.strip_suffix(';')?;
                 let seen = match key {
                     "bitmap-index" => {
-                        value.parse::<i64>().ok()?;
+                        (value.parse::<i64>().ok()? == -1).then_some(())?;
                         &mut slot.index
                     }
                     "bitmap-uuid" => {
@@ -206,7 +242,7 @@ fn is_just_created(dump: &str) -> Option<()> {
                         &mut slot.dagtag
                     }
                     "flags" => {
-                        FRESH_PEER_FLAGS.contains(&hex(value)?).then_some(())?;
+                        zero_hex(value)?;
                         &mut slot.flags
                     }
                     _ => return None,
@@ -244,11 +280,11 @@ fn is_just_created(dump: &str) -> Option<()> {
 
     let max_peers = max_peers.filter(|n| *n > 0)?;
     let all_zero: Vec<(usize, u64)> = (0..max_peers).map(|i| (i, 0)).collect();
-    let recognised = version
+    let recognised = versions == 1
+        && version_ok
         && block == Block::Top
-        && current_uuid == Some(JUST_CREATED_UUID)
-        && node_flags.is_some_and(|f| FRESH_FLAGS.contains(&f))
-        && la_size == Some(0)
+        && fields.len() == FRESH_TOP.len()
+        && FRESH_TOP.iter().all(|top| fields.contains(top))
         && slots == DUMP_SLOTS
         && history == Some(DUMP_SLOTS)
         && bitmaps == max_peers
@@ -289,18 +325,22 @@ impl Drbd<'_> {
     }
 
     /// Reads the metadata of the resource that is not configured in the
-    /// kernel. `Absent` only for a non-zero exit code together with
-    /// `NO_METADATA_MARKER` on stderr (P7 (1)). For exit code 0 the dump
-    /// decides (`classify_dump`): `Fresh` for the just-created state, `Used`
-    /// for everything else, including a dump that cannot be read (P7 (2),
-    /// P10). Any other failure is an error: it proves nothing about the file.
-    /// That includes a busy device with the resource up (P7 (3), code 20) and
-    /// "unclean" metadata after `down` (P10 (2)-(6), code 255 without the P7
-    /// message): metadata exists there, so the answer is never `Absent`.
+    /// kernel. For exit code 0 the dump decides (`classify_dump`): `Fresh`
+    /// for the state right after `create-md`, `Used` for everything else,
+    /// including a dump that cannot be read (P7 (2), P10). For a non-zero
+    /// exit code stderr decides, in this order: `UNCLEAN_METADATA_MARKER` is
+    /// `Used` (P10 (2)-(6): the metadata was attached at least once), then
+    /// `NO_METADATA_MARKER` is `Absent` (P7 (1)); when both appear the answer
+    /// is `Used`. Any other failure is an error: it proves nothing about the
+    /// file. That includes a busy device with the resource up (P7 (3), code
+    /// 20).
     pub fn metadata(&self, volume: &str) -> Result<Metadata, DrbdError> {
         let out = self.run("drbdadm", &["dump-md", volume])?;
         if out.success() {
             return Ok(classify_dump(&out.stdout));
+        }
+        if out.stderr.contains(UNCLEAN_METADATA_MARKER) {
+            return Ok(Metadata::Used);
         }
         if out.stderr.contains(NO_METADATA_MARKER) {
             return Ok(Metadata::Absent);

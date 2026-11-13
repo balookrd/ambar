@@ -10,14 +10,16 @@
 //!    metadata is absent or in the just-created state. The decision comes from
 //!    the metadata itself, read by `drbdadm dump-md` right before `create-md`
 //!    in `execute` (`Drbd::metadata`; `plan` does not depend on it):
-//!    `Metadata::Absent` (no metadata) and `Metadata::Fresh` (metadata that
-//!    never held data: `current-uuid` `0x4`, zero bitmap and history UUIDs,
-//!    experiment P10) run `create-md`; `Metadata::Used` (anything else,
-//!    including a dump that cannot be read) stops the pass with
-//!    `MetadataPresent`, and a failed check stops it with
+//!    `Metadata::Absent` (no metadata) and `Metadata::Fresh` (metadata exactly
+//!    as `create-md` leaves it: `flags 0x80`, `current-uuid` `0x4`, zero
+//!    bitmap and history UUIDs, experiment P10 (1)) run `create-md`;
+//!    `Metadata::Used` (anything else: metadata that was attached or
+//!    connected, "unclean" metadata, a dump that cannot be read) stops the
+//!    pass with `MetadataPresent`, and any other failed check stops it with
 //!    `DrbdError::MetadataCheck`. `Fresh` is what an interrupted pass leaves
-//!    (`create-md` done, ready marker not written), so the next `apply`
-//!    repeats `create-md` and finishes. No marker file takes part in the
+//!    when it stops between `create-md` and the ready marker (the agent runs
+//!    `up` only after the marker), so the next `apply` repeats `create-md`
+//!    and finishes. No marker file takes part in the
 //!    decision. A leftover `<volume>.img.creating` of an earlier build is
 //!    never read; `remove` and `ClearStaleMarkers` delete it.
 //! 2. `drbdadm new-current-uuid --clear-bitmap <volume>/0` declares all copies

@@ -1578,17 +1578,40 @@ fn a_dump_that_cannot_be_read_is_treated_as_used_metadata() {
 }
 
 #[test]
-fn an_unclean_activity_log_stops_create_md() {
-    // P10 (2)-(6): `dump-md` after `down`; the metadata is there.
+fn an_unclean_activity_log_is_used_metadata() {
+    // P10 (2)-(6): `dump-md` after `up` and `down`; the metadata was attached.
     let stderr = "Found meta data is \"unclean\", please apply-al first\n";
-    let (result, calls, paths, _tmp) = apply_once(out(255, "", stderr));
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err, ReconcileError::Drbd(DrbdError::MetadataCheck { .. })),
-        "{err}"
-    );
-    assert_eq!(calls, ["drbdadm dump-md spike"]);
-    assert!(!paths.ready_marker("spike").exists());
+    let both = format!("No valid meta data found\n{stderr}");
+    for (name, stderr) in [("unclean", stderr.to_string()), ("both markers", both)] {
+        let (result, calls, paths, _tmp) = apply_once(out(255, "", &stderr));
+        let err = result.unwrap_err();
+        assert!(matches!(err, ReconcileError::MetadataPresent { .. }), "{name}: {err}");
+        assert_eq!(calls, ["drbdadm dump-md spike"], "{name}");
+        assert!(!paths.ready_marker("spike").exists(), "{name}");
+        assert!(paths.image("spike").exists(), "{name}");
+    }
+}
+
+#[test]
+fn metadata_attached_once_is_not_written_again() {
+    // The dumps of P10 (2) and (3) are what `dump-md` prints after
+    // `apply-al`; an agent never sees them, but if one did arrive, it is Used.
+    for (state, dump) in [
+        ("2", include_str!("../drbd/tests/fixtures/p10-2-up-down.txt")),
+        (
+            "3",
+            include_str!("../drbd/tests/fixtures/p10-3-connected-inconsistent.txt"),
+        ),
+    ] {
+        let (result, calls, paths, _tmp) = apply_once(out(0, dump, ""));
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ReconcileError::MetadataPresent { .. }),
+            "state {state}: {err}"
+        );
+        assert_eq!(calls, ["drbdadm dump-md spike"], "state {state}");
+        assert!(!paths.ready_marker("spike").exists(), "state {state}");
+    }
 }
 
 #[test]
@@ -1659,13 +1682,20 @@ fn the_leftover_creating_file_sits_next_to_the_image() {
 
 #[test]
 fn a_leftover_creating_file_changes_no_decision() {
-    // Whatever it contains, the check runs and the metadata decides.
-    for content in ["", "garbage", "1:2"] {
+    // Whatever it contains, the check runs and the metadata decides. `None`
+    // stands for the real `<dev>:<ino>` of the image, the value an earlier
+    // build would have honoured.
+    for content in [Some(""), Some("garbage"), Some("1:2"), None] {
         let tmp = TempDir::new().unwrap();
         let paths = temp_paths(&tmp);
         fs::create_dir_all(&paths.volumes_dir).unwrap();
         fs::write(paths.image("spike"), "").unwrap();
-        fs::write(paths.leftover_creating_file("spike"), content).unwrap();
+        let content = content.map(str::to_string).unwrap_or_else(|| {
+            use std::os::unix::fs::MetadataExt;
+            let md = fs::metadata(paths.image("spike")).unwrap();
+            format!("{}:{}", md.dev(), md.ino())
+        });
+        fs::write(paths.leftover_creating_file("spike"), &content).unwrap();
         let runner = node_with_dump_md(out(0, P10_USED[1].1, ""));
         let err = Reconciler {
             paths: &paths,
@@ -1730,6 +1760,7 @@ fn the_metadata_present_message_does_not_claim_that_nothing_changed() {
     let text = ReconcileError::MetadataPresent { volume: "spike".into() }.to_string();
     assert!(!text.contains("nothing was changed"), "{text}");
     assert!(text.contains("the metadata was not touched"), "{text}");
+    assert!(!text.contains("apply-al"), "{text}");
 }
 
 #[test]
