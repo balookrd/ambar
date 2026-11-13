@@ -84,7 +84,7 @@ Linux kernel.
 cargo test
 ```
 
-Expected line: `test result: ok. 262 passed`. The agent is checked on the stand
+Expected line: `test result: ok. 284 passed`. The agent is checked on the stand
 with `stand/agent-smoke.sh`, see `stand/README.md`.
 
 Bringing up the stand is described in `stand/README.md`.

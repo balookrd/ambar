@@ -61,7 +61,7 @@
                         },
                         "name": {
                           "description": "Kubernetes node name, equal to `uname -n` of the node.",
-                          "maxLength": 63,
+                          "maxLength": 55,
                           "type": "string"
                         },
                         "nodeId": {

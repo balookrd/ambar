@@ -12,9 +12,14 @@ pub const MAX_NODE_ID: u32 = 31;
 pub const MAX_MINOR: u32 = (1 << 20) - 1;
 /// Largest volume the agent accepts: 1 PiB.
 pub const MAX_SIZE_BYTES: u64 = 1 << 50;
+/// Longest name part of a Kubernetes qualified name (the part after `/`).
+pub const MAX_QUALIFIED_NAME_PART_LEN: usize = 63;
+/// Prefix of the per-replica finalizer name part (`replica-<node>`).
+pub const REPLICA_FINALIZER_NAME_PREFIX: &str = "replica-";
+/// Longest node name `valid_node_name` accepts: `replica-<node>` must fit
+/// into a qualified-name part, 63 - 8 = 55 characters.
+pub const MAX_NODE_NAME_LEN: usize = MAX_QUALIFIED_NAME_PART_LEN - REPLICA_FINALIZER_NAME_PREFIX.len();
 /// A volume keeps at least two copies; single-copy volumes stay on local-path.
-/// Longest node name `valid_node_name` accepts (a DNS label).
-pub const MAX_NODE_NAME_LEN: usize = 63;
 pub const MIN_DISKFUL: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -72,7 +77,7 @@ pub enum SpecError {
     )]
     Name(String),
     #[error(
-        "invalid node name {0:?}: use 1-63 characters A-Z, a-z, 0-9, '.', '_' and '-', starting with a letter or digit"
+        "invalid node name {0:?}: use 1-55 characters A-Z, a-z, 0-9, '.', '_' and '-', starting and ending with a letter or digit"
     )]
     NodeName(String),
     #[error("sizeBytes {0} must be a positive multiple of 4096, at most 1125899906842624")]
@@ -172,7 +177,9 @@ pub fn valid_volume_name(name: &str) -> bool {
     !bytes.is_empty() && bytes.len() <= 63 && bytes[0] != b'-' && bytes.iter().all(allowed) && name != "all"
 }
 
-/// Hostname-like: DRBD writes the name into the resource file verbatim, so
+/// Hostname-like, at most `MAX_NODE_NAME_LEN` characters, first and last
+/// character a letter or digit (the name is part of a finalizer name, and a
+/// qualified-name part must end alphanumeric). DRBD writes the name into the resource file verbatim, so
 /// anything beyond these characters could inject config syntax.
 pub fn valid_node_name(name: &str) -> bool {
     let bytes = name.as_bytes();
@@ -180,6 +187,7 @@ pub fn valid_node_name(name: &str) -> bool {
     !bytes.is_empty()
         && bytes.len() <= MAX_NODE_NAME_LEN
         && bytes[0].is_ascii_alphanumeric()
+        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
         && bytes.iter().all(allowed)
 }
 
