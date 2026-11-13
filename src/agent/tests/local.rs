@@ -227,3 +227,88 @@ fn file_state_refuses_a_name_that_is_not_a_valid_volume_name() {
     let paths = dirs(&tmp);
     assert!(file_state(&paths, "../x").is_err());
 }
+
+// ---- synced_marker_present, loops_holding ----
+
+#[test]
+fn the_synced_marker_is_read_from_its_path() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    assert!(!synced_marker_present(&paths, "vol").unwrap());
+    touch(paths.synced_marker("vol"));
+    assert!(synced_marker_present(&paths, "vol").unwrap());
+    assert!(synced_marker_present(&paths, "../x").is_err());
+}
+
+#[test]
+fn a_synced_marker_that_cannot_be_inspected_is_an_error() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    symlink(paths.synced_marker("vol"), paths.synced_marker("vol")).unwrap();
+    assert!(synced_marker_present(&paths, "vol").is_err());
+}
+
+fn listing(stdout: &'static str) -> crate::tests::FakeRunner {
+    crate::tests::FakeRunner::new(move |_, _| crate::tests::out(0, stdout, ""))
+}
+
+#[test]
+fn loops_holding_finds_a_deleted_file_by_its_path() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    let image = paths.image("vol");
+    let text = format!("/dev/loop1 /other/a.img\n/dev/loop7 {} (deleted)\n", image.display());
+    let runner = crate::tests::FakeRunner::new(move |_, _| crate::tests::out(0, &text, ""));
+    assert_eq!(loops_holding(&runner, &image).unwrap(), ["/dev/loop7"]);
+    assert_eq!(runner.calls(), ["losetup --list --noheadings --output NAME,BACK-FILE"]);
+}
+
+#[test]
+fn loops_holding_finds_a_file_that_exists_and_all_its_devices() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    let image = paths.image("vol");
+    let text = format!("/dev/loop2 {0}\n/dev/loop3 {0}\n", image.display());
+    let runner = crate::tests::FakeRunner::new(move |_, _| crate::tests::out(0, &text, ""));
+    assert_eq!(loops_holding(&runner, &image).unwrap(), ["/dev/loop2", "/dev/loop3"]);
+}
+
+#[test]
+fn loops_holding_compares_the_resolved_path_too() {
+    // `losetup` stores the canonical path; the volumes directory may be a link.
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("link");
+    symlink(&real, &link).unwrap();
+    let canonical = real.canonicalize().unwrap();
+    let text = format!("/dev/loop4 {}/vol.img (deleted)\n", canonical.display());
+    let runner = crate::tests::FakeRunner::new(move |_, _| crate::tests::out(0, &text, ""));
+    assert_eq!(loops_holding(&runner, &link.join("vol.img")).unwrap(), ["/dev/loop4"]);
+}
+
+#[test]
+fn loops_holding_ignores_other_files_and_a_longer_name() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    let image = paths.image("vol");
+    let other = format!(
+        "/dev/loop5 {}.bak\n/dev/loop6 {} (deleted) x\n",
+        image.display(),
+        image.display()
+    );
+    let runner = crate::tests::FakeRunner::new(move |_, _| crate::tests::out(0, &other, ""));
+    assert!(loops_holding(&runner, &image).unwrap().is_empty());
+    assert!(loops_holding(&listing(""), &image).unwrap().is_empty());
+}
+
+#[test]
+fn loops_holding_reports_a_failed_listing_and_an_unresolvable_directory() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    let failing = crate::tests::FakeRunner::new(|_, _| crate::tests::out(1, "", "no permission"));
+    let err = loops_holding(&failing, &paths.image("vol")).unwrap_err();
+    assert!(err.contains("no permission"), "{err}");
+    let missing = tmp.path().join("nowhere").join("vol.img");
+    assert!(loops_holding(&listing(""), &missing).is_err());
+}

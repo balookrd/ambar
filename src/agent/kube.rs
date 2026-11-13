@@ -14,6 +14,7 @@
 //! | `delete` | `Api::delete`; HTTP 404 is success |
 //! | `remove_finalizer`, `mark_initial_sync_done` | `Api::get_opt`, then `Api::patch` with `Patch::Json`: `test /metadata/uid`, a `test` of the value that is edited, the edit; a refused patch (HTTP 409 or 422) reads again, up to `EDIT_ATTEMPTS` times |
 //! | `apply_node_status` | `Api::patch_status` with `Patch::Apply` and `PatchParams::apply("ambar-<node>").force()`; HTTP 404 is success |
+//! | `remove_node_entry` | `Api::get_opt`, then `Api::patch_status` with `Patch::Json`: `test /metadata/uid`, `test /status/nodes/<i>/name`, `remove /status/nodes/<i>`; retried like the two edits above |
 //! | `watch` | `watcher` (with the default backoff) through a `reflector` that fills the cache |
 //!
 //! Why a JSON patch for the two edits of the object itself (`metadata.finalizers`
@@ -28,6 +29,14 @@
 //! every node changes it, and the edits do not depend on anything else.
 //! A failed `test` is HTTP 422 (checked on the stand); the edit is computed
 //! again from a fresh read.
+//!
+//! Why `remove_node_entry` exists next to `apply_node_status(.., None)`.
+//! Server-side apply of an empty list removes only the fields this field
+//! manager owns. When another manager co-owns the entry (an operator's
+//! `kubectl patch` or `kubectl edit` of the status), the entry stays after the
+//! empty apply, and the other nodes keep waiting for it. The agent reads the
+//! object after the empty apply and, when its entry is still there, removes it
+//! with this patch.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -89,6 +98,11 @@ pub trait Volumes: Send + Sync {
     /// field manager `ambar-<node>`; `None` removes the entry. An object that
     /// does not exist is success.
     async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError>;
+    /// Removes the entry of `node` from `status.nodes` of the object `name`
+    /// with a JSON patch on the status subresource, if the object has the uid
+    /// `uid`. `true`: the entry was removed. `false`: nothing was changed (no
+    /// object, another uid, or no such entry).
+    async fn remove_node_entry(&self, name: &str, uid: &str, node: &str) -> Result<bool, ApiError>;
     /// Names of the objects that were added, changed or deleted, starting
     /// with every existing object. Call once; the stream does not end.
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>>;
@@ -103,6 +117,15 @@ pub trait Objects: Send + Sync {
     /// `ApiError::Rejected`, an object that changed under the patch
     /// `ApiError::Conflict`.
     async fn patch(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError>;
+    /// The same on the status subresource.
+    async fn patch_status(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError>;
+}
+
+/// What a JSON patch is applied to.
+#[derive(Clone, Copy)]
+enum Target {
+    Object,
+    Status,
 }
 
 /// JSON-patch operations for one edit, computed from the object as read; `None`: nothing to change.
@@ -113,6 +136,26 @@ pub type Ops<'a> = &'a (dyn Fn(&ReplicatedVolume) -> Option<Vec<Value>> + Send +
 /// needs no change. A patch the API server refuses (a failed `test`, a
 /// conflict) is computed again from a fresh read, `EDIT_ATTEMPTS` times in all.
 pub async fn patch_retrying(objects: &dyn Objects, name: &str, uid: &str, ops: Ops<'_>) -> Result<bool, ApiError> {
+    edit_retrying(objects, name, uid, ops, Target::Object).await
+}
+
+/// `patch_retrying` for the status subresource.
+pub async fn patch_status_retrying(
+    objects: &dyn Objects,
+    name: &str,
+    uid: &str,
+    ops: Ops<'_>,
+) -> Result<bool, ApiError> {
+    edit_retrying(objects, name, uid, ops, Target::Status).await
+}
+
+async fn edit_retrying(
+    objects: &dyn Objects,
+    name: &str,
+    uid: &str,
+    ops: Ops<'_>,
+    target: Target,
+) -> Result<bool, ApiError> {
     let mut last = ApiError::Conflict("no attempt was made".to_string());
     for _ in 0..EDIT_ATTEMPTS {
         let Some(current) = objects.read(name).await? else {
@@ -126,7 +169,11 @@ pub async fn patch_retrying(objects: &dyn Objects, name: &str, uid: &str, ops: O
         };
         let mut patch = vec![json!({"op": "test", "path": "/metadata/uid", "value": uid})];
         patch.extend(edit);
-        match objects.patch(name, patch).await {
+        let result = match target {
+            Target::Object => objects.patch(name, patch).await,
+            Target::Status => objects.patch_status(name, patch).await,
+        };
+        match result {
             Ok(patched) => return Ok(patched),
             Err(refused @ (ApiError::Conflict(_) | ApiError::Rejected(_))) => last = refused,
             Err(other) => return Err(other),
@@ -147,6 +194,17 @@ pub fn remove_finalizer_ops(object: &ReplicatedVolume, finalizer: &str) -> Optio
     let path = format!("/metadata/finalizers/{index}");
     Some(vec![
         json!({"op": "test", "path": path, "value": finalizer}),
+        json!({"op": "remove", "path": path}),
+    ])
+}
+
+/// Operations that remove the entry of `node` from `status.nodes`, applying
+/// only while that entry is at the index it has in `object`.
+pub fn remove_node_entry_ops(object: &ReplicatedVolume, node: &str) -> Option<Vec<Value>> {
+    let index = object.status.as_ref()?.nodes.iter().position(|n| n.name == node)?;
+    let path = format!("/status/nodes/{index}");
+    Some(vec![
+        json!({"op": "test", "path": format!("{path}/name"), "value": node}),
         json!({"op": "remove", "path": path}),
     ])
 }
@@ -220,6 +278,19 @@ impl Objects for KubeVolumes {
             Err(e) => Err(api_error(e)),
         }
     }
+
+    async fn patch_status(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
+        let ops = serde_json::from_value(Value::Array(ops)).map_err(|e| ApiError::Other(e.to_string()))?;
+        match self
+            .api
+            .patch_status(name, &PatchParams::default(), &Patch::Json::<()>(ops))
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) if code_of(&e) == Some(404) => Ok(false),
+            Err(e) => Err(api_error(e)),
+        }
+    }
 }
 
 #[async_trait]
@@ -276,6 +347,10 @@ impl Volumes for KubeVolumes {
             Err(e) if code_of(&e) == Some(404) => Ok(()),
             Err(e) => Err(api_error(e)),
         }
+    }
+
+    async fn remove_node_entry(&self, name: &str, uid: &str, node: &str) -> Result<bool, ApiError> {
+        patch_status_retrying(self, name, uid, &|object| remove_node_entry_ops(object, node)).await
     }
 
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>> {
