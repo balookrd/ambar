@@ -178,15 +178,16 @@ fn run_agent(node: &str, csi_socket: &Path, namespace: &str, modules_dir: &Path,
         // The reconcile loop and the Controller share one object: its list
         // reads the cache the watch fills.
         let volumes = Arc::new(KubeVolumes::new(client.clone()));
-        let controller = ControllerService::new(volumes.clone(), Arc::new(ConfigMapNodes::new(client, namespace)));
-        let agent = Agent {
+        let nodes = Arc::new(ConfigMapNodes::new(client, namespace));
+        let controller = ControllerService::new(volumes.clone(), nodes.clone());
+        let agent = Arc::new(Agent {
             node: node.to_string(),
             paths,
             runner,
             volumes,
             locks: VolumeLocks::default(),
             ready: Arc::new(AtomicBool::new(false)),
-        };
+        });
         let shutdown = CancellationToken::new();
         tokio::spawn(cancel_on_signal(shutdown.clone()));
         let services = Services {
@@ -194,7 +195,7 @@ fn run_agent(node: &str, csi_socket: &Path, namespace: &str, modules_dir: &Path,
                 ready: agent.ready.clone(),
             },
             controller,
-            node: NodeService,
+            node: NodeService::new(agent.clone(), nodes),
         };
         eprintln!("ambar-agent: node {node} started");
         // Either side ending (an error, or the signal) stops the other one.

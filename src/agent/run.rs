@@ -429,7 +429,7 @@ fn prove_device_link(paths: &Paths, runner: &dyn Runner, volume: &str) -> Result
     ))
 }
 
-fn uid_of(object: &ReplicatedVolume) -> Result<String, AgentError> {
+pub(crate) fn uid_of(object: &ReplicatedVolume) -> Result<String, AgentError> {
     object
         .metadata
         .uid
@@ -437,7 +437,7 @@ fn uid_of(object: &ReplicatedVolume) -> Result<String, AgentError> {
         .ok_or_else(|| AgentError::Api(ApiError::Other("the object has no metadata.uid".to_string())))
 }
 
-fn has_entry(object: &ReplicatedVolume, node: &str) -> bool {
+pub(crate) fn has_entry(object: &ReplicatedVolume, node: &str) -> bool {
     object
         .status
         .as_ref()
@@ -446,7 +446,7 @@ fn has_entry(object: &ReplicatedVolume, node: &str) -> bool {
 
 impl Agent {
     /// Runs blocking node-level work off the async threads.
-    async fn blocking<T, F>(&self, work: F) -> Result<T, AgentError>
+    pub(crate) async fn blocking<T, F>(&self, work: F) -> Result<T, AgentError>
     where
         T: Send + 'static,
         F: FnOnce(&Paths, &dyn Runner) -> T + Send + 'static,
@@ -472,7 +472,7 @@ impl Agent {
             .map_err(|e| Self::reconcile_error(volume, e))
     }
 
-    async fn read_status(&self, volume: &str) -> Result<Option<ResourceStatus>, ReconcileError> {
+    pub(crate) async fn read_status(&self, volume: &str) -> Result<Option<ResourceStatus>, ReconcileError> {
         let name = volume.to_string();
         match self
             .blocking(move |_, runner| Drbd { runner }.status(&name).map_err(ReconcileError::from))
@@ -525,7 +525,7 @@ impl Agent {
     /// object is). `Ok(false)`: it could not be removed; the reason is logged
     /// and the caller keeps the pass at `Outcome::Kept`, because the other
     /// nodes wait for the entry and a retry in a second would not change it.
-    async fn clear_entry(&self, volume: &str, object: &ReplicatedVolume) -> Result<bool, AgentError> {
+    pub(crate) async fn clear_entry(&self, volume: &str, object: &ReplicatedVolume) -> Result<bool, AgentError> {
         self.report(volume, Some(object), None).await?;
         let Some(fresh) = self.volumes.get(volume).await? else {
             return Ok(true);

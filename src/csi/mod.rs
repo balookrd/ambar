@@ -1,5 +1,6 @@
-//! The CSI gRPC server: the Identity service answers; Controller and Node are
-//! placeholders that return `UNIMPLEMENTED` until Tasks 11 and 12 fill them.
+//! The CSI gRPC server: Identity, Controller (`CreateVolume`, `DeleteVolume`)
+//! and Node (stage, publish, unpublish, unstage). Calls the services do not
+//! implement return `UNIMPLEMENTED`.
 //!
 //! The server listens on a unix socket in kubelet's plugin directory. `serve`
 //! creates the parent directory, renames a freshly bound socket (mode 0600)
