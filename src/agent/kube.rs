@@ -15,6 +15,8 @@
 //! | `delete` | `Api::delete`; HTTP 404 is success |
 //! | `delete_exact` | `Api::delete` with `DeleteParams::preconditions` (`uid`); HTTP 404 is success, a failed precondition (HTTP 409) is `ApiError::Conflict` |
 //! | `remove_finalizer`, `mark_initial_sync_done` | `Api::get_opt`, then `Api::patch` with `Patch::Json`: `test /metadata/uid`, a `test` of the value that is edited, the edit; a refused patch (HTTP 409 or 422) reads again, up to `EDIT_ATTEMPTS` times |
+//! | `mark_formatted` | `Api::get_opt`, then `Api::patch` with `Patch::Json`: `test /metadata/uid`, `add` of the annotation `FORMATTED_ANNOTATION` (the whole `/metadata/annotations` map, guarded by a `test` of `/metadata/resourceVersion`, when the object has none); retried like the edits above |
+//! | `replace_members` | `Api::get_opt`, then `Api::patch` with `Patch::Json`: `test /metadata/uid`, `test /spec/nodes` (the list the caller computed its edit from), `replace /spec/nodes`; retried like the edits above |
 //! | `apply_node_status` | `Api::patch_status` with `Patch::Apply` and `PatchParams::apply("ambar-<node>").force()`; HTTP 404 is success |
 //! | `remove_node_entry` | `Api::get_opt`, then `Api::patch_status` with `Patch::Json`: `test /metadata/uid`, `test /status/nodes/<i>/name`, `remove /status/nodes/<i>`; retried like the two edits above |
 //! | `watch` | `watcher` (with the default backoff) through a `reflector` that fills the cache |
@@ -53,8 +55,13 @@ use kube::runtime::{WatchStreamExt, watcher as watcher_fn};
 use kube::{Client, Resource};
 use serde_json::{Value, json};
 
-use crate::crd::{NodeStatus, ReplicatedVolume};
+use crate::crd::{MemberNode, NodeStatus, ReplicatedVolume};
 use crate::model::InitialSync;
+
+/// Annotation the CSI Node service sets on an object after it has made (or
+/// found) the filesystem on the volume. Its absence is one of the conditions
+/// for `mkfs`; the agent never removes it.
+pub const FORMATTED_ANNOTATION: &str = "ambar.balookrd.github.io/formatted";
 
 /// How often an edit of the object reads it and patches it again after the
 /// API server refused the patch, before it gives up.
@@ -106,6 +113,22 @@ pub trait Volumes: Send + Sync {
     /// the object has the uid `uid`. `false`: nothing was changed (no object,
     /// another uid, or the field is not `Skip`).
     async fn mark_initial_sync_done(&self, name: &str, uid: &str) -> Result<bool, ApiError>;
+    /// Sets the annotation `FORMATTED_ANNOTATION` to `"true"` on the object
+    /// `name`, if the object has the uid `uid`. `false`: nothing was changed
+    /// (no object, another uid, or the annotation is there already).
+    async fn mark_formatted(&self, name: &str, uid: &str) -> Result<bool, ApiError>;
+    /// Replaces `spec.nodes` of the object `name` with `members`, if the
+    /// object has the uid `uid` and its `spec.nodes` is still `expected`, the
+    /// list the caller computed `members` from. `false`: nothing was changed
+    /// (no object, another uid, or the list is not `expected` any more); the
+    /// caller reads the object again and computes the edit again.
+    async fn replace_members(
+        &self,
+        name: &str,
+        uid: &str,
+        expected: &[MemberNode],
+        members: &[MemberNode],
+    ) -> Result<bool, ApiError>;
     /// Server-side apply of this node's entry of `status.nodes` under the
     /// field manager `ambar-<node>`; `None` removes the entry. An object that
     /// does not exist is success.
@@ -231,6 +254,44 @@ pub fn initial_sync_done_ops(object: &ReplicatedVolume) -> Option<Vec<Value>> {
     Some(vec![
         json!({"op": "test", "path": "/spec/initialSync", "value": skip}),
         json!({"op": "replace", "path": "/spec/initialSync", "value": done}),
+    ])
+}
+
+/// Operations that set `FORMATTED_ANNOTATION`; `None` when it is set already.
+/// Without any annotation the operation adds the whole map, which would erase
+/// annotations written in between, so it applies only to the resource version
+/// it was computed from.
+pub fn mark_formatted_ops(object: &ReplicatedVolume) -> Option<Vec<Value>> {
+    let annotations = object.metadata.annotations.as_ref();
+    if annotations.is_some_and(|a| a.contains_key(FORMATTED_ANNOTATION)) {
+        return None;
+    }
+    if annotations.is_some() {
+        // JSON-pointer escaping of the `/` in the key.
+        let path = format!("/metadata/annotations/{}", FORMATTED_ANNOTATION.replace('/', "~1"));
+        return Some(vec![json!({"op": "add", "path": path, "value": "true"})]);
+    }
+    let mut ops = Vec::new();
+    if let Some(version) = &object.metadata.resource_version {
+        ops.push(json!({"op": "test", "path": "/metadata/resourceVersion", "value": version}));
+    }
+    ops.push(json!({"op": "add", "path": "/metadata/annotations", "value": {FORMATTED_ANNOTATION: "true"}}));
+    Some(ops)
+}
+
+/// Operations that replace `spec.nodes` with `members`, applying only while
+/// the list is `expected`; `None` when `object` has another list.
+pub fn replace_members_ops(
+    object: &ReplicatedVolume,
+    expected: &[MemberNode],
+    members: &[MemberNode],
+) -> Option<Vec<Value>> {
+    if object.spec.nodes != expected {
+        return None;
+    }
+    Some(vec![
+        json!({"op": "test", "path": "/spec/nodes", "value": expected}),
+        json!({"op": "replace", "path": "/spec/nodes", "value": members}),
     ])
 }
 
@@ -376,6 +437,23 @@ impl Volumes for KubeVolumes {
 
     async fn mark_initial_sync_done(&self, name: &str, uid: &str) -> Result<bool, ApiError> {
         patch_retrying(self, name, uid, &initial_sync_done_ops).await
+    }
+
+    async fn mark_formatted(&self, name: &str, uid: &str) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &mark_formatted_ops).await
+    }
+
+    async fn replace_members(
+        &self,
+        name: &str,
+        uid: &str,
+        expected: &[MemberNode],
+        members: &[MemberNode],
+    ) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &|object| {
+            replace_members_ops(object, expected, members)
+        })
+        .await
     }
 
     async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError> {

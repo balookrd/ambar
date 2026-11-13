@@ -12,12 +12,12 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::agent::kube::{
-    ApiError, Created, Objects, Volumes, initial_sync_done_ops, patch_retrying, patch_status_retrying,
-    remove_finalizer_ops, remove_node_entry_ops,
+    ApiError, Created, Objects, Volumes, initial_sync_done_ops, mark_formatted_ops, patch_retrying,
+    patch_status_retrying, remove_finalizer_ops, remove_node_entry_ops, replace_members_ops,
 };
 use crate::agent::nodes::NodeMap;
 use crate::config::ClusterNodes;
-use crate::crd::{NodeStatus, ReplicatedVolume};
+use crate::crd::{MemberNode, NodeStatus, ReplicatedVolume};
 
 // ---- fake API server ----
 
@@ -25,7 +25,7 @@ use crate::crd::{NodeStatus, ReplicatedVolume};
 /// map and a log of the calls the agent made. `delete` follows the API
 /// server: an object with finalizers gets a deletion timestamp, one without is
 /// gone; removing the last finalizer of a deleting object removes it. `patch`
-/// applies the JSON-patch operations `test`, `replace` and `remove`; a failed
+/// applies the JSON-patch operations `test`, `add`, `replace` and `remove`; a failed
 /// `test` is `ApiError::Rejected`, as the API server's 422.
 #[derive(Default)]
 pub(crate) struct FakeVolumes {
@@ -76,6 +76,11 @@ pub(crate) struct FakeVolumes {
     pub(crate) exact_deletes: Mutex<Vec<(String, String)>>,
     /// The next `delete_exact` fails with this error.
     pub(crate) fail_exact: Mutex<Option<ApiError>>,
+    /// Number of `list` calls (the reconcile pass lists once).
+    pub(crate) lists: AtomicU32,
+    /// `apply_node_status` is logged but stores nothing, as if the write had
+    /// not reached the object.
+    pub(crate) drop_status_writes: AtomicBool,
 }
 
 /// A one-shot action of the fake on its own state.
@@ -92,7 +97,8 @@ pub(crate) fn typed(value: &Value) -> ReplicatedVolume {
     serde_json::from_value(value.clone()).unwrap()
 }
 
-/// Applies `test`, `replace` and `remove` operations to `document`.
+/// Applies `test`, `add`, `replace` and `remove` operations to `document`;
+/// `add` handles object members only.
 pub(crate) fn apply_ops(document: &mut Value, ops: &[Value]) -> Result<(), String> {
     for op in ops {
         let path = op["path"].as_str().ok_or("no path")?;
@@ -100,6 +106,16 @@ pub(crate) fn apply_ops(document: &mut Value, ops: &[Value]) -> Result<(), Strin
             "test" => {
                 if document.pointer(path) != Some(&op["value"]) {
                     return Err(format!("test of {path} failed"));
+                }
+            }
+            "add" => {
+                let (parent, last) = path.rsplit_once('/').ok_or("bad path")?;
+                let key = last.replace("~1", "/").replace("~0", "~");
+                match document.pointer_mut(parent).ok_or(format!("no {parent}"))? {
+                    Value::Object(map) => {
+                        map.insert(key, op["value"].clone());
+                    }
+                    _ => return Err(format!("cannot add {path}")),
                 }
             }
             "replace" => {
@@ -279,6 +295,7 @@ impl Volumes for FakeVolumes {
 
     async fn list(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
         self.turn().await;
+        self.lists.fetch_add(1, Ordering::SeqCst);
         if self.fail_list.load(Ordering::SeqCst) {
             self.list_failures.fetch_add(1, Ordering::SeqCst);
             return Err(ApiError::Other("the API server is down".into()));
@@ -385,6 +402,23 @@ impl Volumes for FakeVolumes {
         patch_status_retrying(self, name, uid, &|object| remove_node_entry_ops(object, node)).await
     }
 
+    async fn mark_formatted(&self, name: &str, uid: &str) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &mark_formatted_ops).await
+    }
+
+    async fn replace_members(
+        &self,
+        name: &str,
+        uid: &str,
+        expected: &[MemberNode],
+        members: &[MemberNode],
+    ) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &|object| {
+            replace_members_ops(object, expected, members)
+        })
+        .await
+    }
+
     async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError> {
         self.log(format!(
             "status {name} {node} {}",
@@ -394,6 +428,9 @@ impl Volumes for FakeVolumes {
             .lock()
             .unwrap()
             .push((node.to_string(), entry.cloned()));
+        if self.drop_status_writes.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         if self.object(name).is_some() {
             if let Some(entry) = entry {
                 self.set_entry(name, entry.clone());

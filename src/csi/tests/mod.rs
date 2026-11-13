@@ -15,20 +15,37 @@ use tower::service_fn;
 use super::proto::controller_client::ControllerClient;
 use super::proto::identity_client::IdentityClient;
 use super::proto::node_client::NodeClient;
-use super::proto::{GetCapacityRequest, GetPluginInfoRequest, NodeGetInfoRequest, ProbeRequest};
+use super::proto::{
+    GetCapacityRequest, GetPluginInfoRequest, NodeGetInfoRequest, NodeGetVolumeStatsRequest, ProbeRequest,
+};
 use super::*;
+use crate::agent::run::{Agent, VolumeLocks};
+use crate::exec::Output;
+use crate::paths::Paths;
+use crate::tests::FakeRunner;
 use crate::tests::volumes::{FakeNodes, FakeVolumes, cluster};
 
 fn services(ready: bool) -> Services {
+    let volumes = Arc::new(FakeVolumes::default());
+    let nodes = Arc::new(FakeNodes(Ok(cluster(&[1 << 40; 3]))));
+    let agent = Arc::new(Agent {
+        node: "n1".to_string(),
+        paths: Paths::default(),
+        runner: Arc::new(FakeRunner::new(|_, _| Output {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })),
+        volumes: volumes.clone(),
+        locks: VolumeLocks::default(),
+        ready: Arc::new(AtomicBool::new(ready)),
+    });
     Services {
         identity: IdentityService {
-            ready: Arc::new(AtomicBool::new(ready)),
+            ready: agent.ready.clone(),
         },
-        controller: ControllerService::new(
-            Arc::new(FakeVolumes::default()),
-            Arc::new(FakeNodes(Ok(cluster(&[1 << 40; 3])))),
-        ),
-        node: NodeService,
+        controller: ControllerService::new(volumes, nodes.clone()),
+        node: NodeService::new(agent, nodes),
     }
 }
 
@@ -107,7 +124,7 @@ async fn serves_identity_and_restarts_over_a_stale_socket() {
 }
 
 #[tokio::test]
-async fn controller_and_node_are_unimplemented_for_now() {
+async fn calls_that_are_not_implemented_say_so_and_the_node_service_answers() {
     let dir = short_dir();
     let socket = dir.path().join("csi.sock");
     let shutdown = CancellationToken::new();
@@ -125,10 +142,16 @@ async fn controller_and_node_are_unimplemented_for_now() {
         .unwrap_err();
     assert_eq!(err.code(), Code::Unimplemented);
     let err = NodeClient::new(channel.clone())
-        .node_get_info(NodeGetInfoRequest {})
+        .node_get_volume_stats(NodeGetVolumeStatsRequest::default())
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::Unimplemented);
+    let info = NodeClient::new(channel.clone())
+        .node_get_info(NodeGetInfoRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.node_id, "n1");
     let probe = IdentityClient::new(channel)
         .probe(ProbeRequest {})
         .await
