@@ -9,6 +9,7 @@ pub mod exec;
 pub mod model;
 pub mod module_loader;
 pub mod paths;
+pub mod placement;
 pub mod reconcile;
 
 #[cfg(test)]
