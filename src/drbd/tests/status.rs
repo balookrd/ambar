@@ -245,3 +245,47 @@ fn every_single_deviation_from_the_fresh_sample_blocks_the_skip() {
         .collect();
     assert!(wrongly_accepted.is_empty(), "wrongly accepted: {wrongly_accepted:?}");
 }
+
+#[test]
+fn state_names_print_as_drbd_spells_them_and_parse_back() {
+    let roles = [Role::Primary, Role::Secondary, Role::Unknown];
+    let disks = [
+        DiskState::Diskless,
+        DiskState::Attaching,
+        DiskState::Detaching,
+        DiskState::Failed,
+        DiskState::Negotiating,
+        DiskState::Inconsistent,
+        DiskState::Outdated,
+        DiskState::DUnknown,
+        DiskState::Consistent,
+        DiskState::UpToDate,
+    ];
+    let conns = [
+        ConnectionState::StandAlone,
+        ConnectionState::Disconnecting,
+        ConnectionState::Unconnected,
+        ConnectionState::Timeout,
+        ConnectionState::BrokenPipe,
+        ConnectionState::NetworkFailure,
+        ConnectionState::ProtocolError,
+        ConnectionState::TearDown,
+        ConnectionState::Connecting,
+        ConnectionState::Connected,
+    ];
+    for v in roles {
+        let back: Role = serde_json::from_str(&format!("\"{v}\"")).unwrap();
+        assert_eq!(back, v);
+    }
+    for v in disks {
+        let back: DiskState = serde_json::from_str(&format!("\"{v}\"")).unwrap();
+        assert_eq!(back, v);
+    }
+    for v in conns {
+        let back: ConnectionState = serde_json::from_str(&format!("\"{v}\"")).unwrap();
+        assert_eq!(back, v);
+    }
+    assert_eq!(DiskState::UpToDate.to_string(), "UpToDate");
+    assert_eq!(ConnectionState::StandAlone.to_string(), "StandAlone");
+    assert_eq!(Role::Secondary.to_string(), "Secondary");
+}

@@ -6,9 +6,11 @@
 //! `peer_devices`); the renames below follow the captured samples in
 //! `stand/spike/samples/`.
 
-use serde::Deserialize;
+use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Role {
     Primary,
     Secondary,
@@ -17,7 +19,7 @@ pub enum Role {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum DiskState {
     Diskless,
     Attaching,
@@ -33,7 +35,7 @@ pub enum DiskState {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ConnectionState {
     StandAlone,
     Disconnecting,
@@ -47,6 +49,34 @@ pub enum ConnectionState {
     Connected,
     #[serde(other)]
     Other,
+}
+
+/// Writes the state as `drbdsetup status --json` spells it. The text comes from
+/// the serde name of the variant, so it cannot drift from the parsing side.
+/// The catch-all `Other` does not keep the original text and prints `Other`.
+fn write_serde_name(value: &impl Serialize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match serde_json::to_string(value) {
+        Ok(json) => f.write_str(json.trim_matches('"')),
+        Err(_) => Err(fmt::Error),
+    }
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_serde_name(self, f)
+    }
+}
+
+impl fmt::Display for DiskState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_serde_name(self, f)
+    }
+}
+
+impl fmt::Display for ConnectionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_serde_name(self, f)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
