@@ -2,6 +2,7 @@
 
 pub mod backing;
 pub mod cli;
+pub mod crd;
 pub mod drbd;
 pub mod exec;
 pub mod model;

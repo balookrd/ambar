@@ -54,7 +54,7 @@ Nothing here has been run on a production cluster.
 | Lima | 2.3.0, `vmType: vz` |
 | Docker | `docker buildx`, `linux/arm64` |
 | Kernel the module is built for | `6.12.116+deb13-arm64` (Debian 13 stock kernel) |
-| For `image/build.sh` on the host | Rust stable 1.89 or newer (the `rust-version` of the crate), `cargo-zigbuild`, `zig`, and the target added with `rustup target add aarch64-unknown-linux-musl` (checked with zig 0.17.1 and rustc 1.99.1) |
+| For `image/build.sh` on the host | Rust stable 1.95 or newer (the `rust-version` of the crate), `cargo-zigbuild`, `zig`, and the target added with `rustup target add aarch64-unknown-linux-musl` (checked with zig 0.17.1 and rustc 1.99.1) |
 
 ## Build and test the image
 
@@ -84,7 +84,7 @@ Linux kernel.
 cargo test
 ```
 
-Expected line: `test result: ok. 183 passed`. The agent is checked on the stand
+Expected line: `test result: ok. 192 passed`. The agent is checked on the stand
 with `stand/agent-smoke.sh`, see `stand/README.md`.
 
 Bringing up the stand is described in `stand/README.md`.

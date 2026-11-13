@@ -53,7 +53,7 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; са�
 | Lima | 2.3.0, `vmType: vz` |
 | Docker | `docker buildx`, `linux/arm64` |
 | Ядро, под которое собран модуль | `6.12.116+deb13-arm64` (штатное ядро Debian 13) |
-| Для `image/build.sh` на хосте | Rust stable 1.89 или новее (`rust-version` крейта), `cargo-zigbuild`, `zig` и цель, добавленная командой `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.99.1) |
+| Для `image/build.sh` на хосте | Rust stable 1.95 или новее (`rust-version` крейта), `cargo-zigbuild`, `zig` и цель, добавленная командой `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.99.1) |
 
 ## Сборка и проверка образа
 
@@ -83,7 +83,7 @@ Docker, ни ядро Linux.
 cargo test
 ```
 
-Ожидаемая строка: `test result: ok. 183 passed`. На стенде агент проверяет
+Ожидаемая строка: `test result: ok. 192 passed`. На стенде агент проверяет
 `stand/agent-smoke.sh`, см. `stand/README.md`.
 
 Запуск стенда описан в `stand/README.md`.
