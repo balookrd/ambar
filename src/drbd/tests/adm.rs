@@ -108,12 +108,35 @@ fn status_reports_malformed_json_after_a_successful_exit() {
 /// Stderr recorded in experiment P7 (1) for a file without metadata.
 const P7_NO_METADATA_STDERR: &str = "No valid meta data found\nCommand 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 255\n";
 
+/// Full stdout of `drbdadm dump-md p10` on `dv-1` in the states of
+/// experiment P10, section "Опыты перед CSI (P7–P10)" of the experiment
+/// record. Verbatim; for the states with `up` the dump taken after
+/// `drbdadm apply-al`.
+const P10_1_JUST_CREATED: &str = include_str!("fixtures/p10-1-just-created.txt");
+const P10_1_JUST_CREATED_RUN2: &str = include_str!("fixtures/p10-1-just-created-run2.txt");
+const P10_2_UP_DOWN: &str = include_str!("fixtures/p10-2-up-down.txt");
+const P10_3_CONNECTED_INCONSISTENT: &str = include_str!("fixtures/p10-3-connected-inconsistent.txt");
+const P10_4_SKIP_UPTODATE: &str = include_str!("fixtures/p10-4-skip-uptodate.txt");
+const P10_4_SKIP_UPTODATE_RUN2: &str = include_str!("fixtures/p10-4-skip-uptodate-run2.txt");
+const P10_5_FILESYSTEM_AND_FILE: &str = include_str!("fixtures/p10-5-filesystem-and-file.txt");
+const P10_6_FULL_RESYNC: &str = include_str!("fixtures/p10-6-full-resync.txt");
+
+/// Stderr recorded in P10 (2)-(6) for `dump-md` right after `drbdadm down`.
+const P10_UNCLEAN_STDERR: &str = "Found meta data is \"unclean\", please apply-al first\nCommand 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255\n";
+
 #[test]
-fn metadata_is_present_when_dump_md_succeeds() {
-    let runner = FakeRunner::new(|_, _| out(0, "# DRBD meta data dump\n", ""));
+fn a_dump_md_that_succeeds_with_the_just_created_state_is_fresh() {
+    let runner = FakeRunner::new(|_, _| out(0, P10_1_JUST_CREATED, ""));
     let drbd = Drbd { runner: &runner };
-    assert_eq!(drbd.metadata("p7"), Ok(Metadata::Present));
-    assert_eq!(runner.calls(), ["drbdadm dump-md p7"]);
+    assert_eq!(drbd.metadata("p10"), Ok(Metadata::Fresh));
+    assert_eq!(runner.calls(), ["drbdadm dump-md p10"]);
+}
+
+#[test]
+fn a_dump_md_that_succeeds_with_a_used_state_is_used() {
+    let runner = FakeRunner::new(|_, _| out(0, P10_5_FILESYSTEM_AND_FILE, ""));
+    let drbd = Drbd { runner: &runner };
+    assert_eq!(drbd.metadata("p10"), Ok(Metadata::Used));
 }
 
 #[test]
@@ -125,19 +148,33 @@ fn metadata_is_absent_on_the_code_and_message_recorded_for_an_empty_file() {
 
 #[test]
 fn the_marker_alone_is_not_enough_when_the_command_succeeded() {
+    // Exit code 0 with the P7 message on stderr and no dump on stdout: not
+    // "absent", and an unreadable dump is never "fresh".
     let runner = FakeRunner::new(|_, _| out(0, "", P7_NO_METADATA_STDERR));
     let drbd = Drbd { runner: &runner };
-    assert_eq!(drbd.metadata("p7"), Ok(Metadata::Present));
+    assert_eq!(drbd.metadata("p7"), Ok(Metadata::Used));
+}
+
+#[test]
+fn a_dump_md_that_succeeds_without_a_readable_dump_is_used() {
+    for stdout in ["", "\n", "garbage\n", "# DRBD meta data dump\n"] {
+        let runner = FakeRunner::new(move |_, _| out(0, stdout, ""));
+        let drbd = Drbd { runner: &runner };
+        assert_eq!(drbd.metadata("p7"), Ok(Metadata::Used), "{stdout:?}");
+    }
 }
 
 #[test]
 fn any_other_failure_of_dump_md_is_a_failed_check() {
-    // Recorded in P7 (3): the resource is up, the device is busy.
+    // Recorded in P7 (3): the resource is up, the device is busy. Recorded in
+    // P10 (2)-(6): the activity log is unclean after `down`; the metadata is
+    // there, so the check must not answer "absent".
     let busy = "open(/dev/ambar/p7) failed: Device or resource busy\nExclusive open failed. Do it anyways?\n";
     for (code, stderr) in [
         (20, busy),
         (20, "Device is configured"),
         (255, ""),
+        (255, P10_UNCLEAN_STDERR),
         (1, "boom"),
         (-1, ""),
     ] {
@@ -228,4 +265,192 @@ fn a_timeout_and_a_failed_start_both_read_as_a_command_that_did_not_complete() {
         err.to_string(),
         "`drbdadm up spike` did not run to completion: killed after 120s"
     );
+}
+
+// ---- classify_dump on the P10 dumps ----
+
+#[test]
+fn dumps_of_metadata_that_never_held_data_are_fresh() {
+    for (name, dump) in [
+        ("1 just created", P10_1_JUST_CREATED),
+        ("1 just created, run 2", P10_1_JUST_CREATED_RUN2),
+        ("2 up and down on one node", P10_2_UP_DOWN),
+        ("3 connected, Inconsistent, no skip", P10_3_CONNECTED_INCONSISTENT),
+    ] {
+        assert_eq!(classify_dump(dump), Metadata::Fresh, "{name}");
+    }
+}
+
+#[test]
+fn dumps_of_metadata_that_took_part_in_a_volume_are_used() {
+    for (name, dump) in [
+        ("4 after the skip of the initial sync", P10_4_SKIP_UPTODATE),
+        ("4 after the skip of the initial sync, run 2", P10_4_SKIP_UPTODATE_RUN2),
+        ("5 filesystem and a file", P10_5_FILESYSTEM_AND_FILE),
+        ("6 full resync onto the node", P10_6_FULL_RESYNC),
+    ] {
+        assert_eq!(classify_dump(dump), Metadata::Used, "{name}");
+    }
+}
+
+#[test]
+fn an_unreadable_dump_is_used() {
+    assert_eq!(classify_dump(""), Metadata::Used);
+    assert_eq!(classify_dump("\n\n"), Metadata::Used);
+    assert_eq!(classify_dump("No valid meta data found\n"), Metadata::Used);
+    assert_eq!(classify_dump("not a dump at all"), Metadata::Used);
+    // Exactly the part of a dump that the layout check does not need.
+    assert_eq!(
+        classify_dump("# DRBD meta data dump\n\nversion \"v09\";\n"),
+        Metadata::Used
+    );
+}
+
+#[test]
+fn every_truncation_of_a_fresh_dump_is_used() {
+    let lines: Vec<&str> = P10_1_JUST_CREATED.lines().collect();
+    for keep in 0..lines.len() {
+        let cut = lines[..keep].join("\n");
+        assert_eq!(classify_dump(&cut), Metadata::Used, "cut after {keep} lines");
+    }
+    assert_eq!(classify_dump(&lines.join("\n")), Metadata::Fresh);
+    // Cut in the middle of the last line.
+    let text = P10_1_JUST_CREATED.trim_end();
+    assert_eq!(classify_dump(&text[..text.len() - 1]), Metadata::Used);
+}
+
+/// `P10_1_JUST_CREATED` with the first line that equals `from` replaced by `to`.
+fn with_line(from: &str, to: &str) -> String {
+    let mut done = false;
+    let lines: Vec<String> = P10_1_JUST_CREATED
+        .lines()
+        .map(|l| {
+            if !done && l.trim() == from {
+                done = true;
+                to.to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    assert!(done, "no line {from:?} in the fixture");
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn one_changed_identifier_makes_a_fresh_dump_used() {
+    for (name, from, to) in [
+        (
+            "current-uuid",
+            "current-uuid 0x0000000000000004;",
+            "current-uuid 0x0000000000000005;",
+        ),
+        (
+            "current-uuid, a generated one",
+            "current-uuid 0x0000000000000004;",
+            "current-uuid 0x0240DDD21A4B2CE8;",
+        ),
+        (
+            "current-uuid zero",
+            "current-uuid 0x0000000000000004;",
+            "current-uuid 0x0000000000000000;",
+        ),
+        ("flags of the node", "flags 0x00000080;", "flags 0x00000091;"),
+        (
+            "flags of the node, consistent only",
+            "flags 0x00000080;",
+            "flags 0x00000081;",
+        ),
+        ("la-size-sect", "la-size-sect 0;", "la-size-sect 2096632;"),
+        (
+            "bitmap-uuid of a slot",
+            "bitmap-uuid 0x0000000000000000;",
+            "bitmap-uuid 0x5400D259A0DF9D13;",
+        ),
+        (
+            "bitmap-dagtag of a slot",
+            "bitmap-dagtag 0x0000000000000000;",
+            "bitmap-dagtag 0x0000000000000001;",
+        ),
+        ("flags of a slot", "flags 0x00000000;", "flags 0x00000020;"),
+        ("bits set in the bitmap", "# bits-set[0] 0;", "# bits-set[0] 1024;"),
+        ("layout version", "version \"v09\";", "version \"v10\";"),
+        ("max-peers does not match the bitmaps", "max-peers 7;", "max-peers 6;"),
+    ] {
+        assert_eq!(classify_dump(&with_line(from, to)), Metadata::Used, "{name}");
+    }
+}
+
+#[test]
+fn a_set_bit_in_a_bitmap_body_makes_a_fresh_dump_used() {
+    let set = P10_1_JUST_CREATED.replacen(
+        "bitmap[0] {\n}",
+        "bitmap[0] {\n   # at 0kB\n    4096 times 0xFFFFFFFFFFFFFFFF;\n}",
+        1,
+    );
+    assert_ne!(set, P10_1_JUST_CREATED);
+    assert_eq!(classify_dump(&set), Metadata::Used);
+}
+
+#[test]
+fn a_changed_identifier_in_the_last_peer_slot_or_the_history_makes_a_fresh_dump_used() {
+    // Last slot: the 32nd `bitmap-uuid` line.
+    let mut seen = 0;
+    let slot: Vec<String> = P10_1_JUST_CREATED
+        .lines()
+        .map(|l| {
+            if l.trim() == "bitmap-uuid 0x0000000000000000;" {
+                seen += 1;
+                if seen == 32 {
+                    return "    bitmap-uuid 0x0000000000000001;".to_string();
+                }
+            }
+            l.to_string()
+        })
+        .collect();
+    assert_eq!(seen, 32);
+    assert_eq!(classify_dump(&slot.join("\n")), Metadata::Used);
+    // History: the first value of the first history line.
+    let history = P10_1_JUST_CREATED.replacen(
+        "        0x0000000000000000; 0x0000000000000000;",
+        "        0x0240DDD21A4B2CE8; 0x0000000000000000;",
+        1,
+    );
+    assert_ne!(history, P10_1_JUST_CREATED);
+    assert_eq!(classify_dump(&history), Metadata::Used);
+}
+
+#[test]
+fn a_dump_with_an_unknown_line_or_a_missing_field_is_used() {
+    let extra = P10_1_JUST_CREATED.replacen("max-peers 7;", "max-peers 7;\nsomething-new 1;", 1);
+    assert_eq!(classify_dump(&extra), Metadata::Used);
+    let no_uuid: String = P10_1_JUST_CREATED
+        .lines()
+        .filter(|l| !l.starts_with("current-uuid"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(classify_dump(&no_uuid), Metadata::Used);
+    // A complete dump followed by the start of one more block that never ends.
+    for tail in ["bitmap[7] {\n", "peer[32] {\n    bitmap-index -1;\n"] {
+        assert_eq!(
+            classify_dump(&format!("{P10_1_JUST_CREATED}{tail}")),
+            Metadata::Used,
+            "{tail}"
+        );
+    }
+    let two_uuids = P10_1_JUST_CREATED.replacen(
+        "current-uuid 0x0000000000000004;",
+        "current-uuid 0x0000000000000004;\ncurrent-uuid 0x0000000000000004;",
+        1,
+    );
+    assert_eq!(classify_dump(&two_uuids), Metadata::Used);
+}
+
+#[test]
+fn comments_and_the_random_device_uuid_do_not_matter() {
+    let changed = P10_1_JUST_CREATED
+        .replace("# 2026-11-13", "# 2030-01-01")
+        .replace("device-uuid 0x9A9C813A219E8F2D;", "device-uuid 0x1111111111111111;");
+    assert_ne!(changed, P10_1_JUST_CREATED);
+    assert_eq!(classify_dump(&changed), Metadata::Fresh);
 }

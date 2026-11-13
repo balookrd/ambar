@@ -1,0 +1,249 @@
+# DRBD meta data dump
+# 2026-11-13 12:49:00 +0000 [1794574140]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id -1;
+current-uuid 0x0000000000000004;
+flags 0x00000080;
+members 0x0000000000000000;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[1] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[2] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+history-uuids {
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 257;
+la-size-sect 0;
+bm-byte-per-bit 4096;
+device-uuid 0x1B25D576AC5F5051;
+la-peer-max-bio-size 0;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 0;
+bitmap[0] {
+}
+# bits-set[0] 0;
+bitmap[1] {
+}
+# bits-set[1] 0;
+bitmap[2] {
+}
+# bits-set[2] 0;
+bitmap[3] {
+}
+# bits-set[3] 0;
+bitmap[4] {
+}
+# bits-set[4] 0;
+bitmap[5] {
+}
+# bits-set[5] 0;
+bitmap[6] {
+}
+# bits-set[6] 0;
