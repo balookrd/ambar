@@ -57,7 +57,7 @@ fn the_backing_file_leaves_the_requested_size_usable() {
 #[test]
 fn creates_a_sparse_file_once() {
     let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("volumes").join("spike.img.new");
+    let path = tmp.path().join("spike.img.new");
     create_sparse_file(&path, 64 * 1024 * 1024).unwrap();
     let meta = fs::metadata(&path).unwrap();
     assert_eq!(meta.len(), 64 * 1024 * 1024);
@@ -69,20 +69,26 @@ fn creates_a_sparse_file_once() {
 }
 
 #[test]
-fn the_volume_file_and_its_new_directory_are_private() {
+fn the_volume_file_is_private_and_an_existing_directory_keeps_its_mode() {
     let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().join("volumes");
-    let path = dir.join("spike.img");
+    let path = tmp.path().join("spike.img");
     create_sparse_file(&path, 4096).unwrap();
     assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-    assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
 
-    // A directory that exists already keeps its mode.
     let open_dir = tmp.path().join("open");
     fs::create_dir(&open_dir).unwrap();
     fs::set_permissions(&open_dir, fs::Permissions::from_mode(0o755)).unwrap();
     create_sparse_file(&open_dir.join("b.img"), 4096).unwrap();
     assert_eq!(fs::metadata(&open_dir).unwrap().mode() & 0o777, 0o755);
+}
+
+#[test]
+fn a_missing_directory_is_an_error_and_is_not_created() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("volumes");
+    let err = create_sparse_file(&dir.join("spike.img"), 4096).unwrap_err();
+    assert!(matches!(err, BackingError::Io { action: "create", .. }), "{err}");
+    assert!(!dir.exists());
 }
 
 #[test]

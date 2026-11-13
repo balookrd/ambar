@@ -1140,6 +1140,8 @@ fn markers_get_distinct_temporary_names() {
     let synced = temp_path(&paths.synced_marker("spike"));
     assert_ne!(ready, synced);
     assert_eq!(ready, paths.volumes_dir.join(".spike.img.ready.tmp"));
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    fs::create_dir_all(&paths.res_dir).unwrap();
 
     write_atomically(&paths.synced_marker("spike"), "").unwrap();
     write_atomically(&paths.applied_res("spike"), "text").unwrap();
@@ -1755,4 +1757,13 @@ fn remove_does_not_create_the_volumes_directory() {
     reconciler.remove("spike").unwrap_err();
     assert!(!paths.volumes_dir.exists());
     assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+}
+
+#[test]
+fn an_atomic_write_does_not_create_a_missing_directory() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    let err = write_atomically(&paths.ready_marker("spike"), "").unwrap_err();
+    assert!(matches!(err, ReconcileError::Io { action: "create", .. }), "{err}");
+    assert!(!paths.volumes_dir.exists());
 }

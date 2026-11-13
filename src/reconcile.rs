@@ -417,7 +417,16 @@ impl Reconciler<'_> {
                 })?;
                 backing::link_device(&self.paths.device_link(volume), device)?;
             }
-            Action::WriteRes => write_atomically(&self.paths.res_file(volume), &self.rendered(spec))?,
+            Action::WriteRes => {
+                // The resource directory is not under the volumes-directory
+                // rule: in the agent container it is `/etc/drbd.d`.
+                fs::create_dir_all(&self.paths.res_dir).map_err(|source| ReconcileError::Io {
+                    action: "create directory",
+                    path: self.paths.res_dir.display().to_string(),
+                    source,
+                })?;
+                write_atomically(&self.paths.res_file(volume), &self.rendered(spec))?
+            }
             Action::CreateMd => {
                 // The file has no ready marker, but it may still hold
                 // metadata (a marker lost, or metadata written by something
@@ -647,7 +656,9 @@ fn still_linked(file: &File, path: &Path) -> io::Result<bool> {
 /// Writes `text` under a temporary name next to `path`, syncs it, renames it
 /// over `path` and syncs the directory: after a crash `path` holds either
 /// the old or the new text, and once this returns the new text survives a
-/// power loss.
+/// power loss. The directory of `path` must exist; it is never created here
+/// (`Action::WriteRes` creates the resource directory itself, the volumes
+/// directory is never created).
 fn write_atomically(path: &Path, text: &str) -> Result<(), ReconcileError> {
     let io_err = |action, source| ReconcileError::Io {
         action,
@@ -655,7 +666,6 @@ fn write_atomically(path: &Path, text: &str) -> Result<(), ReconcileError> {
         source,
     };
     let parent = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| io_err("create directory for", e))?;
     let tmp = temp_path(path);
     let mut file = File::create(&tmp).map_err(|e| io_err("create", e))?;
     file.write_all(text.as_bytes()).map_err(|e| io_err("write", e))?;
