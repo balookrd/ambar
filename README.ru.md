@@ -83,7 +83,7 @@ Docker, ни ядро Linux.
 cargo test
 ```
 
-Ожидаемая строка: `test result: ok. 223 passed`. На стенде агент проверяет
+Ожидаемая строка: `test result: ok. 237 passed`. На стенде агент проверяет
 `stand/agent-smoke.sh`, см. `stand/README.md`.
 
 Запуск стенда описан в `stand/README.md`.
