@@ -224,7 +224,7 @@ fn a_runner_that_ignores_limits_runs_commands_through_run() {
 
 #[test]
 fn the_timeout_error_carries_the_stderr_captured_so_far() {
-    let err = runner_with(Duration::from_millis(500))
+    let err = runner_with(Duration::from_secs(2))
         .run("sh", &["-c", "echo partial-diagnostic >&2; sleep 30"])
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::TimedOut);
@@ -262,4 +262,189 @@ fn an_exited_child_is_seen_without_being_reaped() {
     // and calling it again reports the same.
     assert!(exited_without_reaping(child.id()).unwrap());
     assert_eq!(child.wait().unwrap().code(), Some(7));
+}
+
+// ---- reaping and error paths (K3) ----
+
+/// A `sleep 30` in its own process group, as `run_with_timeout` starts commands.
+fn sleeper() -> std::process::Child {
+    std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap()
+}
+
+/// `true` when `pid` is no longer a child or process of ours at all: not even
+/// a zombie (`kill(pid, 0)` fails with ESRCH).
+fn pid_is_gone(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks that the pid exists.
+    unsafe { libc::kill(pid as i32, 0) == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
+}
+
+#[test]
+fn kill_and_reap_kills_the_group_and_leaves_no_zombie() {
+    let mut child = sleeper();
+    let pid = child.id();
+    assert!(kill_and_reap(&mut child, pid));
+    assert!(pid_is_gone(pid), "the killed child is still a zombie");
+}
+
+#[test]
+fn reaping_gives_up_after_the_limit_and_does_not_block() {
+    let mut child = sleeper();
+    let started = Instant::now();
+    assert!(!reap_within(&mut child, Duration::from_millis(300)));
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(300) && took < Duration::from_secs(3),
+        "{took:?}"
+    );
+    // Still running, not reaped: kill it for real.
+    child.kill().unwrap();
+    assert!(reap_within(&mut child, Duration::from_secs(5)));
+    assert!(pid_is_gone(child.id()));
+}
+
+#[test]
+fn a_child_that_was_reaped_by_someone_else_counts_as_reaped() {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    let mut status = 0;
+    // SAFETY: waits for our own child; the std handle is told nothing.
+    assert_eq!(unsafe { libc::waitpid(pid as i32, &mut status, 0) }, pid as i32);
+    assert!(reap_within(&mut child, Duration::from_secs(1)));
+}
+
+#[test]
+fn echild_from_waitid_means_there_is_nothing_to_signal() {
+    // Pid 1 is not our child: `waitid` fails with ECHILD.
+    let err = exited_without_reaping(1).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ECHILD), "{err}");
+    assert!(!may_signal_group(&err));
+    assert!(may_signal_group(&io::Error::from_raw_os_error(libc::EINTR)));
+    assert!(may_signal_group(&io::Error::other("anything else")));
+}
+
+#[test]
+fn a_reader_error_after_the_leader_exited_is_reported_as_a_failure() {
+    let (sender, results) = mpsc::channel();
+    sender
+        .send((Stream::Stdout, Err(io::Error::other("read failed"))))
+        .unwrap();
+    sender.send((Stream::Stderr, Ok(b"e".to_vec()))).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    match collect_output(&results, deadline) {
+        Collected::Failed(e) => assert_eq!(e.to_string(), "read failed"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn collected_output_is_returned_when_both_readers_deliver() {
+    let (sender, results) = mpsc::channel();
+    sender.send((Stream::Stderr, Ok(b"err".to_vec()))).unwrap();
+    sender.send((Stream::Stdout, Ok(b"out".to_vec()))).unwrap();
+    match collect_output(&results, Instant::now() + Duration::from_secs(5)) {
+        Collected::Done(out, err) => assert_eq!((out.as_slice(), err.as_slice()), (&b"out"[..], &b"err"[..])),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn waiting_for_the_readers_stops_after_the_deadline_plus_the_grace() {
+    let (_sender, results) = mpsc::channel::<(Stream, io::Result<Vec<u8>>)>();
+    let started = Instant::now();
+    let collected = collect_output(&results, Instant::now());
+    let took = started.elapsed();
+    assert!(matches!(collected, Collected::TimedOut(None)));
+    assert!(
+        took >= READER_GRACE - Duration::from_millis(100) && took < READER_GRACE + Duration::from_secs(3),
+        "{took:?}"
+    );
+}
+
+#[test]
+fn a_timeout_error_says_when_the_process_could_not_be_reaped() {
+    let reaped = timeout_error("sleep", &["30"], Duration::from_secs(2), Some(Vec::new()), true).to_string();
+    let stuck = timeout_error("sleep", &["30"], Duration::from_secs(2), Some(Vec::new()), false).to_string();
+    assert!(!reaped.contains("reaped"), "{reaped}");
+    assert!(stuck.contains("could not be reaped within 5s"), "{stuck}");
+    assert!(stuck.contains("zombie"), "{stuck}");
+    assert!(stuck.starts_with(&reaped), "{stuck}");
+}
+
+#[test]
+fn a_reader_failure_after_the_leader_exited_reaps_it() {
+    let mut child = std::process::Command::new("true").process_group(0).spawn().unwrap();
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !exited_without_reaping(pid).unwrap() {
+        assert!(Instant::now() < deadline, "the child did not exit");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (sender, results) = mpsc::channel();
+    sender
+        .send((Stream::Stdout, Err(io::Error::other("read failed"))))
+        .unwrap();
+    let err = supervise(&mut child, &results, deadline, "true", &[], Duration::from_secs(5)).unwrap_err();
+    assert_eq!(err.to_string(), "read failed");
+    assert!(pid_is_gone(pid), "the exited leader was left as a zombie");
+}
+
+/// Whether the process runs: it exists and is not a zombie. `/proc` where
+/// there is one (the Linux container has no `ps`), `ps` otherwise (macOS).
+fn alive(pid: i32) -> bool {
+    if Path::new("/proc/self").exists() {
+        return process_runs(pid);
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    !state.is_empty() && !state.starts_with('Z')
+}
+
+#[test]
+fn a_leader_reaped_elsewhere_gives_an_error_and_no_signal_to_its_group() {
+    // `sh` leads a group with a background `sleep` in it; the test kills and
+    // reaps the leader behind the handle's back, as if another waiter had.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file = tmp.path().join("sleeper");
+    let script = format!("sleep 30 & echo $! > {}; wait", file.display());
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid = child.id() as i32;
+    let sleeper = read_pid(&file);
+    assert!(alive(sleeper));
+    let mut status = 0;
+    // SAFETY: our own child; only the leader is signalled and reaped.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+    }
+    let (_sender, results) = mpsc::channel();
+    let err = supervise(
+        &mut child,
+        &results,
+        Instant::now() + Duration::from_secs(5),
+        "sh",
+        &[],
+        Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ECHILD), "{err}");
+    // A signal would have reached the sleeper by now.
+    thread::sleep(Duration::from_millis(500));
+    let survived = alive(sleeper);
+    // SAFETY: cleanup of the group the test created.
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    assert!(
+        survived,
+        "the group was signalled although the leader was not ours any more"
+    );
 }
