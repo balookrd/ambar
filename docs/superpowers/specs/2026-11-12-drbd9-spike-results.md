@@ -3590,9 +3590,9 @@ OK: stand is up
 
 На трёх узлах `drbdsetup status` — `# No currently configured DRBD found.`, `losetup -l -n | wc -l` = 0, `/dev/ambar` и `/mnt/pa` отсутствуют, в `/var/tmp` только `cloud-init` и каталог `systemd-private-…`, `/sys/module/drbd/version` = `9.3.4`.
 
-## Опыты перед CSI (P7–P9)
+## Опыты перед CSI (P7–P10)
 
-Дата: 2026-11-13. Стенд тот же: три ВМ Lima, ядро `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0 (версии заново не снимались). Опыты выполняет `stand/spike/pre-csi.sh <p7|p8|p9>`: перед опытом и после него скрипт останавливает ресурсы `p7`–`p9`, отсоединяет loop-устройства и удаляет файлы. Файлы ресурсов содержат `options { quorum majority; on-no-quorum io-error; auto-promote yes; }`. P7 и P8 запущены по одному разу, P9 — дважды (см. «Отклонения и правки скрипта»). Метки времени в выводе P8 — по часам узлов. После записанных прогонов скрипт доработан (очистка при сбое через `trap … EXIT`, ожидание писателей перед `umount`, проверка кодов возврата подготовительных шагов и наличия строки `rc=`, `mktemp` вместо фиксированных путей); доработанная версия не запускалась `[проверить: прогон `pre-csi.sh p7`, `p8`, `p9` после правки]`.
+Дата: 2026-11-13. Стенд тот же: три ВМ Lima, ядро `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0 (версии заново не снимались). Опыты выполняет `stand/spike/pre-csi.sh <p7|p8|p9|p10>`: перед опытом и после него скрипт останавливает ресурсы `p7`–`p10`, отсоединяет loop-устройства и удаляет файлы. Файлы ресурсов содержат `options { quorum majority; on-no-quorum io-error; auto-promote yes; }`. P7 и P8 запущены по одному разу, P9 — дважды (см. «Отклонения и правки скрипта»), P10 — три раза (см. P10 ниже). Метки времени в выводе P8 — по часам узлов. После записанных прогонов скрипт доработан (очистка при сбое через `trap … EXIT`, ожидание писателей перед `umount`, проверка кодов возврата подготовительных шагов и наличия строки `rc=`, `mktemp` вместо фиксированных путей); доработанная версия не запускалась `[проверить: прогон `pre-csi.sh p7`, `p8`, `p9` после правки]`.
 
 | Опыт | Условия | Команда | Код возврата | Вывод | Прогонов |
 |---|---|---|---|---|---|
@@ -3612,6 +3612,12 @@ OK: stand is up
 | P9 (3) | то же | `dd … \| od -An -tx1` на `dv-2` (с `set -o pipefail`) | 1 | stderr `dd: failed to open '/dev/drbd1009': Wrong medium type`; stdout `od` пуст | 1 |
 | P9 (4) | `/dev/drbd1999` не существует (`ls -l`: код 2, `No such file or directory`) | `blkid -p -o value -s TYPE /dev/drbd1999` | 2 | stdout и stderr пусты | код возврата — 2, stdout и stderr — 1 |
 | P9 (4) | то же | `dd … \| od -An -tx1` на `dv-2` (с `set -o pipefail`) | 1 | stderr `dd: failed to open '/dev/drbd1999': No such file or directory` | 1 |
+| P10 (1) | `p10` (minor 1010, порт 7010, 1 ГиБ, `--max-peers=7`, три узла с копией), сразу после `create-md --force --max-peers=7`, ресурс не поднимался | `drbdadm dump-md p10` на `dv-1` | 0 | `node-id -1`, `current-uuid 0x0000000000000004`, `flags 0x00000080`, `members 0x0000000000000000`; `peer[0]`–`peer[31]`: `bitmap-index -1`, `bitmap-uuid 0x0000000000000000`, `flags 0x00000000`; `history-uuids` — 32 значения `0x0000000000000000`; `la-size-sect 0`; все `# bits-set[0..6]` равны 0 | 2 |
+| P10 (2) | после `up` и `down` на `dv-1`; `dv-2` и `dv-3` не настраивались | `drbdadm dump-md p10`, затем `apply-al`, затем снова `dump-md` | 255, 255 (через 5 с), 0 (`apply-al`), 0 | до `apply-al` stdout пуст, stderr `Found meta data is "unclean", please apply-al first`; после: `node-id 0`, `current-uuid 0x0000000000000004`, `flags 0x00000480`, `members 0x0000000000000001`; `peer[1]` `bitmap-index 1`, `peer[2]` `bitmap-index 0`, у всех слотов `bitmap-uuid` и `flags` равны 0; `history-uuids` нули, `la-size-sect 0` | 2 |
+| P10 (3) | три узла подняты, связи `Connected`, диски `Inconsistent`, пропуска синхронизации нет, затем `down` на `dv-1` | то же | 255, 255, 0, 0 | после `apply-al`: `current-uuid 0x0000000000000004`, `flags 0x00000480`, `bitmap-uuid` всех слотов 0, `history-uuids` нули, `bits-set` нули, `la-size-sect 0`; `peer[0]` `flags 0x00010000 # exists`, `peer[1]` и `peer[2]` `flags 0x00000052 # <=outdated \| seen \| 0x40=?` | 2 |
+| P10 (4) | `dv-1` поднят снова, `new-current-uuid --clear-bitmap p10/0` на `dv-1`, все три `UpToDate`, затем `down` на `dv-1` | то же | 255, 255, 0, 0 | после `apply-al`: `flags 0x00000091`; `current-uuid` прогон 1 `0x0240DDD21A4B2CE8`, прогон 2 `0x43522DBE2645857A`; `peer[3]`–`peer[31]`: `bitmap-uuid` прогон 1 `0x5400D259A0DF9D13`, прогон 2 `0x7C55463636456D08`, `flags 0x00000020 # divergence`; `peer[1]`, `peer[2]` `flags 0x00000010 # seen`; `history-uuids` нули; `la-size-sect 2096632` | 2 |
+| P10 (5) | `dv-1` поднят снова, `mkfs.ext4 -q` и файл на `dv-2`, все `UpToDate`, затем `down` на `dv-1` | то же | 255, 255, 0, 0 | `flags 0x00000091`; `la-size-sect 2096632`; `current-uuid` прогон 1 `0x5E59F70730D0DDAC`, прогон 2 `0xA6C47762AA5BC552`; `history-uuids[0]` равен `current-uuid` состояния (4) (прогон 1 `0x0240DDD21A4B2CE8`), остальные нули; `# bits-set[2..6] 262079`; `peer[3]`–`peer[31]` `bitmap-uuid` ненулевой (прогон 1 `0x5400D259A0DF9D13`, прогон 2 `0x7C55463636456D08`) | 2 |
+| P10 (6) | `create-md --force --max-peers=7` на `dv-1` при `UpToDate` у `dv-2` и `dv-3`, `up`, полная синхронизация, `down` | то же | 255, 255, 0, 0 | `flags 0x00000091`; `la-size-sect 2096632`; `current-uuid` равен `current-uuid` состояния (5) у обоих прогонов; `device-uuid` другой, чем в (1)–(5); `# bits-set[0] 1024`, `# bits-set[2..6] 262079`; `peer[3]`–`peer[31]` `bitmap-uuid` прогон 1 `0xDFB51D0831B0A7DA`, прогон 2 `0x189AE62E9C528BD0` | 2 |
 
 Наблюдения в пределах записанного:
 
@@ -3621,6 +3627,13 @@ OK: stand is up
 - P8, сравнение номеров (шаг 5 задания): `acked=10875 on-volume=10876`, номер на томе на единицу больше подтверждённого. `on-volume` прочитан командой `tail -n 1 /mnt/pa/log` на `dv-1` с файловой системы, смонтированной на `/dev/drbd1008`; копия на `dv-2` не читалась.
 - P8, запись во время повторного подключения: записанный хвост `watch.sh` после возврата `dv-3` начинается в 19:47:33.237 и не покрывает 19:47:27–31 (`adjust` в 19:47:27.567, handshake с `dv-3` в 19:47:31 по `dmesg`), поэтому продолжалась ли запись в этот интервал, вывод не показывает `[проверить: запись во время повторного подключения стороны]`.
 - P9: в состоянии (3) на `dv-2` и `blkid`, и `dd` получили `Wrong medium type` (на `dv-2` роль `Secondary`, `open:no`). Код возврата `blkid` равен 2 в состояниях (1), (3) и (4). Состояние (3) отличается от (1) и (4) по stderr: `Wrong medium type` в (3), пусто в (1) и (4). Состояния (1) и (4) отличаются только вторым признаком, чтением `dd`: в (1) `dd` открывает устройство и читает `00 00`, в (4) не может открыть его (`No such file or directory`, код 1). В (4) `blkid` ничего не печатает. Отсутствие устройства проверено для одного имени, `/dev/drbd1999`.
+
+- P10, повторы: скрипт запущен трижды. Первый прогон (скрипт без `apply-al`) дал `dump-md` с кодом 255 и сообщением `Found meta data is "unclean", please apply-al first` в состояниях (2)–(6), сам вывод в протокол не включён. После добавления `apply-al` в скрипт выполнены два прогона, оба полностью приведены в числах таблицы; сырой вывод — прогон 1 целиком, прогон 2 только для состояний (1) и (4). Состояния (1)–(6) в обоих прогонах дали одинаковые коды и одинаковые значения полей, кроме значений, которые DRBD генерирует случайно (`device-uuid`, `current-uuid` после (3), `bitmap-uuid` слотов 3–31, метка времени в заголовке).
+- P10, `dump-md` после `up`: во всех 15 случаях (состояния (2)–(6), три прогона) первый `dump-md` после `drbdadm down` вернул код 255 со stderr `Found meta data is "unclean", please apply-al first` и пустым stdout; повторный через 5 с — тот же результат; после `drbdadm apply-al p10` — код 0 с полным дампом. Причина флага AL `unclean` после штатного `down` не выяснялась `[проверить: почему метаданные после `drbdadm down` считаются unclean]`. Состояние (1) (без `up`) дало код 0 без `apply-al`.
+- P10, поля, одинаковые в состояниях (1)–(3) и отличающиеся в (4)–(6): `current-uuid` — `0x0000000000000004` в (1)–(3) у обоих прогонов, другое значение в (4)–(6); верхние `flags` — `0x00000080` в (1), `0x00000480` в (2) и (3), `0x00000091` в (4)–(6); `bitmap-uuid` слотов 3–31 — `0x0000000000000000` в (1)–(3), ненулевой в (4)–(6) (значение меняется от прогона к прогону); `flags` слотов 3–31 — `0x00000000` в (1)–(3), `0x00000020 # divergence` в (4)–(6); `la-size-sect` — `0` в (1)–(3), `2096632` в (4)–(6).
+- P10, поля, которые состояния (1)–(3) от (4)–(6) не разделяют: `history-uuids` нули не только в (1)–(3), но и в (4); `members` — `0x0000000000000001` в (2)–(6); `features` — `0x0000000000000001` во всех; `bitmap-uuid` слотов 0–2 — нули во всех состояниях; `bitmap-dagtag` — нули во всех; `la-peer-max-bio-size` — `0` в (1), `1048576` в (2)–(6). `node-id`, `bitmap-index` слотов 1 и 2 и `members` в (1) отличаются от (2) и (3): они меняются после первого `up` и идентификатором данных не являются (вывод только о том, что значения различаются).
+- P10, состояние (3) отличается от (2) только флагами слотов: `peer[0]` `0x00010000 # exists`, `peer[1]` и `peer[2]` `0x00000052`; `current-uuid`, все `bitmap-uuid`, `history-uuids` и `bits-set` те же, что в (1) и (2). Значение бита `0x40` в выводе помечено `0x40=?`, смысл битов верхних `flags` в выводе не расшифрован `[проверить: смысл битов 0x400 и 0x40]`.
+- P10, границы вывода: в состояниях (1)–(3) на устройство DRBD не писали и `primary --force` не вызывали. Данные, записанные в файл напрямую в обход DRBD, `dump-md` не показывает: он читает только область метаданных `[проверить: дамп для файла, в который писали напрямую при нетронутых метаданных]`. Размер дампа: 249–269 строк; слотов `peer[n]` 32 при `max-peers 7`, `history-uuids` — 32 значения, `bitmap[0..6]` — 7 блоков.
 
 ### Отклонения и правки скрипта
 
@@ -4191,7 +4204,2519 @@ rc=1
 dd: failed to open '/dev/drbd1999': No such file or directory
 ```
 
-### Очистка стенда после опытов P7–P9
+### P10. Метаданные DRBD в шести состояниях
+
+Ресурс `p10`: `dv-1` (`node-id` 0), `dv-2` (1), `dv-3` (2), у всех копия `/dev/ambar/p10` на 1 ГиБ, `meta-disk internal`, minor 1010, порт 7010, `create-md --force --max-peers=7` на всех трёх. Дамп снимается на `dv-1` при остановленном ресурсе; `dv-2` и `dv-3` в опыте остаются поднятыми, когда это указано в состоянии. В состояниях (2)–(6) дамп после `down` отвечает кодом 255, поэтому скрипт повторяет его через 5 с и затем после `drbdadm apply-al p10`; в таблице и ниже значения полей взяты из последнего успешного дампа. Время в заголовках дампов — по часам `dv-1`.
+
+```bash
+stand/spike/pre-csi.sh p10
+```
+
+Прогон 1, вывод целиком:
+
+```text
+
+### P10: full drbdadm dump-md of dv-1 in six states, resource p10 on dv-1, dv-2, dv-3
+$ [dv-1] drbdadm create-md --force --max-peers=7 p10
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p10
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm create-md --force --max-peers=7 p10
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+
+### P10 (1): right after create-md --force --max-peers=7, never up
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:45:16 +0000 [1794573916]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id -1;
+current-uuid 0x0000000000000004;
+flags 0x00000080;
+members 0x0000000000000000;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[1] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[2] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+history-uuids {
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 257;
+la-size-sect 0;
+bm-byte-per-bit 4096;
+device-uuid 0x9A9C813A219E8F2D;
+la-peer-max-bio-size 0;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 0;
+bitmap[0] {
+}
+# bits-set[0] 0;
+bitmap[1] {
+}
+# bits-set[1] 0;
+bitmap[2] {
+}
+# bits-set[2] 0;
+bitmap[3] {
+}
+# bits-set[3] 0;
+bitmap[4] {
+}
+# bits-set[4] 0;
+bitmap[5] {
+}
+# bits-set[5] 0;
+bitmap[6] {
+}
+# bits-set[6] 0;
+--- stderr
+
+### P10 (2): after up and down on dv-1 alone, dv-2 and dv-3 never configured
+$ [dv-1] drbdadm up p10
+rc=0
+$ [dv-1] drbdsetup status p10 --verbose
+p10 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:Inconsistent backing_dev:/dev/ambar/p10 quorum:no
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+$ [dv-1] drbdadm down p10
+rc=0
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+--- again after 5 s
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+$ [dv-1] drbdadm apply-al p10
+rc=0
+--- again after apply-al
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:45:31 +0000 [1794573931]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id 0;
+current-uuid 0x0000000000000004;
+flags 0x00000480;
+members 0x0000000000000001;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[1] {
+    bitmap-index 1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[2] {
+    bitmap-index 0;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+history-uuids {
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 1237;
+la-size-sect 0;
+bm-byte-per-bit 4096;
+device-uuid 0x9A9C813A219E8F2D;
+la-peer-max-bio-size 1048576;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 0;
+bitmap[0] {
+}
+# bits-set[0] 0;
+bitmap[1] {
+}
+# bits-set[1] 0;
+bitmap[2] {
+}
+# bits-set[2] 0;
+bitmap[3] {
+}
+# bits-set[3] 0;
+bitmap[4] {
+}
+# bits-set[4] 0;
+bitmap[5] {
+}
+# bits-set[5] 0;
+bitmap[6] {
+}
+# bits-set[6] 0;
+--- stderr
+
+### P10 (3): all three up and connected, disks Inconsistent, no initial-sync skip; then down on dv-1
+$ [dv-1] drbdadm up p10
+rc=0
+$ [dv-2] drbdadm up p10
+rc=0
+$ [dv-3] drbdadm up p10
+rc=0
+wait: dv-1: two connections Connected after 2 s at most
+wait: dv-2: two connections Connected after 2 s at most
+wait: dv-3: two connections Connected after 2 s at most
+$ [dv-1] drbdsetup status p10 --verbose
+p10 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:Inconsistent backing_dev:/dev/ambar/p10 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p10 --verbose
+p10 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:Inconsistent backing_dev:/dev/ambar/p10 quorum:yes
+      open:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+
+rc=0
+$ [dv-3] drbdsetup status p10 --verbose
+p10 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:Inconsistent backing_dev:/dev/ambar/p10 quorum:yes
+      open:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Inconsistent resync-suspended:no
+
+rc=0
+$ [dv-1] drbdadm down p10
+rc=0
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+--- again after 5 s
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+$ [dv-1] drbdadm apply-al p10
+rc=0
+--- again after apply-al
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:45:52 +0000 [1794573952]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id 0;
+current-uuid 0x0000000000000004;
+flags 0x00000480;
+members 0x0000000000000001;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00010000; # exists
+}
+peer[1] {
+    bitmap-index 1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000052; # <=outdated | seen | 0x40=?
+}
+peer[2] {
+    bitmap-index 0;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000052; # <=outdated | seen | 0x40=?
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+history-uuids {
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 1237;
+la-size-sect 0;
+bm-byte-per-bit 4096;
+device-uuid 0x9A9C813A219E8F2D;
+la-peer-max-bio-size 1048576;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 0;
+bitmap[0] {
+}
+# bits-set[0] 0;
+bitmap[1] {
+}
+# bits-set[1] 0;
+bitmap[2] {
+}
+# bits-set[2] 0;
+bitmap[3] {
+}
+# bits-set[3] 0;
+bitmap[4] {
+}
+# bits-set[4] 0;
+bitmap[5] {
+}
+# bits-set[5] 0;
+bitmap[6] {
+}
+# bits-set[6] 0;
+--- stderr
+
+### P10 (4): dv-1 up again, new-current-uuid --clear-bitmap on dv-1, all UpToDate; then down on dv-1
+$ [dv-1] drbdadm up p10
+rc=0
+wait: dv-1: two connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p10/0
+rc=0
+wait: dv-1: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-2: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-3: own disk UpToDate, two peers UpToDate after 2 s at most
+$ [dv-1] drbdsetup status p10 --verbose
+p10 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p10 --verbose
+p10 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-3] drbdsetup status p10 --verbose
+p10 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] drbdadm down p10
+rc=0
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+--- again after 5 s
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+$ [dv-1] drbdadm apply-al p10
+rc=0
+--- again after apply-al
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:46:14 +0000 [1794573974]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id 0;
+current-uuid 0x0240DDD21A4B2CE8;
+flags 0x00000091;
+members 0x0000000000000001;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00010000; # exists
+}
+peer[1] {
+    bitmap-index 1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[2] {
+    bitmap-index 0;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+history-uuids {
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 1237;
+la-size-sect 2096632;
+bm-byte-per-bit 4096;
+device-uuid 0x9A9C813A219E8F2D;
+la-peer-max-bio-size 1048576;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 229376;
+bitmap[0] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[0] 0;
+bitmap[1] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[1] 0;
+bitmap[2] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[2] 0;
+bitmap[3] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[3] 0;
+bitmap[4] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[4] 0;
+bitmap[5] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[5] 0;
+bitmap[6] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[6] 0;
+--- stderr
+
+### P10 (5): dv-1 up again, mkfs.ext4 and a file on dv-2, all UpToDate; then down on dv-1
+$ [dv-1] drbdadm up p10
+rc=0
+wait: dv-1: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-2: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-3: own disk UpToDate, two peers UpToDate after 2 s at most
+$ [dv-2] mkfs.ext4 -q /dev/drbd1010
+rc=0
+wait: dv-1: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-2: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-3: own disk UpToDate, two peers UpToDate after 2 s at most
+$ [dv-1] drbdsetup status p10 --verbose
+p10 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p10 --verbose
+p10 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-3] drbdsetup status p10 --verbose
+p10 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] drbdadm down p10
+rc=0
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+--- again after 5 s
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+$ [dv-1] drbdadm apply-al p10
+rc=0
+--- again after apply-al
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:46:37 +0000 [1794573997]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id 0;
+current-uuid 0x5E59F70730D0DDAC;
+flags 0x00000091;
+members 0x0000000000000001;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00010000; # exists
+}
+peer[1] {
+    bitmap-index 1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[2] {
+    bitmap-index 0;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x5400D259A0DF9D13;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+history-uuids {
+        0x0240DDD21A4B2CE8; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 1237;
+la-size-sect 2096632;
+bm-byte-per-bit 4096;
+device-uuid 0x9A9C813A219E8F2D;
+la-peer-max-bio-size 1048576;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 229376;
+bitmap[0] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[0] 0;
+bitmap[1] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[1] 0;
+bitmap[2] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[2] 262079;
+bitmap[3] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[3] 262079;
+bitmap[4] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[4] 262079;
+bitmap[5] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[5] 262079;
+bitmap[6] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[6] 262079;
+--- stderr
+
+### P10 (6): full resync onto dv-1: down, create-md --force, up while dv-2 and dv-3 are UpToDate; then down
+$ [dv-1] drbdadm create-md --force --max-peers=7 p10
+
+You want me to create a v09 style flexible-size internal meta data block.
+There appears to be a v09 flexible-size internal meta data block
+already in place on /dev/ambar/p10 at byte offset 1073737728
+
+Do you really want to overwrite the existing meta-data?
+*** confirmation forced via --force option ***
+
+Do you want to proceed?
+*** confirmation forced via --force option ***
+initializing bitmap (224 KB) to all zero
+md_offset 1073737728
+al_offset 1073704960
+bm_offset 1073475584
+
+Found ext3 filesystem
+     1048316 kB data area apparently used
+     1048316 kB left usable by current configuration
+
+Even though it looks like this would place the new meta data into
+unused space, you still need to confirm, as this is only a guess.
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p10
+rc=0
+wait: dv-1: own disk UpToDate, two peers UpToDate after 10 s at most
+wait: dv-2: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-3: own disk UpToDate, two peers UpToDate after 2 s at most
+$ [dv-1] drbdsetup status p10 --verbose
+p10 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p10 --verbose
+p10 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-3] drbdsetup status p10 --verbose
+p10 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] drbdadm down p10
+rc=0
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+--- again after 5 s
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+$ [dv-1] drbdadm apply-al p10
+rc=0
+--- again after apply-al
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:47:06 +0000 [1794574026]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id 0;
+current-uuid 0x5E59F70730D0DDAC;
+flags 0x00000091;
+members 0x0000000000000001;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00010000; # exists
+}
+peer[1] {
+    bitmap-index 1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[2] {
+    bitmap-index 0;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0xDFB51D0831B0A7DA;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+history-uuids {
+        0x0240DDD21A4B2CE8; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 1237;
+la-size-sect 2096632;
+bm-byte-per-bit 4096;
+device-uuid 0xF575454F6D1C8D06;
+la-peer-max-bio-size 1048576;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 229376;
+bitmap[0] {
+   # at 0kB
+    16 times 0xFFFFFFFFFFFFFFFF;
+    4080 times 0x0000000000000000;
+}
+# bits-set[0] 1024;
+bitmap[1] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[1] 0;
+bitmap[2] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[2] 262079;
+bitmap[3] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[3] 262079;
+bitmap[4] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[4] 262079;
+bitmap[5] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[5] 262079;
+bitmap[6] {
+   # at 0kB
+    4092 times 0xFFFFFFFFFFFFFFFF;
+    0xFFFFFFFFFFFFFFFF; 0xFFFFFFFFFFFFFFFF; 0x7FFFFFFFFFFFFFFF; 0x0000000000000000;
+}
+# bits-set[6] 262079;
+--- stderr
+```
+
+Прогон 2, состояния (1) и (4) (остальные состояния прогона 2 в вывод не включены, их значения — в таблице):
+
+```text
+### P10 (1): right after create-md --force --max-peers=7, never up
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:49:00 +0000 [1794574140]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id -1;
+current-uuid 0x0000000000000004;
+flags 0x00000080;
+members 0x0000000000000000;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[1] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[2] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000000;
+}
+history-uuids {
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 257;
+la-size-sect 0;
+bm-byte-per-bit 4096;
+device-uuid 0x1B25D576AC5F5051;
+la-peer-max-bio-size 0;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 0;
+bitmap[0] {
+}
+# bits-set[0] 0;
+bitmap[1] {
+}
+# bits-set[1] 0;
+bitmap[2] {
+}
+# bits-set[2] 0;
+bitmap[3] {
+}
+# bits-set[3] 0;
+bitmap[4] {
+}
+# bits-set[4] 0;
+bitmap[5] {
+}
+# bits-set[5] 0;
+bitmap[6] {
+}
+# bits-set[6] 0;
+--- stderr
+
+### P10 (4): dv-1 up again, new-current-uuid --clear-bitmap on dv-1, all UpToDate; then down on dv-1
+$ [dv-1] drbdadm up p10
+rc=0
+wait: dv-1: two connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p10/0
+rc=0
+wait: dv-1: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-2: own disk UpToDate, two peers UpToDate after 2 s at most
+wait: dv-3: own disk UpToDate, two peers UpToDate after 2 s at most
+$ [dv-1] drbdsetup status p10 --verbose
+p10 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p10 --verbose
+p10 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-3] drbdsetup status p10 --verbose
+p10 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1010 disk:UpToDate backing_dev:/dev/ambar/p10 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] drbdadm down p10
+rc=0
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+--- again after 5 s
+$ [dv-1] drbdadm dump-md p10
+rc=255
+--- stdout
+--- stderr
+Found meta data is "unclean", please apply-al first
+Command 'drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md' terminated with exit code 255
+$ [dv-1] drbdadm apply-al p10
+rc=0
+--- again after apply-al
+$ [dv-1] drbdadm dump-md p10
+rc=0
+--- stdout
+# DRBD meta data dump
+# 2026-11-13 12:49:58 +0000 [1794574198]
+# lima-dv-1> drbdmeta 1010 v09 /dev/ambar/p10 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id 0;
+current-uuid 0x43522DBE2645857A;
+flags 0x00000091;
+members 0x0000000000000001;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00010000; # exists
+}
+peer[1] {
+    bitmap-index 1;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[2] {
+    bitmap-index 0;
+    bitmap-uuid 0x0000000000000000;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000010; # seen
+}
+peer[3] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[4] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[5] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[6] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[7] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[8] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[9] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[10] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[11] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[12] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[13] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[14] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[15] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[16] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[17] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[18] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[19] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[20] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[21] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[22] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[23] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[24] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[25] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[26] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[27] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[28] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[29] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[30] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+peer[31] {
+    bitmap-index -1;
+    bitmap-uuid 0x7C55463636456D08;
+    bitmap-dagtag 0x0000000000000000;
+    flags 0x00000020; # divergence
+}
+history-uuids {
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+        0x0000000000000000; 0x0000000000000000; 0x0000000000000000; 0x0000000000000000;
+}
+# al-extents 1237;
+la-size-sect 2096632;
+bm-byte-per-bit 4096;
+device-uuid 0x1B25D576AC5F5051;
+la-peer-max-bio-size 1048576;
+al-stripes 1;
+al-stripe-size-4k 8;
+# bm-bytes 229376;
+bitmap[0] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[0] 0;
+bitmap[1] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[1] 0;
+bitmap[2] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[2] 0;
+bitmap[3] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[3] 0;
+bitmap[4] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[4] 0;
+bitmap[5] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[5] 0;
+bitmap[6] {
+   # at 0kB
+    4096 times 0x0000000000000000;
+}
+# bits-set[6] 0;
+--- stderr
+```
+
+### Очистка стенда после опытов P7–P10
 
 ```bash
 stand/spike/pre-csi.sh clean && stand/check.sh
@@ -4201,7 +6726,7 @@ stand/spike/pre-csi.sh clean && stand/check.sh
 OK: stand is up
 ```
 
-На трёх узлах `drbdsetup status` — `# No currently configured DRBD found.`, `losetup -l -n | wc -l` = 0, `/dev/ambar` и `/mnt/pa` отсутствуют, в `/var/tmp` только `cloud-init` и каталог `systemd-private-…`.
+На трёх узлах `drbdsetup status` — `# No currently configured DRBD found.`, `losetup -l -n | wc -l` = 0, `/dev/ambar` и `/mnt/pa` отсутствуют, в `/var/tmp` только `cloud-init` и каталог `systemd-private-…`. После опытов P10 на `dv-1`: `drbdsetup status` — `# No currently configured DRBD found.`, `/dev/ambar` и `/var/lib/rancher/ambar/volumes` пусты, `stand/check.sh` — `OK: stand is up` (остальные узлы не смотрелись `[проверить: dv-2, dv-3 после P10]`).
 
 ## Проверки агента на стенде
 
