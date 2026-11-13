@@ -174,7 +174,7 @@ pub fn valid_volume_name(name: &str) -> bool {
 
 /// Hostname-like: DRBD writes the name into the resource file verbatim, so
 /// anything beyond these characters could inject config syntax.
-fn valid_node_name(name: &str) -> bool {
+pub fn valid_node_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let allowed = |b: &u8| b.is_ascii_alphanumeric() || matches!(*b, b'.' | b'_' | b'-');
     !bytes.is_empty()
