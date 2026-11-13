@@ -327,3 +327,120 @@ fn a_backing_file_that_ends_with_a_star_is_an_error_not_no_loop() {
     assert!(matches!(err, BackingError::UnexpectedOutput { .. }), "{err}");
     assert!(err.to_string().contains("a-very-long-na*"), "{err}");
 }
+
+// ---- loop_holders: the name-only form of a detached mount ----
+
+/// A runner for an image `<dir>/<vol>.img`: `losetup --list` prints `text`,
+/// `losetup -j` prints `same_inode` (device names, one per line).
+fn detached_node(text: String, same_inode: &'static [&'static str]) -> FakeRunner {
+    FakeRunner::new(move |_, args| {
+        if args.first() == Some(&"-j") {
+            let lines: String = same_inode
+                .iter()
+                .map(|d| format!("{d}: [65025]:262217 (/vol.img)\n"))
+                .collect();
+            return out(0, &lines, "");
+        }
+        out(0, &text, "")
+    })
+}
+
+fn image_in(tmp: &TempDir, exists: bool) -> std::path::PathBuf {
+    let image = tmp.path().join("vol.img");
+    if exists {
+        fs::write(&image, b"").unwrap();
+    }
+    image
+}
+
+#[test]
+fn a_name_only_line_of_an_existing_image_is_a_holder_when_losetup_j_lists_the_device() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, true);
+    let runner = detached_node("/dev/loop0 /vol.img\n".to_string(), &["/dev/loop0"]);
+    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", false)]);
+    assert_eq!(runner.calls().len(), 2);
+    assert!(runner.calls()[1].starts_with("losetup -j "), "{:?}", runner.calls());
+}
+
+#[test]
+fn a_name_only_line_of_an_existing_image_is_not_a_holder_when_losetup_j_does_not_list_it() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, true);
+    // `losetup -j` names another device (or none): the line is a foreign file.
+    for same_inode in [&["/dev/loop1"][..], &[][..]] {
+        let runner = detached_node("/dev/loop0 /vol.img\n".to_string(), same_inode);
+        assert!(loop_holders(&runner, &image).unwrap().is_empty(), "{same_inode:?}");
+    }
+}
+
+#[test]
+fn a_deleted_name_only_line_is_a_deleted_holder_of_a_missing_image() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, false);
+    let runner = detached_node("/dev/loop0 /vol.img (deleted)\n".to_string(), &[]);
+    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", true)]);
+    assert_eq!(runner.calls().len(), 1, "no inode lookup for a missing image");
+}
+
+#[test]
+fn a_name_only_line_of_a_missing_image_is_kept_without_an_inode_lookup() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, false);
+    let runner = detached_node("/dev/loop0 /vol.img\n".to_string(), &[]);
+    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", false)]);
+    assert_eq!(runner.calls().len(), 1);
+}
+
+#[test]
+fn a_deleted_name_only_line_is_kept_even_when_the_image_exists() {
+    // The image was recreated under the same name: the old inode is still held.
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, true);
+    let runner = detached_node("/dev/loop0 /vol.img (deleted)\n".to_string(), &[]);
+    assert_eq!(loop_holders(&runner, &image).unwrap(), [holder("/dev/loop0", true)]);
+}
+
+#[test]
+fn only_the_exact_root_form_matches_by_name() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, false);
+    let text = "/dev/loop0 /other/dir/vol.img\n/dev/loop1 /vol.imgx\n/dev/loop2 /xvol.img\n\
+                /dev/loop3 /x/vol.img (deleted)\n/dev/loop4 vol.img\n";
+    let runner = detached_node(text.to_string(), &[]);
+    assert!(loop_holders(&runner, &image).unwrap().is_empty());
+}
+
+#[test]
+fn the_name_form_is_confirmed_once_for_all_unconfirmed_lines() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, true);
+    let text = format!(
+        "/dev/loop0 /vol.img\n/dev/loop1 /vol.img\n/dev/loop2 {}\n/dev/loop3 /vol.img (deleted)\n",
+        image.canonicalize().unwrap().display()
+    );
+    let runner = detached_node(text, &["/dev/loop1", "/dev/loop2"]);
+    assert_eq!(
+        loop_holders(&runner, &image).unwrap(),
+        [
+            holder("/dev/loop1", false),
+            holder("/dev/loop2", false),
+            holder("/dev/loop3", true)
+        ]
+    );
+    assert_eq!(runner.calls().iter().filter(|c| c.starts_with("losetup -j")).count(), 1);
+}
+
+#[test]
+fn a_failed_inode_lookup_is_an_error_not_no_holder() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, true);
+    let runner = FakeRunner::new(|_, args| {
+        if args.first() == Some(&"-j") {
+            return out(1, "", "losetup: denied");
+        }
+        out(0, "/dev/loop0 /vol.img\n", "")
+    });
+    let err = loop_holders(&runner, &image).unwrap_err();
+    assert!(err.to_string().contains("denied"), "{err}");
+}

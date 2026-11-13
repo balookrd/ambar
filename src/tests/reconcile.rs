@@ -1143,6 +1143,26 @@ fn remove_detaches_the_loop_device_of_a_deleted_image() {
 }
 
 #[test]
+fn remove_detaches_the_loop_device_listed_in_the_detached_mount_form() {
+    // After the agent pod that attached the loop is replaced, the kernel lists
+    // `/<name>.img (deleted)` (Task 13, stand).
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_link_without_image(&paths);
+    let runner = node_with_listing("/dev/loop5 /spike.img (deleted)\n/dev/loop6 /other.img (deleted)\n".to_string());
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    assert_eq!(
+        reconciler.remove("spike").unwrap(),
+        ["detach-loop", "remove-marker", "remove-link"]
+    );
+    assert_eq!(count(&runner, "losetup -d /dev/loop5"), 1);
+    assert_eq!(count(&runner, "losetup -d"), 1);
+}
+
+#[test]
 fn remove_leaves_a_loop_device_of_another_file_alone() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
