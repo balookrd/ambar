@@ -89,7 +89,7 @@ use crate::backing::{self, BackingError};
 use crate::drbd::adm::{Drbd, DrbdError, Metadata};
 use crate::drbd::resource;
 use crate::drbd::status::{DiskState, ResourceStatus};
-use crate::exec::{Runner, command_line};
+use crate::exec::Runner;
 use crate::model::{InitialSync, SpecError, VolumeSpec, valid_volume_name};
 use crate::paths::Paths;
 
@@ -492,6 +492,28 @@ impl Reconciler<'_> {
         volume: &str,
         guard: &dyn Fn() -> Result<(), String>,
     ) -> Result<Vec<&'static str>, ReconcileError> {
+        self.remove_guarded(volume, guard, false)
+    }
+
+    /// `remove_checked` for a caller that has shown the node holds no data
+    /// because the resource is not configured: after the guard the status is
+    /// read once more, and a resource that shows up there is refused
+    /// (`ReconcileError::Refused`) before anything is run or changed. `down`
+    /// is never run on this path.
+    pub fn remove_unconfigured(
+        &self,
+        volume: &str,
+        guard: &dyn Fn() -> Result<(), String>,
+    ) -> Result<Vec<&'static str>, ReconcileError> {
+        self.remove_guarded(volume, guard, true)
+    }
+
+    fn remove_guarded(
+        &self,
+        volume: &str,
+        guard: &dyn Fn() -> Result<(), String>,
+        must_be_unconfigured: bool,
+    ) -> Result<Vec<&'static str>, ReconcileError> {
         if !valid_volume_name(volume) {
             return Err(SpecError::Name(volume.to_string()).into());
         }
@@ -503,6 +525,14 @@ impl Reconciler<'_> {
         let mut steps = Vec::new();
         let drbd = Drbd { runner: self.runner };
         if drbd.status(volume)?.is_some() {
+            if must_be_unconfigured {
+                return Err(ReconcileError::Refused {
+                    volume: volume.to_string(),
+                    reason: "the resource is configured in the kernel; a copy without data is removed only while it \
+                             is not"
+                        .to_string(),
+                });
+            }
             drbd.down(volume)?;
             if drbd.status(volume)?.is_some() {
                 return Err(ReconcileError::NotApplied {
@@ -513,10 +543,16 @@ impl Reconciler<'_> {
             steps.push("down");
         }
         let image = self.paths.image(volume);
+        // A missing image can still be held by loop devices (their backing
+        // file shows as `(deleted)`): all of them are detached, found by the
+        // listing that the proof of "no data" uses too.
         let devices = if exists(&image)? {
             backing::find_loops(self.runner, &image)?
         } else {
-            self.loop_of_missing_image(volume)?.into_iter().collect()
+            backing::loop_holders(self.runner, &image)?
+                .into_iter()
+                .map(|holder| holder.device)
+                .collect()
         };
         for device in devices {
             backing::detach_loop(self.runner, &device)?;
@@ -560,29 +596,6 @@ impl Reconciler<'_> {
         // Last step, still under the lock.
         remove_if_present(&self.paths.lock_file(volume))?;
         Ok(steps)
-    }
-
-    /// The loop device the device link points at, when the image is gone and
-    /// `losetup` reports that device's backing file as the (deleted) image.
-    /// After an interrupted `remove` the link can point at a device that was
-    /// detached and since reused for another file; that one is left alone.
-    fn loop_of_missing_image(&self, volume: &str) -> Result<Option<String>, ReconcileError> {
-        let Some(device) = backing::link_target(&self.paths.device_link(volume)) else {
-            return Ok(None);
-        };
-        let args = ["--list", "--noheadings", "--output", "BACK-FILE", device.as_str()];
-        let out = self.runner.run("losetup", &args).map_err(|e| BackingError::Spawn {
-            command: command_line("losetup", &args),
-            message: e.to_string(),
-        })?;
-        if !out.success() {
-            // Not a loop device, or not attached: nothing to detach.
-            return Ok(None);
-        }
-        let image = self.paths.image(volume).display().to_string();
-        let back_file = out.stdout.trim();
-        let ours = back_file == image || back_file.strip_suffix(" (deleted)") == Some(image.as_str());
-        Ok(ours.then_some(device))
     }
 
     /// Takes the exclusive lock of `volume` without waiting; it is held until

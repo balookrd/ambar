@@ -6,7 +6,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::exec::{Runner, command_line};
+use crate::backing::loop_holders;
+use crate::exec::Runner;
 use crate::model::{SpecError, valid_volume_name};
 use crate::paths::Paths;
 use crate::reconcile::{FileState, ReconcileError};
@@ -104,48 +105,13 @@ pub fn synced_marker_present(paths: &Paths, volume: &str) -> Result<bool, Reconc
     exists(&paths.synced_marker(volume))
 }
 
-/// The loop devices attached to the backing file `image`, also when the file
-/// has been deleted: a loop device keeps the deleted inode and `losetup`
-/// shows it as `<path> (deleted)`. `losetup -j <path>` cannot be used for
-/// this: it looks the file up by its path and says nothing for a path that no
-/// longer exists (checked on the stand). The path is compared as given and
-/// with the volumes directory resolved, because `losetup` stores the
-/// canonical path. An `Err` is a reason, in words, why the answer is unknown.
+/// The loop devices attached to the backing file `image`, live or deleted
+/// (`backing::loop_holders`, which `Reconciler::remove_checked` uses too). An
+/// `Err` is a reason, in words, why the answer is unknown.
 pub fn loops_holding(runner: &dyn Runner, image: &Path) -> Result<Vec<String>, String> {
-    let mut paths = vec![image.to_string_lossy().into_owned()];
-    if let (Some(parent), Some(name)) = (image.parent(), image.file_name()) {
-        let parent = parent
-            .canonicalize()
-            .map_err(|e| format!("cannot resolve {}: {e}", parent.display()))?;
-        let resolved = parent.join(name).to_string_lossy().into_owned();
-        if !paths.contains(&resolved) {
-            paths.push(resolved);
-        }
-    }
-    let args = ["--list", "--noheadings", "--output", "NAME,BACK-FILE"];
-    let command = command_line("losetup", &args);
-    let out = runner
-        .run("losetup", &args)
-        .map_err(|e| format!("`{command}` did not run to completion: {e}"))?;
-    if !out.success() {
-        return Err(format!(
-            "`{command}` failed with code {}: {}",
-            out.code,
-            out.stderr.trim()
-        ));
-    }
-    Ok(out
-        .stdout
-        .lines()
-        .filter_map(|line| {
-            let (device, back_file) = line.trim().split_once(char::is_whitespace)?;
-            let back_file = back_file.trim();
-            let ours = paths
-                .iter()
-                .any(|path| back_file == path || back_file.strip_suffix(" (deleted)") == Some(path.as_str()));
-            ours.then(|| device.to_string())
-        })
-        .collect())
+    loop_holders(runner, image)
+        .map(|holders| holders.into_iter().map(|holder| holder.device).collect())
+        .map_err(|e| e.to_string())
 }
 
 fn exists(path: &Path) -> Result<bool, ReconcileError> {

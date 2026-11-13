@@ -249,3 +249,81 @@ fn linking_leaves_no_temporary_behind_and_clears_a_stale_one() {
         .collect();
     assert_eq!(names, ["spike"]);
 }
+
+// ---- loop_holders: the one listing of the loop devices of an image ----
+
+fn holder(device: &str, deleted: bool) -> LoopHolder {
+    LoopHolder {
+        device: device.to_string(),
+        deleted,
+    }
+}
+
+/// A runner whose `losetup --list` prints `text`.
+fn listing(text: String) -> FakeRunner {
+    FakeRunner::new(move |_, _| out(0, &text, ""))
+}
+
+#[test]
+fn loop_holders_tell_a_live_file_from_a_deleted_one() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let runner = listing(format!(
+        "/dev/loop1 /other/a.img\n/dev/loop2 {0}/spike.img\n/dev/loop7 {0}/spike.img (deleted)\n/dev/loop8 {0}/spike.img.bak\n",
+        dir.display()
+    ));
+    let found = loop_holders(&runner, &dir.join("spike.img")).unwrap();
+    assert_eq!(found, [holder("/dev/loop2", false), holder("/dev/loop7", true)]);
+    assert_eq!(runner.calls(), ["losetup --list --noheadings --output NAME,BACK-FILE"]);
+}
+
+#[test]
+fn loop_holders_match_the_path_as_given_and_with_the_directory_resolved() {
+    // `losetup` stores the canonical path; the volumes directory may be a link.
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("link");
+    symlink(&real, &link).unwrap();
+    let canonical = real.canonicalize().unwrap();
+    let text = format!(
+        "/dev/loop4 {}/vol.img (deleted)\n/dev/loop5 {}/vol.img\n",
+        canonical.display(),
+        link.display()
+    );
+    let found = loop_holders(&listing(text), &link.join("vol.img")).unwrap();
+    assert_eq!(found, [holder("/dev/loop4", true), holder("/dev/loop5", false)]);
+}
+
+#[test]
+fn loop_holders_report_a_failed_listing_and_an_unresolvable_directory() {
+    let tmp = TempDir::new().unwrap();
+    let failing = FakeRunner::new(|_, _| out(1, "", "no permission"));
+    let err = loop_holders(&failing, &tmp.path().join("vol.img")).unwrap_err();
+    assert!(err.to_string().contains("no permission"), "{err}");
+    let missing = tmp.path().join("nowhere").join("vol.img");
+    assert!(loop_holders(&listing(String::new()), &missing).is_err());
+}
+
+#[test]
+fn a_line_that_is_not_a_device_and_a_file_is_an_error_not_no_loop() {
+    let tmp = TempDir::new().unwrap();
+    let image = tmp.path().join("vol.img");
+    for text in ["/dev/loop3\n", "garbage\n", "/dev/loop1 /other/a.img\n/dev/loop3\n"] {
+        let err = loop_holders(&listing(text.to_string()), &image).unwrap_err();
+        assert!(matches!(err, BackingError::UnexpectedOutput { .. }), "{text:?}: {err}");
+    }
+    // Blank lines are not lines of the listing.
+    assert!(loop_holders(&listing("\n  \n".to_string()), &image).unwrap().is_empty());
+}
+
+#[test]
+fn a_backing_file_that_ends_with_a_star_is_an_error_not_no_loop() {
+    // util-linux cuts a long name and puts `*` at its end: the line may be this file's.
+    let tmp = TempDir::new().unwrap();
+    let image = tmp.path().join("vol.img");
+    let text = "/dev/loop1 /other/a.img\n/dev/loop3 /var/lib/rancher/ambar/volumes/a-very-long-na*\n";
+    let err = loop_holders(&listing(text.to_string()), &image).unwrap_err();
+    assert!(matches!(err, BackingError::UnexpectedOutput { .. }), "{err}");
+    assert!(err.to_string().contains("a-very-long-na*"), "{err}");
+}

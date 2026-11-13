@@ -121,6 +121,67 @@ pub fn find_loops(runner: &dyn Runner, file: &Path) -> Result<Vec<String>, Backi
         .collect()
 }
 
+/// A loop device that holds an image, and whether it holds the file under its
+/// live path or only the deleted inode (`losetup` prints `<path> (deleted)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopHolder {
+    pub device: String,
+    pub deleted: bool,
+}
+
+/// The loop devices attached to the backing file `image`, also when the file
+/// has been deleted: a loop device keeps the deleted inode. `losetup -j
+/// <path>` cannot be used for this: it looks the file up by its path and says
+/// nothing for a path that no longer exists (checked on the stand), so the
+/// whole listing is read. This is the one place that matches a listing
+/// against an image: the path is compared as given and with its parent
+/// directory resolved, because `losetup` stores the canonical path.
+///
+/// Anything that cannot be understood is an error, never "no loop device": a
+/// failed `losetup`, a parent directory that cannot be resolved, a non-empty
+/// line that is not a device followed by a backing file, and a backing file
+/// ending in `*` (util-linux cuts long names that way, so the line may be
+/// this image's).
+pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>, BackingError> {
+    let mut candidates = vec![image.to_string_lossy().into_owned()];
+    if let (Some(parent), Some(name)) = (image.parent(), image.file_name()) {
+        let parent = parent.canonicalize().map_err(|source| BackingError::Io {
+            action: "resolve",
+            path: parent.display().to_string(),
+            source,
+        })?;
+        let resolved = parent.join(name).to_string_lossy().into_owned();
+        if !candidates.contains(&resolved) {
+            candidates.push(resolved);
+        }
+    }
+    let args = ["--list", "--noheadings", "--output", "NAME,BACK-FILE"];
+    let listing = checked(runner, "losetup", &args)?;
+    let mut holders = Vec::new();
+    for line in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let unexpected = || BackingError::UnexpectedOutput {
+            command: command_line("losetup", &args),
+            output: line.to_string(),
+        };
+        let (device, back_file) = line.split_once(char::is_whitespace).ok_or_else(unexpected)?;
+        let back_file = back_file.trim();
+        if back_file.ends_with('*') {
+            return Err(unexpected());
+        }
+        let (path, deleted) = match back_file.strip_suffix(" (deleted)") {
+            Some(path) => (path, true),
+            None => (back_file, false),
+        };
+        if candidates.iter().any(|candidate| candidate == path) {
+            holders.push(LoopHolder {
+                device: device.to_string(),
+                deleted,
+            });
+        }
+    }
+    Ok(holders)
+}
+
 /// Attaches a file to a free loop device with direct I/O; returns the device.
 pub fn attach_loop(runner: &dyn Runner, file: &Path) -> Result<String, BackingError> {
     let path = file.to_string_lossy();
