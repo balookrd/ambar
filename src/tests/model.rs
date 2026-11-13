@@ -293,3 +293,9 @@ fn initial_sync_is_case_sensitive() {
     let json = SAMPLE.replace("\"minor\": 1000,", "\"minor\": 1000, \"initialSync\": \"skip\",");
     assert!(matches!(VolumeSpec::from_json(&json), Err(SpecError::Json(_))));
 }
+
+#[test]
+fn node_name_limit_constant_is_what_valid_node_name_enforces() {
+    assert!(valid_node_name(&"a".repeat(MAX_NODE_NAME_LEN)));
+    assert!(!valid_node_name(&"a".repeat(MAX_NODE_NAME_LEN + 1)));
+}

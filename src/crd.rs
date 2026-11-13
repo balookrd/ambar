@@ -3,14 +3,34 @@
 
 use std::net::IpAddr;
 
-use kube::CustomResource;
+use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{InitialSync, Protocol, SpecError, VolumeNode, VolumeSpec};
+use crate::model::{
+    InitialSync, MAX_MINOR, MAX_NODE_ID, MAX_NODE_NAME_LEN, MAX_SIZE_BYTES, Protocol, SpecError, VolumeNode, VolumeSpec,
+};
 
 pub const GROUP: &str = "ambar.balookrd.github.io";
 pub const DRIVER_NAME: &str = "ambar.balookrd.github.io";
+
+/// Longest textual IPv6 address (`ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255`).
+/// Cap for `address`: CEL cost estimation needs bounded strings.
+pub const MAX_ADDRESS_LEN: usize = 45;
+
+/// The generated CRD as committed in `deploy/crd.json`: pretty JSON, trailing newline.
+pub fn crd_json() -> String {
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&ReplicatedVolume::crd()).expect("CRD serializes")
+    )
+}
+
+/// The API server does not know schemars' `uint16`/`uint32`/`uint64` formats and
+/// prints "unrecognized format" on apply; the `minimum`/`maximum` bounds carry the range.
+fn drop_format(schema: &mut schemars::Schema) {
+    schema.remove("format");
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum NodeKind {
@@ -26,16 +46,22 @@ pub enum NodeKind {
 #[serde(rename_all = "camelCase")]
 pub struct MemberNode {
     /// Kubernetes node name, equal to `uname -n` of the node.
-    #[schemars(length(max = 63))]
+    // maxLength: the CEL cost budget needs bounded strings; mirrors the limit of
+    // `model::valid_node_name`.
+    #[schemars(length(max = MAX_NODE_NAME_LEN))]
     pub name: String,
+    #[schemars(range(min = 0, max = MAX_NODE_ID), transform = drop_format)]
     pub node_id: u32,
     /// Address on the replication network; parsed as an IP address by the agent.
-    #[schemars(length(max = 45))]
+    // maxLength: same reason; the longest textual IPv6 address.
+    #[schemars(length(max = MAX_ADDRESS_LEN))]
     pub address: String,
     pub kind: NodeKind,
 }
 
-// Transition rules (`oldSelf`) run on update only. The set of Replica and
+// The first four rules are transition rules (`oldSelf`): they run on update only.
+// The last five run on create and update, so a bad object is refused up front
+// instead of becoming permanent under the immutability rules. The set of Replica and
 // Witness members is compared in both directions plus by size, so that
 // swapping one member for another in a single update is rejected too.
 #[derive(CustomResource, Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -63,18 +89,44 @@ pub struct MemberNode {
     {
         "rule": "!(oldSelf.initialSync == 'Done' && self.initialSync == 'Skip')",
         "message": "initialSync cannot go back to Skip"
+    },
+    {
+        "rule": "self.nodes.filter(n, n.kind == 'Replica').size() >= 2",
+        "message": "at least two Replica nodes are required"
+    },
+    {
+        "rule": "self.nodes.all(a, self.nodes.exists_one(b, b.nodeId == a.nodeId))",
+        "message": "nodeId must be unique among nodes"
+    },
+    {
+        "rule": "self.nodes.all(a, self.nodes.exists_one(b, b.address == a.address))",
+        "message": "address must be unique among nodes"
+    },
+    {
+        "rule": "self.sizeBytes % 4096 == 0",
+        "message": "sizeBytes must be a multiple of 4096"
+    },
+    {
+        "rule": "self.maxPeers >= size(self.nodes) - 1",
+        "message": "maxPeers must be at least the number of other nodes"
     }
 ]))]
 pub struct ReplicatedVolumeSpec {
+    #[schemars(range(min = 4096, max = MAX_SIZE_BYTES), transform = drop_format)]
     pub size_bytes: u64,
     pub protocol: Protocol,
+    #[schemars(range(min = 0, max = MAX_MINOR), transform = drop_format)]
     pub minor: u32,
+    #[schemars(range(min = 1024, max = 65535), transform = drop_format)]
     pub port: u16,
+    #[schemars(range(min = 1, max = MAX_NODE_ID), transform = drop_format)]
     pub max_peers: u32,
     #[serde(default)]
     pub initial_sync: InitialSync,
+    // maxItems: the CEL cost budget needs bounded lists; mirrors the DRBD node
+    // limit, `MAX_NODE_ID + 1` nodes.
     #[schemars(
-        length(max = 32),
+        length(min = 2, max = MAX_NODE_ID + 1),
         extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
     )]
     pub nodes: Vec<MemberNode>,
