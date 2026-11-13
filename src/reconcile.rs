@@ -305,6 +305,10 @@ pub enum ReconcileError {
     MetadataPresent { volume: String },
     #[error("volume {volume:?} is locked by another ambar process; try again later")]
     Busy { volume: String },
+    /// The guard of `remove_checked` refused, under the volume lock; nothing
+    /// was run and nothing was changed.
+    #[error("volume {volume:?} was not removed: {reason}")]
+    Refused { volume: String, reason: String },
     #[error("volume {volume:?}: no loop device is known to point the device link at")]
     NoLoopDevice { volume: String },
 }
@@ -470,12 +474,32 @@ impl Reconciler<'_> {
     }
 
     /// Takes the volume down on this node and deletes its local files.
-    /// Returns the steps that were performed.
+    /// Returns the steps that were performed. No condition is checked: this
+    /// is the behaviour of the `ambar remove` command, which is an operator's
+    /// decision. The agent uses `remove_checked`.
     pub fn remove(&self, volume: &str) -> Result<Vec<&'static str>, ReconcileError> {
+        self.remove_checked(volume, &|| Ok(()))
+    }
+
+    /// `remove` that first takes the volume lock and then calls `guard`
+    /// while holding it. `Err(reason)` aborts with `ReconcileError::Refused`
+    /// before any command is run or any file is touched. The guard sees the
+    /// node as it is under the lock, which no other ambar process can change
+    /// until `remove_checked` returns; a condition checked before the lock
+    /// can be out of date by the time the lock is taken.
+    pub fn remove_checked(
+        &self,
+        volume: &str,
+        guard: &dyn Fn() -> Result<(), String>,
+    ) -> Result<Vec<&'static str>, ReconcileError> {
         if !valid_volume_name(volume) {
             return Err(SpecError::Name(volume.to_string()).into());
         }
         let _lock = self.lock_volume(volume)?;
+        guard().map_err(|reason| ReconcileError::Refused {
+            volume: volume.to_string(),
+            reason,
+        })?;
         let mut steps = Vec::new();
         let drbd = Drbd { runner: self.runner };
         if drbd.status(volume)?.is_some() {

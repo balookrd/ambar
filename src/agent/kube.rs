@@ -12,9 +12,22 @@
 //! | `list` | the reflector cache once the watch has listed once, `Api::list` before that |
 //! | `create` | `Api::create`; HTTP 409 is `Created::Exists` |
 //! | `delete` | `Api::delete`; HTTP 404 is success |
-//! | `edit` | `Api::get_opt`, the edit, `Api::replace` with the `resourceVersion` that was read; HTTP 409 reads again, up to `EDIT_ATTEMPTS` times |
+//! | `remove_finalizer`, `mark_initial_sync_done` | `Api::get_opt`, then `Api::patch` with `Patch::Json`: `test /metadata/uid`, a `test` of the value that is edited, the edit; a refused patch (HTTP 409 or 422) reads again, up to `EDIT_ATTEMPTS` times |
 //! | `apply_node_status` | `Api::patch_status` with `Patch::Apply` and `PatchParams::apply("ambar-<node>").force()`; HTTP 404 is success |
 //! | `watch` | `watcher` (with the default backoff) through a `reflector` that fills the cache |
+//!
+//! Why a JSON patch for the two edits of the object itself (`metadata.finalizers`
+//! and `spec.initialSync`). The API server applies the patch to the stored
+//! object, so fields this build does not know are not read and not written
+//! back (a get, edit, replace of a typed object drops them). The `test`
+//! operations are the preconditions: `/metadata/uid` ties the edit to the
+//! object whose uid the pass saw (an object that was deleted and created again
+//! under the same name has another uid and is not edited), and a `test` of the
+//! value being changed makes the edit apply only to the state it was computed
+//! from. `/metadata/resourceVersion` is not tested: every status write of
+//! every node changes it, and the edits do not depend on anything else.
+//! A failed `test` is HTTP 422 (checked on the stand); the edit is computed
+//! again from a fresh read.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,12 +40,13 @@ use kube::runtime::reflector::{self, Store};
 use kube::runtime::watcher::{self, Event};
 use kube::runtime::{WatchStreamExt, watcher as watcher_fn};
 use kube::{Client, Resource};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::crd::{NodeStatus, ReplicatedVolume};
+use crate::model::InitialSync;
 
-/// How often `edit` reads, edits and replaces an object that other writers
-/// keep changing before it gives up with `ApiError::Conflict`.
+/// How often an edit of the object reads it and patches it again after the
+/// API server refused the patch, before it gives up.
 pub const EDIT_ATTEMPTS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -40,6 +54,9 @@ pub enum ApiError {
     /// HTTP 409 on a write: the object changed since it was read.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// HTTP 422 on a patch: a `test` operation failed, or the result is not valid.
+    #[error("rejected: {0}")]
+    Rejected(String),
     #[error("{0}")]
     Other(String),
 }
@@ -51,9 +68,6 @@ pub enum Created {
     Exists,
 }
 
-/// Object edit with the signature `Volumes::edit` takes: `false` when no change is needed.
-pub type Edit<'a> = &'a (dyn Fn(&mut ReplicatedVolume) -> bool + Send + Sync);
-
 /// What a reconcile loop needs from the API server.
 #[async_trait]
 pub trait Volumes: Send + Sync {
@@ -62,11 +76,15 @@ pub trait Volumes: Send + Sync {
     async fn create(&self, volume: &ReplicatedVolume) -> Result<Created, ApiError>;
     /// Not found is success.
     async fn delete(&self, name: &str) -> Result<(), ApiError>;
-    /// Get, edit, replace with the `resourceVersion` that was read; read
-    /// again and repeat on a conflict, `EDIT_ATTEMPTS` times in all.
-    /// `Some(object)`: the edited object was written. `None`: the object does
-    /// not exist, or `edit` returned `false` (nothing to change).
-    async fn edit(&self, name: &str, edit: Edit<'_>) -> Result<Option<ReplicatedVolume>, ApiError>;
+    /// Removes `finalizer` from the object `name`, if the object has the uid
+    /// `uid`. `true`: the finalizer was removed. `false`: the object does not
+    /// exist, has another uid (it was created again), or does not carry the
+    /// finalizer; nothing was changed.
+    async fn remove_finalizer(&self, name: &str, uid: &str, finalizer: &str) -> Result<bool, ApiError>;
+    /// Sets `spec.initialSync` from `Skip` to `Done` on the object `name`, if
+    /// the object has the uid `uid`. `false`: nothing was changed (no object,
+    /// another uid, or the field is not `Skip`).
+    async fn mark_initial_sync_done(&self, name: &str, uid: &str) -> Result<bool, ApiError>;
     /// Server-side apply of this node's entry of `status.nodes` under the
     /// field manager `ambar-<node>`; `None` removes the entry. An object that
     /// does not exist is success.
@@ -76,36 +94,74 @@ pub trait Volumes: Send + Sync {
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>>;
 }
 
-/// Read and replace of one object: the two calls `edit_retrying` repeats.
+/// Read and patch of one object: the two calls `patch_retrying` repeats.
 #[async_trait]
 pub trait Objects: Send + Sync {
     async fn read(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError>;
-    /// Replaces the object; `volume.metadata.resource_version` is the version
-    /// that was read, a newer one in the store is `ApiError::Conflict`.
-    async fn replace(&self, name: &str, volume: &ReplicatedVolume) -> Result<ReplicatedVolume, ApiError>;
+    /// Applies the JSON patch `ops` to the stored object. `Ok(false)`: the
+    /// object does not exist. A failed `test` operation is
+    /// `ApiError::Rejected`, an object that changed under the patch
+    /// `ApiError::Conflict`.
+    async fn patch(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError>;
 }
 
-/// The `Volumes::edit` contract over `Objects`.
-pub async fn edit_retrying(
-    objects: &dyn Objects,
-    name: &str,
-    edit: Edit<'_>,
-) -> Result<Option<ReplicatedVolume>, ApiError> {
+/// JSON-patch operations for one edit, computed from the object as read; `None`: nothing to change.
+pub type Ops<'a> = &'a (dyn Fn(&ReplicatedVolume) -> Option<Vec<Value>> + Send + Sync);
+
+/// Reads the object, computes the edit, patches with `test /metadata/uid`
+/// first. `Ok(false)` when the object is gone, has another uid than `uid` or
+/// needs no change. A patch the API server refuses (a failed `test`, a
+/// conflict) is computed again from a fresh read, `EDIT_ATTEMPTS` times in all.
+pub async fn patch_retrying(objects: &dyn Objects, name: &str, uid: &str, ops: Ops<'_>) -> Result<bool, ApiError> {
     let mut last = ApiError::Conflict("no attempt was made".to_string());
     for _ in 0..EDIT_ATTEMPTS {
-        let Some(mut volume) = objects.read(name).await? else {
-            return Ok(None);
+        let Some(current) = objects.read(name).await? else {
+            return Ok(false);
         };
-        if !edit(&mut volume) {
-            return Ok(None);
+        if current.metadata.uid.as_deref() != Some(uid) {
+            return Ok(false);
         }
-        match objects.replace(name, &volume).await {
-            Ok(written) => return Ok(Some(written)),
-            Err(conflict @ ApiError::Conflict(_)) => last = conflict,
+        let Some(edit) = ops(&current) else {
+            return Ok(false);
+        };
+        let mut patch = vec![json!({"op": "test", "path": "/metadata/uid", "value": uid})];
+        patch.extend(edit);
+        match objects.patch(name, patch).await {
+            Ok(patched) => return Ok(patched),
+            Err(refused @ (ApiError::Conflict(_) | ApiError::Rejected(_))) => last = refused,
             Err(other) => return Err(other),
         }
     }
     Err(last)
+}
+
+/// Operations that remove `finalizer`, applying only while it is at the index
+/// it has in `object`.
+pub fn remove_finalizer_ops(object: &ReplicatedVolume, finalizer: &str) -> Option<Vec<Value>> {
+    let index = object
+        .metadata
+        .finalizers
+        .as_ref()?
+        .iter()
+        .position(|f| f == finalizer)?;
+    let path = format!("/metadata/finalizers/{index}");
+    Some(vec![
+        json!({"op": "test", "path": path, "value": finalizer}),
+        json!({"op": "remove", "path": path}),
+    ])
+}
+
+/// Operations that change `spec.initialSync` from `Skip` to `Done`.
+pub fn initial_sync_done_ops(object: &ReplicatedVolume) -> Option<Vec<Value>> {
+    if object.spec.initial_sync != InitialSync::Skip {
+        return None;
+    }
+    let skip = serde_json::to_value(InitialSync::Skip).ok()?;
+    let done = serde_json::to_value(InitialSync::Done).ok()?;
+    Some(vec![
+        json!({"op": "test", "path": "/spec/initialSync", "value": skip}),
+        json!({"op": "replace", "path": "/spec/initialSync", "value": done}),
+    ])
 }
 
 fn code_of(error: &kube::Error) -> Option<u16> {
@@ -118,6 +174,7 @@ fn code_of(error: &kube::Error) -> Option<u16> {
 fn api_error(error: kube::Error) -> ApiError {
     match code_of(&error) {
         Some(409) => ApiError::Conflict(error.to_string()),
+        Some(422) => ApiError::Rejected(error.to_string()),
         _ => ApiError::Other(error.to_string()),
     }
 }
@@ -149,11 +206,19 @@ impl Objects for KubeVolumes {
         self.get(name).await
     }
 
-    async fn replace(&self, name: &str, volume: &ReplicatedVolume) -> Result<ReplicatedVolume, ApiError> {
-        self.api
-            .replace(name, &PostParams::default(), volume)
+    async fn patch(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
+        // `json_patch::Patch` is not named here: the operations are parsed into
+        // whatever `Patch::Json` takes.
+        let ops = serde_json::from_value(Value::Array(ops)).map_err(|e| ApiError::Other(e.to_string()))?;
+        match self
+            .api
+            .patch(name, &PatchParams::default(), &Patch::Json::<()>(ops))
             .await
-            .map_err(api_error)
+        {
+            Ok(_) => Ok(true),
+            Err(e) if code_of(&e) == Some(404) => Ok(false),
+            Err(e) => Err(api_error(e)),
+        }
     }
 }
 
@@ -187,8 +252,12 @@ impl Volumes for KubeVolumes {
         }
     }
 
-    async fn edit(&self, name: &str, edit: Edit<'_>) -> Result<Option<ReplicatedVolume>, ApiError> {
-        edit_retrying(self, name, edit).await
+    async fn remove_finalizer(&self, name: &str, uid: &str, finalizer: &str) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &|object| remove_finalizer_ops(object, finalizer)).await
+    }
+
+    async fn mark_initial_sync_done(&self, name: &str, uid: &str) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &initial_sync_done_ops).await
     }
 
     async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError> {
