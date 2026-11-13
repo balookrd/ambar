@@ -3592,7 +3592,7 @@ OK: stand is up
 
 ## Опыты перед CSI (P7–P9)
 
-Дата: 2026-11-13. Стенд тот же: три ВМ Lima, ядро `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0 (версии заново не снимались). Опыты выполняет `stand/spike/pre-csi.sh <p7|p8|p9>`: перед опытом и после него скрипт останавливает ресурсы `p7`–`p9`, отсоединяет loop-устройства и удаляет файлы. Файлы ресурсов содержат `options { quorum majority; on-no-quorum io-error; auto-promote yes; }`. P7 и P8 запущены по одному разу, P9 — дважды (см. «Отклонения и правки скрипта»). Метки времени в выводе P8 — по часам узлов.
+Дата: 2026-11-13. Стенд тот же: три ВМ Lima, ядро `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0 (версии заново не снимались). Опыты выполняет `stand/spike/pre-csi.sh <p7|p8|p9>`: перед опытом и после него скрипт останавливает ресурсы `p7`–`p9`, отсоединяет loop-устройства и удаляет файлы. Файлы ресурсов содержат `options { quorum majority; on-no-quorum io-error; auto-promote yes; }`. P7 и P8 запущены по одному разу, P9 — дважды (см. «Отклонения и правки скрипта»). Метки времени в выводе P8 — по часам узлов. После записанных прогонов скрипт доработан (очистка при сбое через `trap … EXIT`, ожидание писателей перед `umount`, проверка кодов возврата подготовительных шагов и наличия строки `rc=`, `mktemp` вместо фиксированных путей); доработанная версия не запускалась `[проверить: прогон `pre-csi.sh p7`, `p8`, `p9` после правки]`.
 
 | Опыт | Условия | Команда | Код возврата | Вывод | Прогонов |
 |---|---|---|---|---|---|
@@ -3601,23 +3601,26 @@ OK: stand is up
 | P7 (3) | после `drbdadm up p7` | `drbdadm dump-md p7` | 20 | stdout: `Operation canceled.`; stderr: `open(/dev/ambar/p7) failed: Device or resource busy`, `Exclusive open failed. Do it anyways?`, `stdin not a TTY, not waiting for confirmation`, `Command 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 20` | 1 |
 | P8 (1) | `down p8` на `dv-3`, `p8.res` на `dv-3` удалён, на `dv-1` идёт запись | `drbdsetup status p8 --verbose` на `dv-1`, `dv-2` | 0 | связь с `lima-dv-3`: `connection:Connecting role:Unknown`, `peer-disk:DUnknown` на обоих; `quorum:yes` | 1 |
 | P8 (2) | `p8.res` без `dv-3` на `dv-1` и `dv-2` | `drbdadm adjust p8` на `dv-1`, затем на `dv-2` | 0, 0 | вывода нет; в статусе обоих узлов остался только пир `Connected`, секции `lima-dv-3` нет; в `dmesg` `lima-dv-3: conn( Connecting -> Disconnecting ) [del-peer]`, затем `Disconnecting -> StandAlone` | 1 |
-| P8 (3) | то же | журнал `watch.sh`, `dmesg`, `quorum` | — | `probe=alive:S` в каждой выборке (~0.5 с), `acked` растёт в каждой; `probe.sh` ничего не писал в stderr; строк `quorum( yes -> no )` в `dmesg` нет; `quorum:yes` на обоих узлах | 1 |
+| P8 (3) | то же | журнал `watch.sh`, `dmesg`, `quorum` | — | в 40 последних выборках `watch.sh` (19:47:03–19:47:22), включая момент `adjust` (19:47:13.235), `probe=alive:S`, `acked` растёт от выборки к выборке; лог `probe.sh` (stdout и stderr) пуст; в окне `dmesg \| tail -n 60` с 19:46:45 строк `quorum( yes -> no )` нет; `quorum:yes` на обоих узлах | 1 |
 | P8 (4) | файл с тремя сторонами на всех, `adjust` на `dv-1`, `dv-2`, `up` на `dv-3` | `drbdsetup status p8 --verbose --statistics` | 0 на трёх узлах | три связи `Connected`, `dv-3`: `node-id:2`, `Diskless client:yes`; `out-of-sync:0` на всех связях; `bm-writes:112` на `dv-1` и `dv-2` | 1 |
 | P8 (5) | писатель остановлен | подтверждённый номер и последний номер на томе | — | `acked=10875 on-volume=10876` | 1 |
-| P9 (1) | `p9`, три копии, синхронизация пропущена, ФС нет, чтение на `dv-2` | `blkid -p -o value -s TYPE /dev/drbd1009` | 2 | stdout и stderr пусты | 2 |
+| P9 (1) | `p9`, три копии, синхронизация пропущена, ФС нет, чтение на `dv-2` | `blkid -p -o value -s TYPE /dev/drbd1009` | 2 | stdout и stderr пусты | код возврата — 2, stdout и stderr — 1 |
 | P9 (1) | то же | `dd if=/dev/drbd1009 bs=1 skip=1080 count=2 status=none \| od -An -tx1` | 0 | ` 00 00` | 1 |
-| P9 (2) | `mkfs.ext4 -q` на `dv-1`, не смонтирован | `blkid -p -o value -s TYPE /dev/drbd1009` на `dv-2` | 0 | stdout `ext4`, stderr пуст | 2 |
+| P9 (2) | `mkfs.ext4 -q` на `dv-1`, не смонтирован | `blkid -p -o value -s TYPE /dev/drbd1009` на `dv-2` | 0 | stdout `ext4`, stderr пуст | код возврата — 2, stdout и stderr — 1 |
 | P9 (2) | то же | `dd … \| od -An -tx1` на `dv-2` | 0 | ` 53 ef` | 1 |
-| P9 (3) | том смонтирован на `dv-1` (Primary) | `blkid -p -o value -s TYPE /dev/drbd1009` на `dv-2` | 2 | stdout пуст; stderr `blkid: error: /dev/drbd1009: Wrong medium type` | 2 |
+| P9 (3) | том смонтирован на `dv-1` (Primary) | `blkid -p -o value -s TYPE /dev/drbd1009` на `dv-2` | 2 | stdout пуст; stderr `blkid: error: /dev/drbd1009: Wrong medium type` | код возврата — 2, stdout и stderr — 1 |
 | P9 (3) | то же | `dd … \| od -An -tx1` на `dv-2` (с `set -o pipefail`) | 1 | stderr `dd: failed to open '/dev/drbd1009': Wrong medium type`; stdout `od` пуст | 1 |
-| P9 (4) | `/dev/drbd1999` не существует (`ls -l`: код 2, `No such file or directory`) | `blkid -p -o value -s TYPE /dev/drbd1999` | 2 | stdout и stderr пусты | 2 |
+| P9 (4) | `/dev/drbd1999` не существует (`ls -l`: код 2, `No such file or directory`) | `blkid -p -o value -s TYPE /dev/drbd1999` | 2 | stdout и stderr пусты | код возврата — 2, stdout и stderr — 1 |
 | P9 (4) | то же | `dd … \| od -An -tx1` на `dv-2` (с `set -o pipefail`) | 1 | stderr `dd: failed to open '/dev/drbd1999': No such file or directory` | 1 |
 
 Наблюдения в пределах записанного:
 
-- P7: код возврата 255 без метаданных, 0 при метаданных на неподнятом ресурсе, 20 после `up`; команда запускалась с закрытым stdin (`</dev/null`).
-- P8: после `adjust` на `dv-1` и `dv-2` соединение с `dv-3` исчезло из статуса обоих узлов; в выборках `watch.sh` номер рос в каждой, состояние `probe.sh` `S`, `quorum` оставался `yes`. После возврата `dv-3` с тем же `node-id 2` соединения стали `Connected`. Остановка короче интервала выборки `watch.sh` (~0.5 с) не видна.
-- P9: в состоянии (3) на `dv-2` и `blkid`, и `dd` получили `Wrong medium type` (на `dv-2` роль `Secondary`, `open:no`). Код возврата `blkid` равен 2 для «нет файловой системы», «устройства нет» и «Wrong medium type»; различает их только stderr: пустой в (1) и (4), `Wrong medium type` в (3). В (4) `blkid` ничего не печатает; об отсутствии устройства сообщает `dd` (код 1).
+- P7: код возврата 255 без метаданных, 0 при метаданных на неподнятом ресурсе, 20 после `up`; команда запускалась без TTY и с закрытым stdin (`</dev/null`); код 20 и сообщение `stdin not a TTY, not waiting for confirmation` в состоянии (3) получены при этих условиях, поведение с TTY не запускалось `[проверить: `drbdadm dump-md` на поднятом ресурсе с TTY]`.
+- P8: после `adjust` на `dv-1` и `dv-2` соединение с `dv-3` исчезло из статуса обоих узлов. В 40 последних выборках `watch.sh` (19:47:03–19:47:22, включая `adjust` в 19:47:13) `acked` рос от выборки к выборке, `quorum` оставался `yes`. Токен `S` в `probe=alive:S` — поле `State:` из `/proc/<pid>/status` процесса `probe.sh` (`S` — спит в ожидании; `D` — заблокирован в ядре, см. комментарий в `stand/spike/watch.sh`). После возврата `dv-3` с тем же `node-id 2` соединения стали `Connected`. Остановка короче интервала выборки `watch.sh` (~0.5 с) не видна.
+- P8, размер битовой карты (шаг 4 задания): единственное записанное значение — `initializing bitmap (224 KB) to all zero` в выводе `create-md` на `dv-1` и `dv-2`. `drbdsetup status p8 --verbose --statistics` поля с размером битовой карты не печатает; связанные с битовой картой поля в выводе — `bm-writes:112` (на `dv-1` и `dv-2`, 0 на `dv-3`) и `out-of-sync:0` на всех связях; `size:1048316` — размер устройства в КБ. Размера битовой карты после повторного подключения `dv-3` в записанном выводе нет `[проверить: размер битовой карты после повторного подключения стороны]`.
+- P8, сравнение номеров (шаг 5 задания): `acked=10875 on-volume=10876`, номер на томе на единицу больше подтверждённого. `on-volume` прочитан командой `tail -n 1 /mnt/pa/log` на `dv-1` с файловой системы, смонтированной на `/dev/drbd1008`; копия на `dv-2` не читалась.
+- P8, запись во время повторного подключения: записанный хвост `watch.sh` после возврата `dv-3` начинается в 19:47:33.237 и не покрывает 19:47:27–31 (`adjust` в 19:47:27.567, handshake с `dv-3` в 19:47:31 по `dmesg`), поэтому продолжалась ли запись в этот интервал, вывод не показывает `[проверить: запись во время повторного подключения стороны]`.
+- P9: в состоянии (3) на `dv-2` и `blkid`, и `dd` получили `Wrong medium type` (на `dv-2` роль `Secondary`, `open:no`). Код возврата `blkid` равен 2 в состояниях (1), (3) и (4). Состояние (3) отличается от (1) и (4) по stderr: `Wrong medium type` в (3), пусто в (1) и (4). Состояния (1) и (4) отличаются только вторым признаком, чтением `dd`: в (1) `dd` открывает устройство и читает `00 00`, в (4) не может открыть его (`No such file or directory`, код 1). В (4) `blkid` ничего не печатает. Отсутствие устройства проверено для одного имени, `/dev/drbd1999`.
 
 ### Отклонения и правки скрипта
 
@@ -3626,7 +3629,7 @@ OK: stand is up
 | `run_split`, первый прогон P9 | команда `$* >/tmp/rs.out 2>/tmp/rs.err </dev/null` применяла `</dev/null` к последней команде конвейера: `od` читал пустой stdin, строки `od` в состояниях (1) и (2) были пусты, а ошибка `dd` в (3) и (4) попала в stdout пода вместо файла. Команда обёрнута в `{ set -o pipefail; …; }`, редирект относится к группе. P9 запущен заново целиком; в протоколе вывод второго прогона. Коды `blkid` первого прогона: (1) 2, (2) 0, (3) 2, (4) 2, как во втором. Вывод первого прогона в протокол не включён |
 | P7, P8 | выполнены до правки `run_split`. В P7 нет конвейеров, P8 `run_split` не использует; правка на них не влияет |
 | P9, код возврата `dd` | в первом прогоне записан код `od` (0), во втором с `pipefail` — код `dd` (1) |
-| Диагностика P9 | при разборе пустого вывода `od` ресурс `p9` поднимался отдельным отладочным скриптом (не входит в `pre-csi.sh`); `dd … \| od -An -tx1` на готовой ext4 на `dv-2` дал ` 53 ef` в пяти запусках. После отладки выполнены `pre-csi.sh clean` и `stand/spike/clean.sh` |
+| Диагностика P9 | при разборе пустого вывода `od` ресурс `p9` поднимался отдельным отладочным скриптом (не входит в `pre-csi.sh`); `dd … \| od -An -tx1` на готовой ext4 на `dv-2` дал ` 53 ef` в пяти запусках `[проверить: вывод не сохранён]`. После отладки выполнены `pre-csi.sh clean` и `stand/spike/clean.sh` |
 
 ### P7. `drbdadm dump-md`
 
