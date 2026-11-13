@@ -36,6 +36,6 @@ spec:
         - name: modules
           hostPath: {path: /lib/modules}
         - name: res
-          hostPath: {path: /var/lib/rancher/ambar/res, type: DirectoryOrCreate}
+          hostPath: {path: /var/lib/rancher/ambar/res, type: Directory}
         - name: volumes
-          hostPath: {path: /var/lib/rancher/ambar/volumes, type: DirectoryOrCreate}
+          hostPath: {path: /var/lib/rancher/ambar/volumes, type: Directory}

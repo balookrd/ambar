@@ -11,7 +11,17 @@
 //!    (`Metadata::Absent`, see `Drbd::metadata`). Existing metadata stops the
 //!    pass with `MetadataPresent`; a failed check stops it with
 //!    `DrbdError::MetadataCheck`. The check runs in `execute`, right before
-//!    `create-md`; `plan` does not depend on it.
+//!    `create-md`; `plan` does not depend on it. After a check that found no
+//!    metadata the executor writes the creating marker
+//!    `<volume>.img.creating` (durably) before it starts `create-md`; while
+//!    that marker exists the check is skipped, because metadata on the file
+//!    is this agent's own from an interrupted run. `MarkReady` writes the
+//!    ready marker and then removes the creating marker. A creating marker
+//!    next to a ready marker (a crash between the two steps) is removed at
+//!    the start of the next pass of `apply`, so it cannot outlive the ready
+//!    marker and skip the check later; `remove` and `ClearStaleMarkers` (the
+//!    markers outlived the image) remove it as well. The marker never makes
+//!    `plan` choose `CreateMd`: that depends on the ready marker alone.
 //! 2. `drbdadm new-current-uuid --clear-bitmap <volume>/0` declares all copies
 //!    identical without copying data: only the leader (lowest `nodeId` among
 //!    nodes with a copy) runs it, only when the description says
@@ -40,7 +50,7 @@
 //!
 //! | Input | Actions |
 //! |---|---|
-//! | copy, markers present while the image is absent | `ClearStaleMarkers` |
+//! | copy, ready, synced or creating marker present while the image is absent | `ClearStaleMarkers` |
 //! | copy, no backing file | `CreateFile` |
 //! | copy, no loop device | `AttachLoop` |
 //! | copy, no loop device or the link points elsewhere | `LinkDevice` |
@@ -114,7 +124,7 @@ pub struct Observed {
     pub res_applied: bool,
     /// The synced marker exists.
     pub synced: bool,
-    /// The ready or the synced marker exists while the image does not.
+    /// The ready, synced or creating marker exists while the image does not.
     pub stale_markers: bool,
     /// `None`: the resource is not configured in the kernel.
     pub status: Option<ResourceStatus>,
@@ -289,8 +299,8 @@ pub enum ReconcileError {
     )]
     NotApplied { command: &'static str, volume: String },
     #[error(
-        "volume {volume:?}: the backing file already holds DRBD metadata but has no ready marker; nothing was \
-         changed. Check the file by hand before restoring the marker"
+        "volume {volume:?}: the backing file already holds DRBD metadata but has no ready marker; the metadata was \
+         not touched. Check the file by hand before restoring the marker"
     )]
     MetadataPresent { volume: String },
     #[error("volume {volume:?} is locked by another ambar process; try again later")]
@@ -313,6 +323,14 @@ impl Reconciler<'_> {
         let mut done = Vec::new();
         for _ in 0..MAX_ROUNDS {
             let obs = self.observe(spec, node_name)?;
+            if obs.file == FileState::Ready && remove_if_present(&self.paths.creating_marker(&spec.name))? {
+                // Left by a crash between writing the ready marker and
+                // removing this one. With the ready marker the file is never
+                // initialised again, and a stale creating marker must not
+                // outlive it: if the ready marker were lost later, the marker
+                // would skip the metadata check.
+                sync_dir(&self.paths.volumes_dir)?;
+            }
             let actions = plan(spec, node_name, &obs)?;
             if actions.is_empty() {
                 break;
@@ -337,6 +355,7 @@ impl Reconciler<'_> {
         let image_exists = exists(&image)?;
         let ready = exists(&self.paths.ready_marker(volume))?;
         let synced = exists(&self.paths.synced_marker(volume))?;
+        let creating = exists(&self.paths.creating_marker(volume))?;
 
         let file = match (image_exists, ready) {
             (false, _) => FileState::Absent,
@@ -359,7 +378,7 @@ impl Reconciler<'_> {
             res_matches: same_text(self.paths.res_file(volume)),
             res_applied: same_text(self.paths.applied_res(volume)),
             synced,
-            stale_markers: !image_exists && (ready || synced),
+            stale_markers: !image_exists && (ready || synced || creating),
             status,
         })
     }
@@ -381,6 +400,7 @@ impl Reconciler<'_> {
             Action::ClearStaleMarkers => {
                 remove_if_present(&self.paths.ready_marker(volume))?;
                 remove_if_present(&self.paths.synced_marker(volume))?;
+                remove_if_present(&self.paths.creating_marker(volume))?;
                 sync_dir(&self.paths.volumes_dir)?;
             }
             Action::CreateFile { bytes } => {
@@ -401,18 +421,32 @@ impl Reconciler<'_> {
             Action::CreateMd => {
                 // The file has no ready marker, but it may still hold
                 // metadata (a marker lost, or metadata written by something
-                // else): `create-md --force` would destroy it.
-                if drbd.metadata(volume)? == Metadata::Present {
-                    return Err(ReconcileError::MetadataPresent {
-                        volume: volume.to_string(),
-                    });
+                // else): `create-md --force` would destroy it. The one
+                // exception is the creating marker: this agent wrote it
+                // after a check that found no metadata, right before it
+                // started `create-md`, so metadata on the file is its own.
+                let creating = self.paths.creating_marker(volume);
+                if !exists(&creating)? {
+                    if drbd.metadata(volume)? == Metadata::Present {
+                        return Err(ReconcileError::MetadataPresent {
+                            volume: volume.to_string(),
+                        });
+                    }
+                    write_atomically(&creating, "")?;
                 }
-                drbd.create_md(volume, spec.max_peers)?;
+                drbd.create_md(volume, spec.max_peers, spec.size_bytes)?;
                 // `create-md` writes through the loop device; flush the
                 // backing file itself before `MarkReady` records the result.
                 sync_file(&self.paths.image(volume))?;
             }
-            Action::MarkReady => write_atomically(&self.paths.ready_marker(volume), "")?,
+            Action::MarkReady => {
+                write_atomically(&self.paths.ready_marker(volume), "")?;
+                // Only after the ready marker is durable: a crash in between
+                // leaves both, and `apply` removes a creating marker that
+                // sits next to a ready marker.
+                remove_if_present(&self.paths.creating_marker(volume))?;
+                sync_dir(&self.paths.volumes_dir)?;
+            }
             Action::Up => {
                 drbd.up(volume)?;
                 if drbd.status(volume)?.is_none() {
@@ -483,6 +517,7 @@ impl Reconciler<'_> {
         let markers = [
             (self.paths.ready_marker(volume), "remove-marker"),
             (self.paths.synced_marker(volume), "remove-synced-marker"),
+            (self.paths.creating_marker(volume), "remove-creating-marker"),
         ];
         for (path, step) in markers {
             if remove_if_present(&path)? {
@@ -551,7 +586,22 @@ impl Reconciler<'_> {
             .truncate(false)
             .mode(0o600)
             .open(&path)
-            .map_err(|e| io_err("open", e))?;
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound && !self.paths.volumes_dir.exists() {
+                    return io_err(
+                        "open",
+                        io::Error::new(
+                            e.kind(),
+                            format!(
+                                "the volumes directory {} does not exist; it must exist on the node (mode 0700) \
+                                 before the agent runs, the agent never creates it",
+                                self.paths.volumes_dir.display()
+                            ),
+                        ),
+                    );
+                }
+                io_err("open", e)
+            })?;
         let busy = || ReconcileError::Busy {
             volume: volume.to_string(),
         };

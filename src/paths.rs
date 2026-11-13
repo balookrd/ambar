@@ -34,6 +34,18 @@ impl Paths {
         self.volumes_dir.join(format!("{volume}.img.ready"))
     }
 
+    /// Empty marker written right before `drbdadm create-md` runs on a file
+    /// that the metadata check found without metadata, and removed once the
+    /// ready marker exists. It records that this agent itself started
+    /// `create-md`: a crash in between leaves metadata on a file without the
+    /// ready marker, and with this marker the next `apply` finishes the
+    /// initialisation instead of treating its own metadata as foreign. It
+    /// never makes `plan` choose `create-md`: that needs a file without the
+    /// ready marker, as before.
+    pub fn creating_marker(&self, volume: &str) -> PathBuf {
+        self.volumes_dir.join(format!("{volume}.img.creating"))
+    }
+
     /// Empty marker that says the volume has a data source. Written by a
     /// later `apply` pass, never by the pass that ran the skip of the initial
     /// sync: only on a node with a copy, only in a pass that has nothing else

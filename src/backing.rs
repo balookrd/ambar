@@ -19,7 +19,7 @@ pub enum BackingError {
         path: String,
         source: io::Error,
     },
-    #[error("cannot start {command}: {message}")]
+    #[error("`{command}` did not run to completion: {message}")]
     Spawn { command: String, message: String },
     #[error("{command} failed with code {code}: {stderr}")]
     Command { command: String, code: i32, stderr: String },
