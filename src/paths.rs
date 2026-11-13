@@ -46,6 +46,18 @@ impl Paths {
         self.res_dir.join(format!("{volume}.res"))
     }
 
+    /// Copy of the resource file as last applied with a confirmed effect
+    /// (`drbdadm up` or `adjust` followed by a matching status). Not matched
+    /// by the `*.res` include of `drbd.conf`.
+    pub fn applied_res(&self, volume: &str) -> PathBuf {
+        self.res_dir.join(format!("{volume}.res.applied"))
+    }
+
+    /// Held with an exclusive advisory lock by `apply` and `remove`.
+    pub fn lock_file(&self, volume: &str) -> PathBuf {
+        self.volumes_dir.join(format!("{volume}.lock"))
+    }
+
     pub fn device_link(&self, volume: &str) -> PathBuf {
         self.dev_dir.join(volume)
     }

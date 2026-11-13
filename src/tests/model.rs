@@ -178,7 +178,7 @@ fn replica_count_edges() {
 #[test]
 fn volume_name_rules() {
     let long = "a".repeat(64);
-    for bad in ["", "-x", long.as_str(), "Spike", "a_b"] {
+    for bad in ["", "-x", long.as_str(), "Spike", "a_b", "all"] {
         assert_eq!(
             with(|s| s.name = bad.into()),
             Err(SpecError::Name(bad.into())),
@@ -186,9 +186,17 @@ fn volume_name_rules() {
         );
     }
     let ok63 = "a".repeat(63);
-    for good in ["a", "0", ok63.as_str(), "a-b-0"] {
+    for good in ["a", "0", ok63.as_str(), "a-b-0", "all-1", "al", "alls"] {
         assert_eq!(with(|s| s.name = good.into()), Ok(()), "{good:?}");
     }
+}
+
+#[test]
+fn the_drbdadm_keyword_all_is_not_a_volume_name() {
+    assert!(!valid_volume_name("all"));
+    let mut spec = sample();
+    spec.name = "all".into();
+    assert_eq!(spec.validate(), Err(SpecError::Name("all".into())));
 }
 
 #[test]
@@ -237,7 +245,7 @@ fn error_messages_are_stable() {
         (SpecError::Json("x".into()), "invalid volume json: x"),
         (
             SpecError::Name("A".into()),
-            "invalid volume name \"A\": use 1-63 characters a-z, 0-9 and '-', starting with a letter or digit",
+            "invalid volume name \"A\": use 1-63 characters a-z, 0-9 and '-', starting with a letter or digit; \"all\" is reserved by drbdadm",
         ),
         (
             SpecError::NodeName("a;b".into()),
