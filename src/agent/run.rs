@@ -228,7 +228,8 @@ pub struct Agent {
     pub locks: VolumeLocks,
     /// Set once, after the first listing of names has been worked through (see
     /// the module doc). It is never reset: when the API server is lost later
-    /// the flag stays true. What CSI Node does then is decided in Task 12.
+    /// the flag stays true. `NodeStageVolume` answers `UNAVAILABLE` until it is
+    /// set; later loss of the API server is not tracked.
     pub ready: Arc<AtomicBool>,
 }
 

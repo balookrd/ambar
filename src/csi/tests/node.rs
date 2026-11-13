@@ -31,6 +31,8 @@ const MINOR: u32 = 1000;
 
 // ---- the simulated node ----
 
+type BlkidHook = Box<dyn Fn(&FakeVolumes) + Send>;
+
 /// What is on the device the volume shows as `/dev/drbd<minor>`.
 #[derive(Clone, Copy)]
 enum Dev {
@@ -70,6 +72,8 @@ struct Sim {
     failing: Mutex<BTreeMap<String, Output>>,
     /// What the object showed when `drbdadm down` ran: (entry of this node, member of `spec.nodes`).
     at_down: Mutex<Option<(bool, bool)>>,
+    /// Runs when `blkid` is called: another node acts between the signature check and `mkfs`.
+    on_blkid: Mutex<Option<BlkidHook>>,
 }
 
 impl Sim {
@@ -98,7 +102,13 @@ impl Sim {
                 self.up.store(false, SeqCst);
                 out(0, "", "")
             }
-            ("blkid", _) => self.blkid.lock().unwrap().clone(),
+            ("blkid", _) => {
+                let reply = self.blkid.lock().unwrap().clone();
+                if let Some(hook) = self.on_blkid.lock().unwrap().as_ref() {
+                    hook(&self.volumes);
+                }
+                reply
+            }
             ("mkfs.ext4", _) => {
                 // The device now carries a filesystem.
                 let file = fs::OpenOptions::new().write(true).open(&self.device).unwrap();
@@ -272,6 +282,8 @@ struct Env {
     runner: Arc<FakeRunner>,
     /// Commands of the set-up that `runner_calls` leaves out.
     skip: AtomicUsize,
+    /// The lines the service wrote to its log.
+    logs: Arc<Mutex<Vec<String>>>,
     paths: Paths,
     staging: PathBuf,
     target: PathBuf,
@@ -346,6 +358,7 @@ fn env_for(node: &str) -> Env {
         mountinfo: mountinfo.clone(),
         failing: Mutex::new(BTreeMap::new()),
         at_down: Mutex::new(None),
+        on_blkid: Mutex::new(None),
     });
     let runner = Arc::new(FakeRunner::new({
         let sim = sim.clone();
@@ -365,12 +378,18 @@ fn env_for(node: &str) -> Env {
     svc.allow_regular_files = true;
     svc.stage_wait = Duration::from_secs(10);
     svc.poll = Duration::from_millis(500);
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    svc.log = {
+        let logs = logs.clone();
+        Arc::new(move |line| logs.lock().unwrap().push(line.to_string()))
+    };
     Env {
         svc,
         volumes,
         sim,
         runner,
         skip: AtomicUsize::new(0),
+        logs,
         paths,
         staging: root.join("staging").join(VOLUME),
         target: root.join("pods").join("p1").join("mount"),
@@ -1277,6 +1296,7 @@ async fn rule_h_the_options_mount_is_idempotent_and_busy_like_mount_device() {
 #[tokio::test]
 async fn rule_h_a_bind_of_the_other_mode_is_already_exists() {
     let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
     e.stage_mount();
     e.publish(true).await.unwrap();
     assert_eq!(code(e.publish(false).await), Code::AlreadyExists);
@@ -1341,6 +1361,7 @@ async fn publish_without_a_mount_at_the_staging_path_is_failed_precondition() {
 #[tokio::test]
 async fn publish_bind_mounts_the_staged_volume_into_the_target() {
     let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
     e.stage_mount();
     e.publish(false).await.unwrap();
     assert!(e.target.is_dir());
@@ -1357,6 +1378,7 @@ async fn publish_bind_mounts_the_staged_volume_into_the_target() {
 #[tokio::test]
 async fn publish_read_only_remounts_the_bind_read_only() {
     let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
     e.stage_mount();
     e.publish(true).await.unwrap();
     assert!(e.sim.mounted_at(&e.target)[0].read_only);
@@ -1366,6 +1388,7 @@ async fn publish_read_only_remounts_the_bind_read_only() {
 #[tokio::test]
 async fn publish_twice_is_ok_and_mounts_once() {
     let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
     e.stage_mount();
     e.publish(false).await.unwrap();
     let commands = e.runner_calls().len();
@@ -1399,6 +1422,7 @@ async fn unpublish_rejects_bad_arguments() {
 #[tokio::test]
 async fn unpublish_unmounts_the_target_and_removes_the_empty_directory() {
     let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
     e.stage_mount();
     e.publish(false).await.unwrap();
     e.unpublish().await.unwrap();
@@ -1412,6 +1436,7 @@ async fn unpublish_twice_and_of_nothing_is_ok_without_commands() {
     let e = env();
     e.unpublish().await.unwrap();
     assert!(e.runner_calls().is_empty());
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
     e.stage_mount();
     e.publish(false).await.unwrap();
     e.unpublish().await.unwrap();
@@ -1432,6 +1457,7 @@ async fn unpublish_leaves_a_directory_that_is_not_empty() {
 #[tokio::test]
 async fn unpublish_with_a_failing_umount_is_failed_precondition() {
     let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
     e.stage_mount();
     e.publish(false).await.unwrap();
     e.fail("umount", 32, "target is busy");
@@ -1691,20 +1717,536 @@ fn rule_i_mount_errors_map_to_codes() {
     }
 }
 
+// ---- X5: mount flags: allow-list and no echo ----
+
 #[test]
-fn mount_options_accept_only_plain_flags() {
+fn mount_options_accept_the_allow_list() {
     assert_eq!(mount_options(&[]).unwrap(), None);
-    assert_eq!(
-        mount_options(&["ro".into(), "commit=60".into(), "x-a.b_c".into()])
-            .unwrap()
-            .as_deref(),
-        Some("ro,commit=60,x-a.b_c")
-    );
-    for bad in ["", " ", "a,b", "a;b", "a b", "`x`", "a\u{0}b", "a/b"] {
+    let allowed = [
+        "noatime",
+        "nodiratime",
+        "relatime",
+        "strictatime",
+        "lazytime",
+        "discard",
+        "nodiscard",
+        "ro",
+        "rw",
+        "nosuid",
+        "nodev",
+        "noexec",
+        "sync",
+        "dirsync",
+        "commit=0",
+        "commit=60",
+        "commit=0123456789",
+        "data=ordered",
+        "data=writeback",
+        "barrier=0",
+        "barrier=1",
+        "errors=remount-ro",
+        "errors=continue",
+    ];
+    for flag in allowed {
         assert_eq!(
-            mount_options(&[bad.into()]).unwrap_err().code(),
-            Code::InvalidArgument,
-            "{bad:?}"
+            mount_options(&[flag.to_string()]).unwrap().as_deref(),
+            Some(flag),
+            "{flag}"
         );
     }
+    let all: Vec<String> = allowed.iter().map(|f| f.to_string()).collect();
+    assert_eq!(mount_options(&all).unwrap().unwrap(), allowed.join(","));
+}
+
+#[test]
+fn mount_options_reject_everything_else() {
+    for bad in [
+        "loop",
+        "journal_dev=8",
+        "errors=panic",
+        "X-mount.mkdir",
+        "offset=1",
+        "",
+        "a,b",
+        "noatime,ro",
+        " ",
+        "a;b",
+        "`x`",
+        "a\u{0}b",
+        "a/b",
+        "commit=",
+        "commit=x",
+        "commit=6 0",
+        "commit=-1",
+        "Commit=1",
+        "NOATIME",
+        "x-a.b_c",
+        "data=journal",
+        "barrier=2",
+        "errors=remount-ro,loop",
+    ] {
+        let status = mount_options(&["noatime".into(), bad.into()]).unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_rejected_flag_is_named_in_the_error_and_an_empty_one_by_position() {
+    let status = mount_options(&["noatime".into(), "loop".into()]).unwrap_err();
+    assert!(status.message().contains("mount_flags[1]"), "{}", status.message());
+    assert!(status.message().contains("loop"), "{}", status.message());
+    let status = mount_options(&["".into()]).unwrap_err();
+    assert!(
+        status.message().contains("mount_flags[0] is empty"),
+        "{}",
+        status.message()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_mount_with_flags_does_not_print_the_flags() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Ext4);
+    e.fail("mount -t", 32, "mount: wrong fs type, bad superblock\n");
+    let request = NodeStageVolumeRequest {
+        volume_capability: Some(capability(&["noatime", "commit=77"])),
+        ..e.stage_request()
+    };
+    let status = e.svc.node_stage_volume(Request::new(request)).await.unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    let text = status.message();
+    assert!(text.contains("bad superblock"), "{text}");
+    assert!(text.contains("-o <redacted>"), "{text}");
+    assert!(!text.contains("noatime") && !text.contains("commit=77"), "{text}");
+    // The command that ran did carry them.
+    assert!(e.calls(&["mount"])[0].contains("noatime,commit=77"));
+}
+
+// ---- X1: a failed stage does not leave a Client membership behind ----
+
+#[test]
+fn only_retriable_codes_keep_the_membership() {
+    use Code::*;
+    for code in [Unavailable, Aborted, DeadlineExceeded, ResourceExhausted, Cancelled] {
+        assert!(!is_final(code), "{code:?}");
+    }
+    for code in [
+        Ok,
+        Unknown,
+        InvalidArgument,
+        NotFound,
+        AlreadyExists,
+        PermissionDenied,
+        FailedPrecondition,
+        OutOfRange,
+        Unimplemented,
+        Internal,
+        DataLoss,
+        Unauthenticated,
+    ] {
+        assert!(is_final(code), "{code:?}");
+    }
+}
+
+fn is_client(e: &Env) -> bool {
+    e.members().contains(&(NODE.to_string(), NodeKind::Client))
+}
+
+/// The stage failed for good after this call added the node: the node is out of the
+/// object, its entry is gone, the resource is down, and the error is the original one.
+fn assert_rolled_back(e: &Env, status: &Status, code: Code, text: &str) {
+    assert_eq!(status.code(), code, "{}", status.message());
+    assert!(status.message().contains(text), "{}", status.message());
+    assert!(!e.members().iter().any(|(name, _)| name == NODE), "{:?}", e.members());
+    assert_eq!(e.members().len(), 3);
+    assert!(e.volumes.entry_of(VOLUME, NODE).is_none());
+    assert!(!e.sim.up.load(SeqCst), "the local resource was taken down");
+    assert_eq!(e.calls(&["drbdadm down"]), ["drbdadm down pv1"]);
+    assert!(!e.paths.res_file(VOLUME).exists());
+    assert!(e.sim.mounted_at(&e.staging).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_error_of_the_pass_removes_the_client_this_call_added() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    // Another volume with the same minor and port: the agent refuses both.
+    e.volumes.put(volume_object("other", MINOR, 7000));
+    let status = e.stage().await.unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(status.message().contains("refuses"), "{}", status.message());
+    assert!(!e.members().iter().any(|(name, _)| name == NODE), "{:?}", e.members());
+    assert!(e.volumes.entry_of(VOLUME, NODE).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_foreign_filesystem_removes_the_client_this_call_added() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Other("xfs"));
+    let status = e.stage().await.unwrap_err();
+    assert_rolled_back(&e, &status, Code::FailedPrecondition, "xfs");
+    assert!(e.logs.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_volume_formatted_before_removes_the_client_this_call_added() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.annotate();
+    e.set_device(Dev::Empty);
+    let status = e.stage().await.unwrap_err();
+    assert_rolled_back(&e, &status, Code::FailedPrecondition, "refusing to format again");
+    assert!(e.calls(&["mkfs.ext4"]).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_mount_removes_the_client_this_call_added() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Ext4);
+    e.fail("mount -t", 32, "mount: wrong fs type, bad superblock\n");
+    let status = e.stage().await.unwrap_err();
+    assert_rolled_back(&e, &status, Code::FailedPrecondition, "bad superblock");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retriable_error_keeps_the_client_this_call_added() {
+    // UNAVAILABLE from the signature check: kubelet retries, the membership stays.
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Ambiguous);
+    assert_eq!(code(e.stage().await), Code::Unavailable);
+    assert!(is_client(&e), "{:?}", e.members());
+    assert!(e.sim.up.load(SeqCst));
+    assert!(e.calls(&["drbdadm down"]).is_empty());
+    assert!(e.volumes.entry_of(VOLUME, NODE).is_some());
+    // The retry finds the node as a member and does not add it again.
+    let patches = e.patches();
+    e.set_device(Dev::Ext4);
+    e.stage().await.unwrap();
+    assert_eq!(e.patches(), patches + 1, "only the annotation");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_device_that_never_becomes_usable_keeps_the_client() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.sim.usable.store(false, SeqCst);
+    assert_eq!(code(e.stage().await), Code::Unavailable);
+    assert!(is_client(&e));
+    assert!(e.calls(&["drbdadm down"]).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_of_an_earlier_call_is_not_removed_by_a_failed_stage() {
+    let e = env();
+    e.client_up().await;
+    e.set_device(Dev::Other("xfs"));
+    let status = e.stage().await.unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(is_client(&e));
+    assert!(e.volumes.entry_of(VOLUME, NODE).is_some());
+    assert!(e.sim.up.load(SeqCst));
+    assert!(e.calls(&["drbdadm down"]).is_empty());
+    assert_eq!(e.patches(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_replica_and_a_witness_are_not_touched_by_a_failed_stage() {
+    for (node, kind) in [("n1", NodeKind::Replica), ("n3", NodeKind::Witness)] {
+        let e = env_for(node);
+        e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+        if kind == NodeKind::Replica {
+            e.replica_files();
+        }
+        e.set_device(Dev::Other("xfs"));
+        let before = e.volumes.object(VOLUME).unwrap().spec.nodes;
+        let status = e.stage().await.unwrap_err();
+        assert_eq!(status.code(), Code::FailedPrecondition, "{node}");
+        assert_eq!(e.volumes.object(VOLUME).unwrap().spec.nodes, before, "{node}");
+        assert!(e.calls(&["drbdadm down"]).is_empty(), "{node}");
+        assert_eq!(e.patches(), 0, "{node}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_teardown_returns_the_original_error_and_keeps_the_membership() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Other("xfs"));
+    e.fail("drbdadm down", 11, "Device '1000' is held open by someone");
+    let status = e.stage().await.unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(status.message().contains("xfs"), "{}", status.message());
+    assert!(!status.message().contains("held open"), "{}", status.message());
+    assert!(is_client(&e), "the node stays a member: the next attempt finds it");
+    let logs = e.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    assert!(logs[0].contains("held open") && logs[0].contains("pv1"), "{logs:?}");
+    // The next attempt sees a member, fails the same way and leaves it alone.
+    e.sim.failing.lock().unwrap().clear();
+    assert_eq!(code(e.stage().await), Code::FailedPrecondition);
+    assert!(is_client(&e), "an earlier call's membership is never torn down");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_teardown_does_nothing_when_the_staging_path_is_mounted() {
+    let e = env();
+    e.client_up().await;
+    e.stage_mount();
+    e.svc.abandon_join(VOLUME.to_string(), e.staging.clone()).await.unwrap();
+    assert!(is_client(&e));
+    assert!(e.calls(&["drbdadm down"]).is_empty());
+    assert_eq!(e.sim.mounted_at(&e.staging).len(), 1);
+}
+
+// ---- X2: the annotation is read again right before mkfs ----
+
+fn another_node_acts(e: &Env, act: impl Fn(&FakeVolumes) + Send + 'static) {
+    *e.sim.on_blkid.lock().unwrap() = Some(Box::new(act));
+}
+
+#[tokio::test(start_paused = true)]
+async fn mkfs_does_not_run_when_another_node_annotated_the_volume_after_the_signature_check() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Empty);
+    another_node_acts(&e, |volumes| {
+        let mut object = volumes.object(VOLUME).unwrap();
+        object.metadata.annotations = Some([(FORMATTED_ANNOTATION.to_string(), "true".to_string())].into());
+        volumes.put(object);
+    });
+    let status = e.stage().await.unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable);
+    assert!(e.calls(&["mkfs.ext4", "mount"]).is_empty(), "{:?}", e.device_commands());
+    assert!(is_client(&e), "a retriable error keeps the membership");
+}
+
+#[tokio::test(start_paused = true)]
+async fn mkfs_does_not_run_when_the_volume_vanished_was_deleted_or_replaced_meanwhile() {
+    type Change = fn(&FakeVolumes);
+    let changes: [(&str, Change); 3] = [
+        ("gone", |volumes| {
+            volumes.objects.lock().unwrap().remove(VOLUME);
+        }),
+        ("deleting", |volumes| {
+            let mut object = volumes.object(VOLUME).unwrap();
+            object.metadata.deletion_timestamp = Some(crate::tests::volumes::time(crate::tests::volumes::T0));
+            volumes.put(object);
+        }),
+        ("another uid", |volumes| {
+            let mut object = volumes.object(VOLUME).unwrap();
+            object.metadata.uid = Some("another-uid".to_string());
+            volumes.put(object);
+        }),
+    ];
+    for (what, change) in changes {
+        let e = env();
+        e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+        e.set_device(Dev::Empty);
+        another_node_acts(&e, change);
+        let status = e.stage().await.unwrap_err();
+        assert_eq!(status.code(), Code::Unavailable, "{what}: {}", status.message());
+        assert!(
+            e.calls(&["mkfs.ext4", "mount"]).is_empty(),
+            "{what}: {:?}",
+            e.device_commands()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unchanged_object_before_mkfs_formats_as_before() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Empty);
+    another_node_acts(&e, |_| {});
+    e.stage().await.unwrap();
+    assert_eq!(e.calls(&["mkfs.ext4"]).len(), 1);
+}
+
+// ---- X3: usable is checked again under the lock ----
+
+#[tokio::test(start_paused = true)]
+async fn a_resource_that_is_not_usable_under_the_lock_is_not_opened() {
+    let e = env();
+    e.client_up().await;
+    e.set_device(Dev::Empty);
+    // Usable during the wait (`client_up` made it so), not usable by the time of the lock.
+    e.sim.usable.store(false, SeqCst);
+    let status = e
+        .svc
+        .stage_locked(VOLUME.to_string(), e.staging.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable);
+    assert!(status.message().contains("not usable"), "{}", status.message());
+    assert!(e.device_commands().is_empty(), "{:?}", e.device_commands());
+    assert!(!e.annotated());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resource_that_is_down_under_the_lock_is_not_opened() {
+    let e = env();
+    e.client_up().await;
+    e.set_device(Dev::Empty);
+    e.sim.up.store(false, SeqCst);
+    let status = e
+        .svc
+        .stage_locked(VOLUME.to_string(), e.staging.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable);
+    assert!(e.device_commands().is_empty(), "{:?}", e.device_commands());
+}
+
+// ---- X4: publish checks what is staged ----
+
+fn write_mountinfo_line(e: &Env, source: &str, fstype: &str) {
+    fs::create_dir_all(&e.staging).unwrap();
+    let line = format!(
+        "300 1 147:1000 / {} rw,relatime - {fstype} {source} rw\n",
+        e.staging.display()
+    );
+    fs::write(&e.sim.mountinfo, line).unwrap();
+}
+
+#[tokio::test]
+async fn publish_refuses_a_staging_mount_of_another_device() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    write_mountinfo_line(&e, "/dev/other", "ext4");
+    assert_eq!(code(e.publish(false).await), Code::FailedPrecondition);
+    assert!(!e.target.exists());
+    assert!(e.runner_calls().is_empty());
+}
+
+#[tokio::test]
+async fn publish_refuses_a_staging_mount_that_is_not_ext4() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    write_mountinfo_line(&e, &e.device_source(), "xfs");
+    let text = message(e.publish(false).await);
+    assert!(text.contains("xfs"), "{text}");
+    assert!(!e.target.exists());
+    assert!(e.runner_calls().is_empty());
+}
+
+#[tokio::test]
+async fn publish_takes_the_minor_from_a_fresh_read_of_the_object() {
+    let e = env();
+    // The staging path holds drbd1000; the object now says 1001.
+    e.volumes.put(volume_object(VOLUME, MINOR + 1, 7000));
+    e.stage_mount();
+    assert_eq!(code(e.publish(false).await), Code::FailedPrecondition);
+    assert!(!e.target.exists());
+    assert!(e.runner_calls().is_empty());
+}
+
+#[tokio::test]
+async fn publish_of_a_volume_without_an_object_is_not_found() {
+    let e = env();
+    e.stage_mount();
+    assert_eq!(code(e.publish(false).await), Code::NotFound);
+    assert!(!e.target.exists());
+    assert!(e.runner_calls().is_empty());
+}
+
+// ---- X6: errors of a detached task are logged ----
+
+#[tokio::test(start_paused = true)]
+async fn an_unstage_whose_handler_is_gone_logs_its_failure() {
+    let e = env();
+    e.client_up().await;
+    e.stage_mount();
+    e.fail("umount", 32, "target is busy");
+    let guard = e.svc.agent.locks.lock(VOLUME).await;
+    let svc = e.svc.clone();
+    let request = NodeUnstageVolumeRequest {
+        volume_id: VOLUME.to_string(),
+        staging_target_path: e.staging.to_string_lossy().into_owned(),
+    };
+    let handler = tokio::spawn(async move { svc.node_unstage_volume(Request::new(request)).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The client gives up while the work waits for the volume lock.
+    handler.abort();
+    let _ = handler.await;
+    assert!(e.logs.lock().unwrap().is_empty());
+    drop(guard);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let logs = e.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    for part in ["NodeUnstageVolume", "pv1", "target is busy", "FailedPrecondition"] {
+        assert!(logs[0].contains(part), "{part}: {logs:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_with_its_handler_alive_is_returned_and_not_logged() {
+    let e = env();
+    e.client_up().await;
+    e.stage_mount();
+    e.fail("umount", 32, "target is busy");
+    assert_eq!(code(e.unstage().await), Code::FailedPrecondition);
+    assert!(e.logs.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_detached_task_that_succeeds_after_its_handler_is_gone_logs_nothing() {
+    let e = env();
+    e.client_up().await;
+    e.stage_mount();
+    let guard = e.svc.agent.locks.lock(VOLUME).await;
+    let svc = e.svc.clone();
+    let request = NodeUnstageVolumeRequest {
+        volume_id: VOLUME.to_string(),
+        staging_target_path: e.staging.to_string_lossy().into_owned(),
+    };
+    let handler = tokio::spawn(async move { svc.node_unstage_volume(Request::new(request)).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    handler.abort();
+    let _ = handler.await;
+    drop(guard);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(e.logs.lock().unwrap().is_empty());
+    assert!(e.sim.mounted_at(&e.staging).is_empty(), "the work was finished anyway");
+    assert!(!is_client(&e));
+}
+
+// ---- X7: a repeated stage of a staged volume ----
+
+#[tokio::test(start_paused = true)]
+async fn a_repeated_stage_of_a_mounted_path_is_ok_although_the_object_is_deleting() {
+    let e = env();
+    e.client_up().await;
+    e.stage_mount();
+    let mut object = e.volumes.object(VOLUME).unwrap();
+    object.metadata.deletion_timestamp = Some(crate::tests::volumes::time(crate::tests::volumes::T0));
+    e.volumes.put(object);
+    e.stage().await.unwrap();
+    assert!(e.runner_calls().is_empty(), "{:?}", e.runner_calls());
+    assert_eq!(e.patches(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_repeated_stage_of_a_mounted_path_is_ok_although_the_object_is_gone() {
+    let e = env();
+    e.stage_mount();
+    e.stage().await.unwrap();
+    assert!(e.runner_calls().is_empty(), "{:?}", e.runner_calls());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stage_without_object_and_without_this_volumes_mount_is_not_found() {
+    let e = env();
+    fs::create_dir_all(&e.staging).unwrap();
+    // Another device, and a device of this volume with another filesystem.
+    e.sim
+        .add_mount("/dev/other", &e.staging.to_string_lossy(), "/", false, None);
+    assert_eq!(code(e.stage().await), Code::NotFound);
+    write_mountinfo_line(&e, &e.device_source(), "xfs");
+    assert_eq!(code(e.stage().await), Code::NotFound);
+    assert!(e.runner_calls().is_empty());
 }
