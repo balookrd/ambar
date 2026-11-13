@@ -1,57 +1,30 @@
-//! What the node holds for a volume name, read from the file system and the
-//! kernel without changing anything.
+//! What the node holds for a volume name, read from the file system without
+//! changing anything.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::drbd::adm::DrbdError;
-use crate::drbd::status::{self, ResourceStatus};
-use crate::exec::{Runner, command_line};
 use crate::model::{SpecError, valid_volume_name};
 use crate::paths::Paths;
 use crate::reconcile::ReconcileError;
 
 use super::decide::Local;
 
-/// Every resource configured in the kernel, from `drbdsetup status --json`.
-/// The same command and the same checks as `Drbd::status`, which returns one
-/// resource only.
-pub fn kernel_resources(runner: &dyn Runner) -> Result<Vec<ResourceStatus>, DrbdError> {
-    let args = ["status", "--json"];
-    let out = runner.run("drbdsetup", &args).map_err(|e| DrbdError::Spawn {
-        command: command_line("drbdsetup", &args),
-        message: e.to_string(),
-    })?;
-    if !out.success() {
-        return Err(DrbdError::Command {
-            command: command_line("drbdsetup", &args),
-            code: out.code,
-            stderr: out.stderr.trim().to_string(),
-        });
-    }
-    let text = out.stdout.trim();
-    if !text.starts_with('[') {
-        let first_line = text.lines().next().unwrap_or("");
-        return Err(DrbdError::Status(format!("unexpected output: {first_line}")));
-    }
-    status::parse(text).map_err(|e| DrbdError::Status(e.to_string()))
-}
-
-/// Volume names this node has anything for: backing files, resource files,
-/// applied copies, device links and configured kernel resources. Markers and
-/// lock files alone do not count. Names that are not valid volume names are
+/// Volume names this node has a file of ambar's for: a backing file, a
+/// resource file in `res_dir`, an applied copy of it or a device link in
+/// `dev_dir`. Markers and lock files alone do not count, and neither does a
+/// resource that exists only in the kernel: ambar writes `<name>.res` for
+/// every resource it configures, so a kernel resource without that file is
+/// not ambar's and is left alone. Names that are not valid volume names are
 /// skipped.
-pub fn local_volumes(paths: &Paths, runner: &dyn Runner) -> Result<BTreeSet<String>, ReconcileError> {
+pub fn local_volumes(paths: &Paths) -> Result<BTreeSet<String>, ReconcileError> {
     let mut found = BTreeSet::new();
     names_in(&paths.volumes_dir, Some(".img"), &mut found)?;
     names_in(&paths.res_dir, Some(".res"), &mut found)?;
     names_in(&paths.res_dir, Some(".res.applied"), &mut found)?;
     names_in(&paths.dev_dir, None, &mut found)?;
-    for resource in kernel_resources(runner)? {
-        found.insert(resource.name);
-    }
     found.retain(|name| valid_volume_name(name));
     Ok(found)
 }
@@ -88,17 +61,17 @@ fn names_in(dir: &Path, suffix: Option<&str>, into: &mut BTreeSet<String>) -> Re
     Ok(())
 }
 
-/// What the node holds for `volume`. `configured` is the set of resources
-/// the kernel has configured. A path that cannot be inspected is an error,
-/// never "absent": the answer decides whether a backing file counts.
-pub fn local(paths: &Paths, configured: &BTreeSet<String>, volume: &str) -> Result<Local, ReconcileError> {
+/// What the node holds for `volume`. A trace is a file that ambar writes (see
+/// `local_volumes`); a resource in the kernel is not one. A path that cannot
+/// be inspected is an error, never "absent": the answer decides whether a
+/// backing file counts.
+pub fn local(paths: &Paths, volume: &str) -> Result<Local, ReconcileError> {
     if !valid_volume_name(volume) {
         return Err(SpecError::Name(volume.to_string()).into());
     }
     let image = exists(&paths.image(volume))?;
     let synced = exists(&paths.synced_marker(volume))?;
-    let traces = configured.contains(volume)
-        || exists(&paths.res_file(volume))?
+    let traces = exists(&paths.res_file(volume))?
         || exists(&paths.applied_res(volume))?
         || link_exists(&paths.device_link(volume))?;
     Ok(Local { image, traces, synced })

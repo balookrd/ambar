@@ -21,3 +21,5 @@ tokio-util = "0.7.20"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# `start_paused`: tests of the retry delays of the first pass run in virtual time.
+tokio = { version = "1.54.1", features = ["test-util"] }

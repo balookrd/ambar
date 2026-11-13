@@ -29,7 +29,7 @@ use crate::model::{InitialSync, VolumeSpec};
 pub struct Local {
     /// The backing file exists.
     pub image: bool,
-    /// A resource file, an applied copy, a device link or a configured kernel resource exists.
+    /// A resource file, an applied copy or a device link of ambar's exists (a resource that only the kernel has is not ambar's).
     pub traces: bool,
     /// The synced marker exists.
     pub synced: bool,

@@ -1268,6 +1268,98 @@ fn a_held_volume_lock_makes_apply_and_remove_busy() {
     assert!(reconciler.apply(&spec(), "lima-dv-1").is_ok());
 }
 
+// ---- remove_checked ----
+
+/// A node with a full copy of `spike` on disk.
+fn copy_on_disk() -> (TempDir, Paths, FakeRunner) {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_copy(&paths, true, true);
+    (tmp, paths, fake_node())
+}
+
+#[test]
+fn a_guard_that_refuses_runs_nothing_and_deletes_nothing() {
+    let (_tmp, paths, runner) = copy_on_disk();
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler
+        .remove_checked("spike", &|| Err("a peer is Primary".to_string()))
+        .unwrap_err();
+    assert!(
+        matches!(&err, ReconcileError::Refused { volume, reason } if volume == "spike" && reason == "a peer is Primary"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("a peer is Primary"), "{err}");
+    assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+    for path in [
+        paths.image("spike"),
+        paths.ready_marker("spike"),
+        paths.synced_marker("spike"),
+        paths.res_file("spike"),
+        paths.applied_res("spike"),
+        paths.device_link("spike"),
+    ] {
+        assert!(path.symlink_metadata().is_ok(), "{} was deleted", path.display());
+    }
+}
+
+#[test]
+fn a_guard_that_passes_lets_remove_proceed() {
+    let (_tmp, paths, runner) = copy_on_disk();
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let steps = reconciler.remove_checked("spike", &|| Ok(())).unwrap();
+    assert!(steps.contains(&"remove-file"), "{steps:?}");
+    assert!(!paths.image("spike").exists());
+}
+
+#[test]
+fn the_guard_runs_with_the_volume_lock_held() {
+    let (_tmp, paths, runner) = copy_on_disk();
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let seen_busy = Mutex::new(None);
+    reconciler
+        .remove_checked("spike", &|| {
+            // The lock is taken without waiting: a second taker sees it held.
+            *seen_busy.lock().unwrap() = Some(matches!(
+                reconciler.lock_volume("spike"),
+                Err(ReconcileError::Busy { .. })
+            ));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(*seen_busy.lock().unwrap(), Some(true));
+}
+
+#[test]
+fn the_guard_does_not_run_when_the_volume_is_busy_or_the_name_is_invalid() {
+    let (_tmp, paths, runner) = copy_on_disk();
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let called = Mutex::new(0);
+    let guard = || {
+        *called.lock().unwrap() += 1;
+        Ok(())
+    };
+    let held = reconciler.lock_volume("spike").unwrap();
+    let err = reconciler.remove_checked("spike", &guard).unwrap_err();
+    assert!(matches!(err, ReconcileError::Busy { .. }), "{err}");
+    drop(held);
+    let err = reconciler.remove_checked("../x", &guard).unwrap_err();
+    assert!(matches!(err, ReconcileError::Spec(_)), "{err}");
+    assert_eq!(*called.lock().unwrap(), 0);
+}
+
 #[test]
 fn the_lock_file_counts_as_linked_while_its_path_names_the_open_file() {
     let tmp = TempDir::new().unwrap();
