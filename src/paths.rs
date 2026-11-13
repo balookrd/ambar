@@ -34,10 +34,11 @@ impl Paths {
         self.volumes_dir.join(format!("{volume}.img.ready"))
     }
 
-    /// Empty marker written right before `drbdadm create-md` runs on a file
+    /// Marker written right before `drbdadm create-md` runs on a file
     /// that the metadata check found without metadata, and removed once the
     /// ready marker exists. It records that this agent itself started
-    /// `create-md`: a crash in between leaves metadata on a file without the
+    /// `create-md`; its content is `<dev>:<ino>` of the backing file, and a
+    /// marker of another file is ignored. A crash in between leaves metadata on a file without the
     /// ready marker, and with this marker the next `apply` finishes the
     /// initialisation instead of treating its own metadata as foreign. It
     /// never makes `plan` choose `create-md`: that needs a file without the
