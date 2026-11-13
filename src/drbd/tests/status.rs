@@ -227,6 +227,7 @@ fn every_single_deviation_from_the_fresh_sample_blocks_the_skip() {
             peer0(st).replication_state = "SyncTarget".into()
         }),
         ("local role Primary", |st| st.role = Role::Primary),
+        ("peer role Primary", |st| st.connections[0].peer_role = Role::Primary),
         ("local device open", |st| dev0(st).open = true),
         ("resource suspended", |st| st.suspended = true),
         ("local device client", |st| dev0(st).client = true),

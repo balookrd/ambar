@@ -34,6 +34,14 @@ impl Paths {
         self.volumes_dir.join(format!("{volume}.img.ready"))
     }
 
+    /// Empty marker written once the copy on this node has been in sync: after
+    /// the leader skipped the initial sync, or when the local disk was first
+    /// seen `UpToDate`. While it is absent the volume counts as never
+    /// synchronised on this node.
+    pub fn synced_marker(&self, volume: &str) -> PathBuf {
+        self.volumes_dir.join(format!("{volume}.img.synced"))
+    }
+
     pub fn res_file(&self, volume: &str) -> PathBuf {
         self.res_dir.join(format!("{volume}.res"))
     }
