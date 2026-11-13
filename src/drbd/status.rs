@@ -138,8 +138,9 @@ impl ResourceStatus {
 
     /// Checks that every status field is consistent with a freshly created
     /// volume: this node is a `Secondary` with an `Inconsistent` diskful,
-    /// closed, unsuspended volume 0; there is at least one connection and all
-    /// are `Connected`; each peer has a volume-0 device in replication state
+    /// closed, unsuspended volume 0; there is at least one connection, all
+    /// are `Connected` and every peer is a `Secondary` (a `Primary` peer may
+    /// have written); each peer has a volume-0 device in replication state
     /// `Established` whose disk is `Inconsistent`, or `Diskless` with
     /// `peer-client` set (a node attached without a disk).
     ///
@@ -164,6 +165,7 @@ impl ResourceStatus {
         };
         let peers_fresh = self.connections.iter().all(|c| {
             c.connection_state == ConnectionState::Connected
+                && c.peer_role == Role::Secondary
                 && c.peer_devices.iter().find(|p| p.volume == 0).is_some_and(peer_fresh)
         });
         local_fresh && !self.connections.is_empty() && peers_fresh
