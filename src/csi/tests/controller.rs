@@ -680,18 +680,42 @@ async fn v2_an_earlier_object_is_kept_and_the_call_goes_to_the_wait() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn v2_equal_timestamps_are_decided_by_the_name() {
-    // "aaa" sorts before "vol": the rival wins and "vol" withdraws.
+async fn w1_a_rival_with_the_same_timestamp_wins_whatever_its_name_is() {
+    // "aaa" sorts before "vol", "zzz" after it: in both cases the later
+    // creator withdraws, there is no name tie-break.
+    for rival_name in ["aaa", "zzz"] {
+        let h = harness();
+        rival_appears(&h, rival(rival_name, 1000, 7000, Some(T0)));
+        let (code, message) = code_of(create(&h, request("vol")).await);
+        assert_eq!(code, Code::Aborted, "{rival_name}: {message}");
+        assert!(message.contains(rival_name), "{message}");
+        assert_eq!(*h.volumes.deleted.lock().unwrap(), ["vol"], "{rival_name}");
+        assert!(h.volumes.object("vol").unwrap().metadata.deletion_timestamp.is_some());
+        assert!(
+            h.volumes
+                .object(rival_name)
+                .unwrap()
+                .metadata
+                .deletion_timestamp
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn w1_a_rival_one_second_earlier_wins_and_one_second_later_loses() {
+    // `T0` is the stamp of the object this call creates.
     let h = harness();
-    rival_appears(&h, rival("aaa", 1000, 7000, Some(T0)));
+    rival_appears(&h, rival("rival", 1000, 7000, Some("2025-12-31T23:59:59Z")));
     assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Aborted);
     assert_eq!(*h.volumes.deleted.lock().unwrap(), ["vol"]);
-    // "zzz" sorts after "vol": "vol" stays.
+
     let h = harness();
-    rival_appears(&h, rival("zzz", 1000, 7000, Some(T0)));
+    rival_appears(&h, rival("rival", 1000, 7000, Some("2026-01-01T00:00:01Z")));
     let _agents = agents_report(&h.volumes);
     create(&h, request("vol")).await.unwrap();
     assert!(h.volumes.deleted.lock().unwrap().is_empty());
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -761,6 +785,88 @@ async fn v2_a_failing_withdrawal_is_unavailable() {
     rival_appears(&h, rival("rival", 1000, 7000, Some(OLDER)));
     *h.volumes.fail_exact.lock().unwrap() = Some(ApiError::Other("the API server is down".into()));
     assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Unavailable);
+}
+
+// W2: a retry re-checks the collision, read only.
+
+#[tokio::test(start_paused = true)]
+async fn w2_a_retry_finding_a_colliding_object_is_aborted_and_deletes_nothing() {
+    // Same minor, same port, both; the rival is older or newer than "vol":
+    // the retry path never decides by age, it deletes nothing.
+    for (minor, port) in [(1000, 7999), (1999, 7000), (1000, 7000)] {
+        for stamp in [OLDER, NEWER] {
+            let h = harness();
+            h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+            h.volumes.put(rival("rival", minor, port, Some(stamp)));
+            let (code, message) = code_of(create(&h, request("vol")).await);
+            assert_eq!(code, Code::Aborted, "{minor} {port} {stamp}: {message}");
+            assert!(
+                message.contains("\"vol\"") && message.contains("\"rival\""),
+                "{message}"
+            );
+            assert!(message.contains("operator") && message.contains("newer"), "{message}");
+            assert!(h.volumes.deleted.lock().unwrap().is_empty());
+            assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+            assert!(h.volumes.object("vol").unwrap().metadata.deletion_timestamp.is_none());
+            assert!(h.volumes.object("rival").unwrap().metadata.deletion_timestamp.is_none());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn w2_a_retry_without_a_collision_goes_to_the_wait() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    h.volumes.put(rival("rival", 1001, 7001, Some(OLDER)));
+    // Nothing reports: the wait runs to its deadline, so the check did not stop it.
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::DeadlineExceeded, "{message}");
+    assert_eq!(h.volumes.fresh_lists.load(Ordering::SeqCst), 1);
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn w2_a_retry_of_an_up_to_date_object_succeeds_without_a_live_list() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    // A colliding object exists, but a volume that is up to date is not re-checked.
+    h.volumes.put(rival("rival", 1000, 7000, Some(OLDER)));
+    for node in ["n1", "n2", "n3"] {
+        h.volumes.set_entry("vol", up_to_date(node));
+    }
+    assert_eq!(
+        create(&h, request("vol")).await.unwrap().volume.unwrap().volume_id,
+        "vol"
+    );
+    assert_eq!(h.volumes.fresh_lists.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn w2_a_failing_live_list_on_the_retry_path_is_unavailable() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    h.volumes.fail_fresh.store(true, Ordering::SeqCst);
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::Unavailable, "{message}");
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn w2_the_retry_after_an_unclear_abort_does_not_wait_on_a_colliding_pair() {
+    // The first attempt created "vol" and aborted as unclear (the rival has
+    // no timestamp), leaving both objects; the retry reports the collision
+    // at once instead of waiting for the deadline.
+    let h = harness();
+    rival_appears(&h, rival("rival", 1000, 7000, None));
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::Aborted);
+    let started = tokio::time::Instant::now();
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::Aborted, "{message}");
+    assert!(message.contains("operator"), "{message}");
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    assert!(h.volumes.exact_deletes.lock().unwrap().is_empty());
 }
 
 // V3: error mapping and small cases.

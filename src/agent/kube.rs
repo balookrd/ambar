@@ -10,7 +10,7 @@
 //! |---|---|
 //! | `get` | `Api::get_opt` |
 //! | `list` | the reflector cache once the watch has listed once, `Api::list` before that |
-//! | `list_fresh` | `Api::list` with `ListParams::default()` (no `resourceVersion`: the API server answers from a quorum read of etcd, not from its own cache), following `metadata.continue` while the server sets it |
+//! | `list_fresh` | `Api::list` with `ListParams::default()` (no `resourceVersion`: a list without it is a consistent read), following `metadata.continue` while the server sets it |
 //! | `create` | `Api::create`; the uid of the stored object is in `Created::New`; HTTP 409 is `Created::Exists` |
 //! | `delete` | `Api::delete`; HTTP 404 is success |
 //! | `delete_exact` | `Api::delete` with `DeleteParams::preconditions` (`uid`); HTTP 404 is success, a failed precondition (HTTP 409) is `ApiError::Conflict` |
@@ -381,7 +381,7 @@ impl Volumes for KubeVolumes {
     }
 
     async fn list_fresh(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
-        // Default parameters: no `resourceVersion` (a quorum read) and no
+        // Default parameters: no `resourceVersion` (a list without it is a consistent read) and no
         // `limit` (the server returns everything in one response). The
         // client does not paginate by itself; a `continue` token in the
         // answer is followed all the same, so that a server that chunks
