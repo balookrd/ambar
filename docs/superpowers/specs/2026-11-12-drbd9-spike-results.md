@@ -6767,3 +6767,375 @@ OK: stand is up
 | Дополнительно: PVC и под `smoke14` на том же драйвере, под агента `dv-3` заменён при живом томе | На `dv-3` устройство показано как `/dev/loop0 /pvc-3471a8ab-….img`, на `dv-2` как `/dev/loop0 /var/lib/rancher/ambar/volumes/pvc-3471a8ab-….img`; чтение `hello-ambar` после замены; после удаления пода и PVC: `detach-loop` в журнале каждого узла, `losetup --list` пуст, файлов нет, `ReplicatedVolume` исчез за ~2 мин 16 с |
 
 Задержка между удалением PVC и исчезновением `ReplicatedVolume` не исследовалась. Шаги 4 (`stand/install.sh --remove`, `stand/check.sh`, повторная установка) и 5 (повторная проверка на переустановленном драйвере) не выполнены: запуск `--remove` отклонён системой разрешений. После прогона драйвер установлен, томов нет, `stand/check.sh` печатает `OK: stand is up`.
+
+
+## Проверки CSI на стенде
+
+Стенд 2026-11-14: четыре ВМ Lima (`dv-1`..`dv-4`, по 2 CPU, 3 ГиБ RAM, 20 ГиБ диска, шаблон `stand/lima/node.yaml`), ядро `6.12.116+deb13-arm64`, k3s `v1.37.2+k3s1`, драйвер из `deploy/` (образ `ambar-drbd:dev`, собран `image/build.sh` из дерева с коммитом `4d32d57`). Хост: macOS, 18 ГиБ RAM. Сквозную проверку выполняет `stand/csi-e2e.sh`. Образ тестовых подов: `docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec` (индекс `busybox:1.37.0`).
+
+### Четвёртая ВМ
+
+| Действие | Результат |
+|---|---|
+| `NODES="dv-1 dv-2 dv-3 dv-4" stand/up.sh` | Создана `dv-4` из того же шаблона, ядро совпало с `KVER` без перезапуска, 2 мин 13 с, последняя строка `OK: stand is up` |
+| `NODES="dv-1 dv-2 dv-3 dv-4" stand/k3s.sh` | `dv-4` присоединена командой `k3s agent` (`K3S_URL=https://<адрес dv-1>:6443`, токен первого server), 1 мин 32 с; `kc get nodes`: четыре узла `Ready`, роли `control-plane,etcd` у `dv-1`..`dv-3`, у `dv-4` роли нет |
+| `stand/check.sh` с `NODES` из четырёх узлов и без переменной | В обоих случаях `OK: stand is up` (во втором проверены три узла) |
+| `NODES="dv-1 dv-2 dv-3 dv-4" stand/install.sh` на установленном драйвере | 49 с; `ConfigMap ambar-nodes` с четырьмя записями (`nodeId` 0..3, адрес `dv-4` `192.168.104.5`); DaemonSet перезапущен, четыре пода агента `3/3 Running`; последняя строка `OK: ambar installed on 4 nodes` |
+| `stand/csi-e2e.sh` без `NODES` | Печатает `FAIL: steps e and f need a node outside the volume…`, код возврата 2 |
+
+Память хоста в 03:06, во время одного из прогонов до правки манифеста: `vm_stat` показывал 7417 свободных страниц по 16 КиБ, `sysctl vm.swapusage`: 1796,88 МиБ из 3072 МиБ занято. ВМ не уменьшались.
+
+### Прогоны
+
+Все прогоны с `NODES="dv-1 dv-2 dv-3 dv-4"`.
+
+| Прогон | Время | Итог |
+|---|---|---|
+| 3 прогона при отладке скрипта | 1 мин 9 с, 56 с, 1 мин 37 с | Остановились на ошибках самого скрипта (срабатывание `trap ERR` внутри `eval`, события `FailedMount` от пода `dup3` прежнего прогона, слишком короткое окно замеров в шаге h). Скрипт исправлен, результаты не используются |
+| 2 прогона после исправлений, манифест `deploy/daemonset.yaml` без правки | 2 мин 56 с, 2 мин 54 с | Оба `OK: csi e2e` |
+| 3-й и 4-й прогоны (после дополнений скрипта) | — | Прогон 3: ошибка шага k, `kubectl rollout status ds/ambar --timeout=240s` не дождался (под агента на `dv-2` в `ContainerCreating` ~100 с). Прогон 4: ошибка в начальной очистке, таймаут того же `rollout status`. Причина — см. «Удвоение монтирований» ниже |
+| **Прогон 1 из 2 после правки манифеста** | 3 мин 11 с | `OK: csi e2e` |
+| **Прогон 2 из 2 после правки манифеста** | 3 мин 02 с | `OK: csi e2e` |
+
+Значения в таблице шагов ниже — из двух последних прогонов (подряд, после правки манифеста).
+
+### Шаги и наблюдавшиеся значения
+
+«Время» — секунды от действия, `wait_until` опрашивает раз в 2 с, поэтому значение 0 означает «выполнено при первой проверке».
+
+| Шаг | Что проверено | Прогон 1 | Прогон 2 |
+|---|---|---|---|
+| a | PVC `e2e-r3` (`ambar-r3`) `Bound`, под `w3` на `dv-1`, три `Replica`, `initialSync: Done`, три записи `status.nodes` `UpToDate` | `Bound` через 10 с; под `Ready` на 25-й с прогона; записи `UpToDate` сразу после `Ready` | `Bound` через 3 с; под `Ready` на 16-й с; записи сразу |
+| b | `blockdev --getsize64 /dev/drbd1000` на `dv-1` | 1073766400 | 1073766400 |
+| c | Под `r3` на `dv-2`, файл `/data/f` совпал, на `dv-1` роль `Secondary` | `r3` `Ready` на 32-й с; `Secondary` на `dv-1` при первой проверке (1 с) | 22-я с; 1 с |
+| d | PVC `e2e-r2` (`ambar-r2`), под на `dv-1`: 2 `Replica`, 1 `Witness`, 3 записи в `spec.nodes` | `Bound` через 29 с; `dv-1`, `dv-4` Replica, `dv-2` Witness, вне тома `dv-3` | `Bound` через 30 с; тот же состав |
+| e | Под на узле вне тома (`dv-3`): запись `Client`, `Running`, данные совпали, файла `<том>.img` на узле нет | `Ready` на 96-й с прогона; запись `lima-dv-3=Client` | 87-я с; запись `Client` |
+| f | Удаление пода на `dv-3` | `kubectl delete pod --wait` 1 с; запись `Client` исчезла при первой проверке; `drbdsetup status` на `dv-3`: `<том>: No such resource`; у `dv-1`, `dv-2`, `dv-4` строк с `lima-dv-3` нет | 2 с; то же |
+| g | Под на `Witness` (`dv-2`) | `spec.nodes` до и после пода (и через 10 с после его удаления) совпал; запись `Witness` на месте; данные совпали | то же |
+| h | `rollout restart ds/ambar` под писателем `r3` на `dv-2` (`dd conv=fsync` раз в секунду) | `rollout restart` и `rollout status` вместе 4 с; отсчёты счётчика 96 96 97 97 98 98 99 99 99; через 12 с от начала перезапуска 108; `restartCount` пода 0; испорченное поле `message` в записи `dv-2` возвращено агентом за 0 с (первая проверка) | 4 с; 96 97 97 98 98 99 99 100 100; 108; `restartCount` 0; 0 с |
+| i | StorageClass `e2e-r1`, `replicas: "1"` | PVC `Pending`; событие `ProvisioningFailed` через 0 с: `rpc error: code = InvalidArgument desc = replicas is 1, at least 2 are required` | то же |
+| j | Удаление подов и PVC | PVC исчезли 0 с, объекты `ReplicatedVolume` через 3 с после удаления PVC; на всех четырёх узлах файлов, loop-устройств и ресурсов DRBD нет (`# No currently configured DRBD found.`) | 1 с и 3 с; то же |
+| k | Объект удалён при отсутствии агента на `dv-2` | под агента `dv-2` исчез через 0 с после метки; остался финализатор `replica-lima-dv-2` (финализаторы остальных узлов агенты сняли сами); после снятия финализатора и возврата агента (3 с) в журнале: `ambar-agent: error: volume "<том>": refused: a backing file exists but no ReplicatedVolume object has this name`; файл `<том>.img` на `dv-2` остался; `ambar remove --name <том>` в поде агента напечатал `["down", "detach-loop", "remove-file", "remove-marker", "remove-synced-marker", "remove-link", "remove-res", "remove-applied"]`; на `dv-1`, `dv-3`, `dv-4` файлов тома не было до очистки | то же, 1 с и 3 с |
+
+Способ убрать агент с узла в шаге k: в `DaemonSet ambar` добавляется `nodeAffinity` с условием `ambar-e2e-skip DoesNotExist` (шаблон меняется, агенты перезапускаются один раз), затем узел получает метку `ambar-e2e-skip=true`; после проверки метка и `nodeAffinity` снимаются (при ошибке скрипта то же делает его обработчик).
+
+Задержка между удалением PVC и исчезновением `ReplicatedVolume` в этих прогонах 3 с. В прогонах 2026-11-14 после замены подов агента (раздел выше) она составила около 2 мин 17 с. Причина разницы не исследовалась: `[проверить: влияние накопленных монтирований (см. ниже), состояние стенда на тот момент]`. В одном из прогонов до правки манифеста под `r3` оставался в `Terminating` ~55 с (kubelet начал размонтирование через ~34 с после выхода контейнера), в журнале агента узла с копией при этом: `the local copy is kept: peer lima-dv-2 is Primary`.
+
+Заметка о сопоставимости: шаг i ожидает `InvalidArgument` (регистр и написание gRPC), а не `INVALID_ARGUMENT` из текста задачи; проверка без учёта регистра и подчёркивания.
+
+### Удвоение монтирований в поде агента
+
+Симптом: в прогонах до правки манифеста под агента на `dv-2` оставался в `ContainerCreating` ~100 с (`Created` через 78 с, `Started` через 37 с после этого), `rollout status` не укладывался в 240 с, load average ВМ 5,84.
+
+Измерение на узлах (`/proc/self/mountinfo` хоста):
+
+| Узел | Строк всего | Строк с `plugins/ambar` |
+|---|---|---|
+| `dv-1` | 8242 | 8191 |
+| `dv-2` | 32800 | 32767 |
+| `dv-3` | 16419 | 16383 |
+| `dv-4` | 4131 | 4095 |
+
+Числа равны 2^n − 1. В `deploy/daemonset.yaml` контейнер `ambar` монтировал `/var/lib/kubelet` с `mountPropagation: Bidirectional` и ещё раз тот же каталог сокета (`socket-dir`, hostPath `/var/lib/kubelet/plugins/ambar`) в `/var/lib/kubelet/plugins/ambar`. Объяснение: второе bind-монтирование внутри двунаправленного монтирования распространяется на хост, и каждый следующий запуск пода монтирует каталог поверх уже накопленной стопки; `[проверить: механизм не изолирован отдельным опытом]`.
+
+Исправление: из контейнера `ambar` убрано монтирование `socket-dir` (каталог входит в монтирование `/var/lib/kubelet`; сайдкары монтируют `socket-dir` в `/csi` без распространения). Накопленные монтирования сняты на всех узлах командой `umount -R -l /var/lib/kubelet/plugins/ambar` (на `dv-2` команда шла несколько минут). После правки три подряд `rollout restart ds/ambar`: `/proc/self/mountinfo` хоста без изменений (`dv-1` 51, `dv-2` 36, `dv-3` 36, `dv-4` 37 строк; строк с `plugins/ambar` 0, на `dv-4` 1). Два последних прогона `stand/csi-e2e.sh` выполнены после этого.
+
+### Наблюдения при живых томах
+
+Выводы скрипта прогона 2 из 2 (имена томов и узлы как в прогоне).
+
+**1. Узел `Client`, том смонтирован (шаг e, `dv-3`), в поде агента.**
+
+```
+blockdev --getsize64 /dev/drbd1001  ->  1073766400   (rc=0)
+blkid -p -o value -s TYPE /dev/drbd1001  ->  ext4    (rc=0)
+```
+
+Минор `1001` — `spec.minor` тома `e2e-r2` (JSON в пункте 5); `1000` в таблице шага b относится к тому `e2e-r3`. Вывод скрипта печатает только результаты команд. Статус на `dv-3`:
+
+```
+pvc-c680ac7b-a9b6-4b81-a80e-7ef32ee72b9c role:Primary
+  disk:Diskless client:yes open:yes
+  lima-dv-1 role:Secondary
+    peer-disk:UpToDate
+  lima-dv-2 role:Secondary
+    peer-disk:Diskless peer-client:yes
+  lima-dv-4 role:Secondary
+    peer-disk:UpToDate
+```
+
+**2. Роль после размонтирования.** Шаг c, `dv-1` (Replica) после удаления пода, первая проверка через 1 с:
+
+```
+pvc-49ebb6ca-352a-4899-90e8-77dc7462b09e role:Secondary
+  disk:UpToDate open:no
+  lima-dv-2 role:Primary
+    peer-disk:UpToDate
+  lima-dv-3 role:Secondary
+    peer-disk:UpToDate
+```
+
+Шаг g, `dv-2` (Witness) после удаления пода:
+
+```
+pvc-c680ac7b-a9b6-4b81-a80e-7ef32ee72b9c role:Secondary
+  disk:Diskless client:yes open:no
+  lima-dv-1 role:Secondary
+    peer-disk:UpToDate
+  lima-dv-4 role:Secondary
+    peer-disk:UpToDate
+```
+
+**3. Второй под с тем же PVC на другом узле, пока том смонтирован.** Том `e2e-r3` (Replica `dv-1`, `dv-2`, `dv-3`), под `r3` на `dv-2`, второй под `dup3` на `dv-4` (не член тома). Оба прогона: событие через 3 с, под `Pending`:
+
+```
+Warning   FailedMount   MountVolume.MountDevice failed for volume "pvc-49ebb6ca-352a-4899-90e8-77dc7462b09e" : rpc error: code = FailedPrecondition desc = the volume is open on another node: cannot read /dev/drbd1000 (in use on another node): Wrong medium type (os error 124)
+```
+
+`drbdsetup status` на `dv-4` в момент события: `<том>: No such resource`. На `dv-2` в прогоне 2: `lima-dv-4 connection:Connecting` (в прогоне 1: `lima-dv-4 role:Secondary`, `peer-disk:Diskless peer-client:yes`). `spec.nodes` до пода и в момент события: три `Replica`, записи `Client` для `dv-4` не было; после удаления пода тоже; `drbdsetup status` на `dv-2` через 5 с после удаления пода (прогон 2): строки `dv-4` нет. `[проверить: появлялась ли запись Client на dv-4 между созданием пода и первой проверкой; скрипт читает spec.nodes только после события]`. Роль на `dv-2` оставалась `Primary`, `open:yes`; под `r3` `Running`.
+
+**4.** `Client` без доступной копии не создавался: нужен разрыв сети (фаза 3).
+
+**5. `kc get rv <том> -o json --show-managed-fields`, том `e2e-r2` (Replica `dv-1`, `dv-4`, Witness `dv-2`), после `UpToDate` двух копий.**
+
+```json
+{
+    "apiVersion": "ambar.balookrd.github.io/v1alpha1",
+    "kind": "ReplicatedVolume",
+    "metadata": {
+        "annotations": {
+            "ambar.balookrd.github.io/formatted": "true"
+        },
+        "creationTimestamp": "2026-11-13T19:26:29Z",
+        "finalizers": [
+            "ambar.balookrd.github.io/replica-lima-dv-1",
+            "ambar.balookrd.github.io/replica-lima-dv-4"
+        ],
+        "generation": 2,
+        "managedFields": [
+            {
+                "apiVersion": "ambar.balookrd.github.io/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:status": {
+                        "f:nodes": {
+                            "k:{\"name\":\"lima-dv-2\"}": {
+                                ".": {},
+                                "f:connections": {},
+                                "f:disk": {},
+                                "f:message": {},
+                                "f:name": {},
+                                "f:quorum": {},
+                                "f:role": {}
+                            }
+                        }
+                    }
+                },
+                "manager": "ambar-lima-dv-2",
+                "operation": "Apply",
+                "subresource": "status",
+                "time": "2026-11-13T19:26:58Z"
+            },
+            {
+                "apiVersion": "ambar.balookrd.github.io/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:status": {
+                        "f:nodes": {
+                            "k:{\"name\":\"lima-dv-4\"}": {
+                                ".": {},
+                                "f:connections": {},
+                                "f:disk": {},
+                                "f:message": {},
+                                "f:name": {},
+                                "f:quorum": {},
+                                "f:role": {}
+                            }
+                        }
+                    }
+                },
+                "manager": "ambar-lima-dv-4",
+                "operation": "Apply",
+                "subresource": "status",
+                "time": "2026-11-13T19:26:58Z"
+            },
+            {
+                "apiVersion": "ambar.balookrd.github.io/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:status": {
+                        "f:nodes": {
+                            "k:{\"name\":\"lima-dv-1\"}": {
+                                ".": {},
+                                "f:connections": {},
+                                "f:disk": {},
+                                "f:message": {},
+                                "f:name": {},
+                                "f:quorum": {},
+                                "f:role": {}
+                            }
+                        }
+                    }
+                },
+                "manager": "ambar-lima-dv-1",
+                "operation": "Apply",
+                "subresource": "status",
+                "time": "2026-11-13T19:27:00Z"
+            },
+            {
+                "apiVersion": "ambar.balookrd.github.io/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:metadata": {
+                        "f:annotations": {
+                            ".": {},
+                            "f:ambar.balookrd.github.io/formatted": {}
+                        },
+                        "f:finalizers": {
+                            ".": {},
+                            "v:\"ambar.balookrd.github.io/replica-lima-dv-1\"": {},
+                            "v:\"ambar.balookrd.github.io/replica-lima-dv-4\"": {}
+                        }
+                    },
+                    "f:spec": {
+                        ".": {},
+                        "f:initialSync": {},
+                        "f:maxPeers": {},
+                        "f:minor": {},
+                        "f:nodes": {
+                            ".": {},
+                            "k:{\"name\":\"lima-dv-1\"}": {
+                                ".": {},
+                                "f:address": {},
+                                "f:kind": {},
+                                "f:name": {},
+                                "f:nodeId": {}
+                            },
+                            "k:{\"name\":\"lima-dv-2\"}": {
+                                ".": {},
+                                "f:address": {},
+                                "f:kind": {},
+                                "f:name": {},
+                                "f:nodeId": {}
+                            },
+                            "k:{\"name\":\"lima-dv-4\"}": {
+                                ".": {},
+                                "f:address": {},
+                                "f:kind": {},
+                                "f:name": {},
+                                "f:nodeId": {}
+                            }
+                        },
+                        "f:port": {},
+                        "f:protocol": {},
+                        "f:sizeBytes": {}
+                    }
+                },
+                "manager": "unknown",
+                "operation": "Update",
+                "time": "2026-11-13T19:27:00Z"
+            }
+        ],
+        "name": "pvc-c680ac7b-a9b6-4b81-a80e-7ef32ee72b9c",
+        "resourceVersion": "278049",
+        "uid": "e72c7189-a939-4eb2-8d5f-bdf7074fe7b4"
+    },
+    "spec": {
+        "initialSync": "Done",
+        "maxPeers": 7,
+        "minor": 1001,
+        "nodes": [
+            {
+                "address": "192.168.104.1",
+                "kind": "Replica",
+                "name": "lima-dv-1",
+                "nodeId": 0
+            },
+            {
+                "address": "192.168.104.3",
+                "kind": "Witness",
+                "name": "lima-dv-2",
+                "nodeId": 1
+            },
+            {
+                "address": "192.168.104.5",
+                "kind": "Replica",
+                "name": "lima-dv-4",
+                "nodeId": 3
+            }
+        ],
+        "port": 7001,
+        "protocol": "C",
+        "sizeBytes": 1073741824
+    },
+    "status": {
+        "nodes": [
+            {
+                "connections": [
+                    {
+                        "peer": "lima-dv-1",
+                        "peerDisk": "UpToDate",
+                        "state": "Connected"
+                    },
+                    {
+                        "peer": "lima-dv-4",
+                        "peerDisk": "UpToDate",
+                        "state": "Connected"
+                    }
+                ],
+                "disk": "Diskless",
+                "message": "",
+                "name": "lima-dv-2",
+                "quorum": true,
+                "role": "Secondary"
+            },
+            {
+                "connections": [
+                    {
+                        "peer": "lima-dv-1",
+                        "peerDisk": "UpToDate",
+                        "state": "Connected"
+                    },
+                    {
+                        "peer": "lima-dv-2",
+                        "peerDisk": "Diskless",
+                        "state": "Connected"
+                    }
+                ],
+                "disk": "UpToDate",
+                "message": "",
+                "name": "lima-dv-4",
+                "quorum": true,
+                "role": "Secondary"
+            },
+            {
+                "connections": [
+                    {
+                        "peer": "lima-dv-2",
+                        "peerDisk": "Diskless",
+                        "state": "Connected"
+                    },
+                    {
+                        "peer": "lima-dv-4",
+                        "peerDisk": "UpToDate",
+                        "state": "Connected"
+                    }
+                ],
+                "disk": "UpToDate",
+                "message": "",
+                "name": "lima-dv-1",
+                "quorum": true,
+                "role": "Primary"
+            }
+        ]
+    }
+}
+```
+
+### Не выполнено
+
+| Что | Причина |
+|---|---|
+| `stand/install.sh --remove` и `stand/agent-smoke.sh` (шаг 5 задачи) | Удаление CRD и пространства имён ждёт решения владельца репозитория; не запускалось |
+| Бездисковый `Client` без доступной копии | Нужен разрыв сети; фаза 3 |
+| Ветка установки ядра в `stand/up.sh` | Не выполнялась: ядро на `dv-4` совпало с `KVER` после создания ВМ |

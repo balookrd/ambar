@@ -2,7 +2,16 @@
 # Shared helpers for the ambar test stand. Source this file.
 set -euo pipefail
 
-NODES=(dv-1 dv-2 dv-3)
+# NODES is a space-separated list from the environment, default three nodes:
+#   NODES="dv-1 dv-2 dv-3 dv-4" stand/up.sh
+# The first three nodes are k3s servers, the rest are agents (stand/k3s.sh).
+# A bash array cannot be exported: the list is also passed to child scripts
+# through AMBAR_NODES. The check keeps a repeated `source` from reading an
+# array as a string.
+if [[ "$(declare -p NODES 2>/dev/null)" != "declare -a"* ]]; then
+    read -r -a NODES <<<"${NODES:-${AMBAR_NODES:-dv-1 dv-2 dv-3}}"
+fi
+export AMBAR_NODES="${NODES[*]}"
 KVER="${KVER:-6.12.116+deb13-arm64}"
 # Interface of the network shared between the VMs.
 NET_IF="${NET_IF:-eth0}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates three VMs and boots them into the kernel version used on the k3s nodes.
+# Creates one VM per name in NODES (default dv-1 dv-2 dv-3) and boots them into the kernel version used on the k3s nodes.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 TEMPLATE="$(dirname "$0")/lima/node.yaml"
