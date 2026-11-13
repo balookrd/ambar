@@ -72,7 +72,8 @@
 //! `Task::DeleteReplica` by the peer checks (extends R18, R10). The copy is
 //! deleted only if all of these hold; otherwise it is kept, the reason goes
 //! into the `message` of this node's `status.nodes` entry and the pass is
-//! repeated after 30 s (or earlier, when the object changes):
+//! repeated after 5 s when the reason is a DRBD state (`Outcome::KeptDrbd`),
+//! after 30 s otherwise (`Outcome::Kept`), or earlier, when the object changes:
 //!
 //! 1. the local DRBD status was read without error;
 //! 2. this node is not `Primary`;

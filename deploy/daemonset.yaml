@@ -34,7 +34,12 @@ spec:
       hostNetwork: true
       priorityClassName: system-node-critical
       # One reconcile pass runs external commands for up to 120 s and must not
-      # be killed in the middle: SIGTERM lets the pass finish.
+      # be killed in the middle: SIGTERM lets the pass finish. `create-md` of
+      # a volume larger than about 30 GiB may run longer than 150 s (the
+      # formula in src/drbd/adm.rs: 120 s plus 1 s per started GiB); a rollout
+      # during it kills the command. The volume is new and holds no data, and
+      # the next pass reports `MetadataPresent` if the metadata was left
+      # half-written [not measured].
       terminationGracePeriodSeconds: 150
       tolerations:
         - operator: Exists
@@ -50,10 +55,12 @@ spec:
             - --csi-socket=/var/lib/kubelet/plugins/ambar/csi.sock
           securityContext:
             privileged: true
-          # Ready means the CSI socket exists: the agent binds it after the
-          # reconcile loop and the other services are up (it is renamed into
-          # place when bound, so a half-created socket is not seen). The probe
-          # does not talk to the socket. A socket file left by a killed
+          # Ready means the CSI socket exists. The agent binds the socket
+          # concurrently with the reconcile loop and does not wait for the
+          # first pass of the loop: until the agent is ready, NodeStageVolume
+          # answers UNAVAILABLE. The socket is renamed into place when bound,
+          # so a half-created socket is not seen. The probe does not talk to
+          # the socket. A socket file left by a killed
           # (SIGKILL) agent would make the probe pass early; a normal stop
           # removes the file.
           # There is NO liveness probe on purpose: one reconcile pass may run
