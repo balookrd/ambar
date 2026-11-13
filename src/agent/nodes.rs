@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{Api, Client};
 
-use super::kube::ApiError;
+use super::kube::{ApiError, bounded};
 use crate::config::{ClusterNodes, NODES_CONFIGMAP, NODES_KEY};
 
 #[async_trait]
@@ -32,11 +32,12 @@ impl ConfigMapNodes {
 #[async_trait]
 impl NodeMap for ConfigMapNodes {
     async fn load(&self) -> Result<ClusterNodes, ApiError> {
-        let map = self
-            .api
-            .get_opt(NODES_CONFIGMAP)
+        let cannot_read =
+            |e: &dyn std::fmt::Display| ApiError::Other(format!("cannot read the ConfigMap {NODES_CONFIGMAP}: {e}"));
+        let map = bounded(self.api.get_opt(NODES_CONFIGMAP))
             .await
-            .map_err(|e| ApiError::Other(format!("cannot read the ConfigMap {NODES_CONFIGMAP}: {e}")))?;
+            .map_err(|e| cannot_read(&e))?
+            .map_err(|e| cannot_read(&e))?;
         nodes_from_configmap(map.as_ref())
     }
 }

@@ -87,7 +87,7 @@ Linux kernel.
 cargo test
 ```
 
-Expected line: `test result: ok. 744 passed`. The mount code has tests that run
+Expected line: `test result: ok. 756 passed`. The mount code has tests that run
 only on Linux; on macOS run the suite in a container as well:
 `docker run --rm -v "$PWD":/src -w /src rust:1-slim cargo test --locked`.
 

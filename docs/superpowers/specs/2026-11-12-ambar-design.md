@@ -205,6 +205,7 @@ make -j4 -C /src/drbd KDIR=/lib/modules/6.12.116+deb13-arm64/build SPAAS=false
 | 120 с + 1 с на каждый начатый ГиБ, не меньше 120 с | `drbd::adm::create_md_timeout` | Тайм-аут `drbdadm create-md` |
 | 60 с, опрос раз в 500 мс | `ControllerService::new` | Ожидание `UpToDate` всех копий в `CreateVolume` и исчезновения объекта в `DeleteVolume` |
 | 30 с, опрос раз в 500 мс | `NodeService::new` (`stage_wait`) | Ожидание, пока ресурс станет пригодным для монтирования, в `NodeStageVolume` |
+| 30 с | `agent::kube::API_CALL_TIMEOUT` | Предел одного вызова API-сервера (`get`, `list`, `list_fresh` по страницам, `create`, `delete`, JSON-патчи, apply статуса, чтение ConfigMap `ambar-nodes`); `watch` не ограничен. По истечении вызов завершается ошибкой «the API server did not answer within 30 s», которую вызывающий код обрабатывает как любую ошибку API: проход агента повторяется через 5 с, CSI отвечает `UNAVAILABLE`. Без предела запрос к API-серверу, потерявшему питание после приёма запроса, держал бы замок вызывающего (мьютекс размещения, замок тома, очередь `reconcile`) бесконечно |
 | 5 с | `csi::SHUTDOWN_GRACE` | Предел ожидания сервера gRPC после сигнала остановки |
 | 1, 5, 30, 60 с | `src/agent/run.rs` | Задержки повтора прохода, см. «Агент `ambar`» |
 

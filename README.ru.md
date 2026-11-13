@@ -87,7 +87,7 @@ Docker, ни ядро Linux.
 cargo test
 ```
 
-Ожидаемая строка: `test result: ok. 744 passed`. У кода монтирования есть
+Ожидаемая строка: `test result: ok. 756 passed`. У кода монтирования есть
 тесты, которые выполняются только под Linux; на macOS запустите тесты ещё и в
 контейнере:
 `docker run --rm -v "$PWD":/src -w /src rust:1-slim cargo test --locked`.
