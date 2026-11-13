@@ -146,11 +146,79 @@ fn row_deleting_non_replica_with_image_refuses() {
 fn row_deleting_non_replica_without_image_cleans_or_ignores() {
     for kind in [Some("Witness"), Some("Client"), None] {
         let s = spec(kind);
-        for finalizers in [own_finalizer(), vec![]] {
-            assert_eq!(run(&s, true, &finalizers, TRACES), Task::CleanDiskless, "{kind:?}");
-            assert_eq!(run(&s, true, &finalizers, NONE), Task::Ignore, "{kind:?}");
+        // Without this node's finalizer there is nothing to drop.
+        assert_eq!(run(&s, true, &[], TRACES), Task::CleanDiskless, "{kind:?}");
+        assert_eq!(run(&s, true, &[], NONE), Task::Ignore, "{kind:?}");
+        // With it, traces are cleaned first: the finalizer goes in a later pass.
+        assert_eq!(run(&s, true, &own_finalizer(), TRACES), Task::CleanDiskless, "{kind:?}");
+    }
+}
+
+#[test]
+fn row_deleting_non_replica_with_a_stray_finalizer_and_nothing_local_drops_it() {
+    // The object waits for a finalizer nobody else will remove.
+    for kind in [Some("Witness"), Some("Client"), None] {
+        assert_eq!(
+            run(&spec(kind), true, &own_finalizer(), NONE),
+            Task::DropFinalizer,
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_stray_finalizer_with_a_backing_file_is_never_dropped() {
+    for kind in [Some("Witness"), Some("Client"), None] {
+        assert_eq!(
+            run(&spec(kind), true, &own_finalizer(), IMAGE),
+            Task::Refuse(Refusal::ImageWithoutMembership),
+            "{kind:?}"
+        );
+    }
+}
+
+// --- node listed more than once -----------------------------------------------
+
+/// `spec(kind)` with `n1` listed a second time (another id and address).
+fn spec_with_duplicate(kind: &str) -> ReplicatedVolumeSpec {
+    let mut s = spec(Some(kind));
+    let mut again = s.nodes.last().unwrap().clone();
+    again.node_id = 6;
+    again.address = "192.0.2.6".to_string();
+    s.nodes.push(again);
+    s
+}
+
+#[test]
+fn a_node_listed_twice_is_refused_in_every_state() {
+    for kind in ["Replica", "Witness", "Client"] {
+        let s = spec_with_duplicate(kind);
+        for deleting in [false, true] {
+            for finalizers in [own_finalizer(), vec![]] {
+                for local in [NONE, TRACES, IMAGE] {
+                    let task = run(&s, deleting, &finalizers, local);
+                    assert!(
+                        matches!(task, Task::Refuse(Refusal::InvalidSpec(ref text)) if text.contains(NODE)),
+                        "{kind} deleting={deleting} {local:?} -> {task:?}"
+                    );
+                }
+            }
         }
     }
+}
+
+#[test]
+fn a_duplicate_of_another_node_does_not_concern_this_one() {
+    let mut s = spec(Some("Replica"));
+    let mut again = s.nodes[0].clone();
+    again.node_id = 6;
+    again.address = "192.0.2.6".to_string();
+    s.nodes.push(again);
+    assert_eq!(
+        run(&s, true, &own_finalizer(), IMAGE),
+        Task::DeleteReplica,
+        "a duplicate of r1 is the spec validation's business, not a reason to stop deleting n1"
+    );
 }
 
 // --- object: exists ---------------------------------------------------------
@@ -332,8 +400,14 @@ fn exhaustive_invariants() {
                         for synced in [false, true] {
                             for collision in [false, true] {
                                 for initial_sync in ["Skip", "Done"] {
-                                    for address in ["192.0.2.5", "bogus"] {
-                                        let s = spec_of(kind, initial_sync, address);
+                                    for (address, duplicate) in
+                                        [("192.0.2.5", false), ("bogus", false), ("192.0.2.5", true)]
+                                    {
+                                        let mut s = spec_of(kind, initial_sync, address);
+                                        if duplicate && let Some(own) = s.nodes.iter().find(|n| n.name == NODE).cloned()
+                                        {
+                                            s.nodes.push(own);
+                                        }
                                         let finalizers = if own_fin {
                                             vec![replica_finalizer("r1"), replica_finalizer(NODE)]
                                         } else {
@@ -350,19 +424,33 @@ fn exhaustive_invariants() {
                                         let task =
                                             decide(NODE, VOLUME, (object_state != "none").then_some(&object), local);
                                         let ctx = format!(
-                                            "{object_state} {kind:?} fin={own_fin} {local:?} coll={collision} {initial_sync} {address} -> {task:?}"
+                                            "{object_state} {kind:?} fin={own_fin} {local:?} coll={collision} {initial_sync} {address} dup={duplicate} -> {task:?}"
                                         );
+                                        let listed_twice = duplicate && kind.is_some() && object_state != "none";
+                                        // A node listed twice is refused, whatever else holds.
+                                        if listed_twice {
+                                            assert!(matches!(task, Task::Refuse(Refusal::InvalidSpec(_))), "{ctx}");
+                                        }
                                         let may_delete =
                                             object_state == "deleting" && kind == Some("Replica") && own_fin;
                                         // R10.
                                         if task == Task::DeleteReplica {
                                             assert!(may_delete, "{ctx}");
                                         }
-                                        if may_delete && (image || traces) {
+                                        if may_delete && (image || traces) && !listed_twice {
                                             assert_eq!(task, Task::DeleteReplica, "{ctx}");
                                         }
+                                        // DropFinalizer: this node's finalizer on a deleting
+                                        // object with nothing local, for a Replica and for a
+                                        // node that is not one (a stray finalizer).
                                         if task == Task::DropFinalizer {
-                                            assert!(may_delete && !image && !traces, "{ctx}");
+                                            assert!(
+                                                object_state == "deleting" && own_fin && !image && !traces,
+                                                "{ctx}"
+                                            );
+                                        }
+                                        if object_state == "deleting" && own_fin && !image && !traces && !listed_twice {
+                                            assert_eq!(task, Task::DropFinalizer, "{ctx}");
                                         }
                                         // Never clean a node that has a backing file.
                                         if image {
@@ -371,7 +459,7 @@ fn exhaustive_invariants() {
                                         // Apply only for a live object the node is a member of.
                                         if matches!(task, Task::Apply { .. }) {
                                             assert!(object_state == "exists" && kind.is_some(), "{ctx}");
-                                            assert!(!collision && address != "bogus", "{ctx}");
+                                            assert!(!collision && address != "bogus" && !listed_twice, "{ctx}");
                                             assert!(!image || kind == Some("Replica"), "{ctx}");
                                         }
                                         // An image is never left without an answer other than
@@ -395,5 +483,5 @@ fn exhaustive_invariants() {
             }
         }
     }
-    assert_eq!(checked, 3 * 4 * 2 * 2 * 2 * 2 * 2 * 2 * 2);
+    assert_eq!(checked, 3 * 4 * 2 * 2 * 2 * 2 * 2 * 2 * 3);
 }
