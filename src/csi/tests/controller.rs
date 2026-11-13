@@ -1,0 +1,791 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use serde_json::json;
+use tonic::{Code, Request};
+
+use super::*;
+use crate::agent::kube::ApiError;
+use crate::crd::NodeStatus;
+use crate::csi::proto::volume_capability::{AccessMode, MountVolume};
+use crate::csi::proto::{CapacityRange, Topology, TopologyRequirement, VolumeContentSource};
+use crate::membership::replica_finalizer;
+use crate::tests::volumes::{FakeNodes, FakeVolumes, cluster};
+
+const GIB: u64 = 1 << 30;
+
+struct Harness {
+    volumes: Arc<FakeVolumes>,
+    svc: ControllerService,
+}
+
+/// Three nodes `n1..n3` with 100 GiB each; short waits so that a test that
+/// never becomes ready ends at once on the paused clock.
+fn harness() -> Harness {
+    let volumes = Arc::new(FakeVolumes::default());
+    let mut svc = ControllerService::new(volumes.clone(), Arc::new(FakeNodes(Ok(cluster(&[100 * GIB; 3])))));
+    svc.create_wait = Duration::from_secs(10);
+    svc.delete_wait = Duration::from_secs(10);
+    svc.poll = Duration::from_millis(100);
+    Harness { volumes, svc }
+}
+
+fn mode(mode: Mode) -> Option<AccessMode> {
+    Some(AccessMode { mode: mode as i32 })
+}
+
+fn mount_capability(fs_type: &str, access: Mode) -> VolumeCapability {
+    VolumeCapability {
+        access_mode: mode(access),
+        access_type: Some(AccessType::Mount(MountVolume {
+            fs_type: fs_type.to_string(),
+            ..Default::default()
+        })),
+    }
+}
+
+fn request(name: &str) -> CreateVolumeRequest {
+    CreateVolumeRequest {
+        name: name.to_string(),
+        capacity_range: Some(CapacityRange {
+            required_bytes: GIB as i64,
+            limit_bytes: 0,
+        }),
+        volume_capabilities: vec![mount_capability("ext4", Mode::SingleNodeWriter)],
+        ..Default::default()
+    }
+}
+
+fn with_params(mut req: CreateVolumeRequest, pairs: &[(&str, &str)]) -> CreateVolumeRequest {
+    req.parameters = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<HashMap<_, _>>();
+    req
+}
+
+fn topology(node: &str) -> Topology {
+    Topology {
+        segments: HashMap::from([(TOPOLOGY_KEY.to_string(), node.to_string())]),
+    }
+}
+
+fn up_to_date(node: &str) -> NodeStatus {
+    NodeStatus {
+        name: node.to_string(),
+        role: "Secondary".to_string(),
+        disk: "UpToDate".to_string(),
+        quorum: true,
+        connections: vec![],
+        message: String::new(),
+    }
+}
+
+/// Stands in for the node agents: every 100 ms every Replica of every object
+/// reports `UpToDate`.
+fn agents_report(volumes: &Arc<FakeVolumes>) -> tokio::task::JoinHandle<()> {
+    let volumes = volumes.clone();
+    tokio::spawn(async move {
+        loop {
+            let names: Vec<String> = volumes.objects.lock().unwrap().keys().cloned().collect();
+            for name in names {
+                if let Some(object) = volumes.object(&name) {
+                    for node in object.spec.nodes.iter().filter(|n| n.kind == NodeKind::Replica) {
+                        volumes.set_entry(&name, up_to_date(&node.name));
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+}
+
+async fn create(h: &Harness, req: CreateVolumeRequest) -> Result<CreateVolumeResponse, Status> {
+    h.svc.create_volume(Request::new(req)).await.map(|r| r.into_inner())
+}
+
+async fn delete(h: &Harness, id: &str) -> Result<(), Status> {
+    h.svc
+        .delete_volume(Request::new(DeleteVolumeRequest {
+            volume_id: id.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .map(|_| ())
+}
+
+fn object_json(
+    name: &str,
+    size: u64,
+    protocol: &str,
+    max_peers: u32,
+    minor: u32,
+    port: u16,
+    replicas: usize,
+) -> ReplicatedVolume {
+    let nodes: Vec<_> = (0..replicas)
+        .map(|i| json!({"name": format!("n{}", i + 1), "nodeId": i, "address": format!("192.0.2.{}", i + 1), "kind": "Replica"}))
+        .collect();
+    let spec = serde_json::from_value(json!({
+        "sizeBytes": size, "protocol": protocol, "minor": minor, "port": port, "maxPeers": max_peers,
+        "initialSync": "Skip", "nodes": nodes,
+    }))
+    .unwrap();
+    let mut object = ReplicatedVolume::new(name, spec);
+    object.metadata.finalizers = Some(
+        (0..replicas)
+            .map(|i| replica_finalizer(&format!("n{}", i + 1)))
+            .collect(),
+    );
+    object
+}
+
+fn code_of<T: std::fmt::Debug>(result: Result<T, Status>) -> (Code, String) {
+    let err = result.unwrap_err();
+    (err.code(), err.message().to_string())
+}
+
+// ---- CreateVolume, step 1 ----
+
+#[tokio::test(start_paused = true)]
+async fn step1_an_empty_name_is_invalid() {
+    let h = harness();
+    let (code, message) = code_of(create(&h, request("")).await);
+    assert_eq!(code, Code::InvalidArgument, "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step1_a_name_that_is_not_a_valid_volume_name_is_invalid() {
+    let h = harness();
+    for name in ["Has-Upper", "-lead", "all", "a_b", &"x".repeat(64)] {
+        let (code, message) = code_of(create(&h, request(name)).await);
+        assert_eq!(code, Code::InvalidArgument, "{name}");
+        assert!(message.contains(&format!("{name:?}")), "{message}");
+    }
+    assert!(h.volumes.objects.lock().unwrap().is_empty());
+}
+
+// ---- step 2 ----
+
+#[tokio::test(start_paused = true)]
+async fn step2_no_capabilities_is_invalid() {
+    let h = harness();
+    let mut req = request("vol");
+    req.volume_capabilities.clear();
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("volume_capabilities"), "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step2_a_block_capability_is_invalid() {
+    let h = harness();
+    let mut req = request("vol");
+    req.volume_capabilities.push(VolumeCapability {
+        access_mode: mode(Mode::SingleNodeWriter),
+        access_type: Some(AccessType::Block(Default::default())),
+    });
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("block"), "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step2_a_capability_without_an_access_type_is_invalid() {
+    let h = harness();
+    let mut req = request("vol");
+    req.volume_capabilities = vec![VolumeCapability {
+        access_mode: mode(Mode::SingleNodeWriter),
+        access_type: None,
+    }];
+    assert_eq!(code_of(create(&h, req).await).0, Code::InvalidArgument);
+}
+
+#[tokio::test(start_paused = true)]
+async fn step2_an_fs_type_other_than_ext4_is_invalid() {
+    let h = harness();
+    let mut req = request("vol");
+    req.volume_capabilities = vec![mount_capability("xfs", Mode::SingleNodeWriter)];
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("xfs"), "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step2_a_multi_node_access_mode_is_invalid() {
+    let h = harness();
+    for unsupported in [
+        Mode::MultiNodeMultiWriter,
+        Mode::MultiNodeSingleWriter,
+        Mode::MultiNodeReaderOnly,
+        Mode::Unknown,
+    ] {
+        let mut req = request("vol");
+        req.volume_capabilities = vec![mount_capability("", unsupported)];
+        assert_eq!(
+            code_of(create(&h, req).await).0,
+            Code::InvalidArgument,
+            "{unsupported:?}"
+        );
+    }
+    let mut req = request("vol");
+    req.volume_capabilities[0].access_mode = None;
+    assert_eq!(code_of(create(&h, req).await).0, Code::InvalidArgument);
+    assert!(h.volumes.objects.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn step2_the_single_node_modes_and_an_empty_fs_type_pass() {
+    let h = harness();
+    let _agents = agents_report(&h.volumes);
+    for (i, access) in [
+        Mode::SingleNodeWriter,
+        Mode::SingleNodeSingleWriter,
+        Mode::SingleNodeMultiWriter,
+        Mode::SingleNodeReaderOnly,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut req = request(&format!("vol-{i}"));
+        req.volume_capabilities = vec![mount_capability(if i % 2 == 0 { "" } else { "ext4" }, access)];
+        create(&h, req).await.unwrap_or_else(|e| panic!("{access:?}: {e}"));
+    }
+}
+
+// ---- step 3 ----
+
+#[tokio::test(start_paused = true)]
+async fn step3_a_content_source_is_invalid() {
+    let h = harness();
+    let mut req = request("vol");
+    req.volume_content_source = Some(VolumeContentSource {
+        r#type: Some(crate::csi::proto::volume_content_source::Type::Volume(
+            Default::default(),
+        )),
+    });
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("volume_content_source"), "{message}");
+}
+
+// ---- step 4 ----
+
+#[tokio::test(start_paused = true)]
+async fn step4_a_bad_parameter_is_invalid_and_named() {
+    let h = harness();
+    let (code, message) = code_of(create(&h, with_params(request("vol"), &[("replicas", "many")])).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("replicas") && message.contains("many"), "{message}");
+    let (code, message) = code_of(create(&h, with_params(request("vol"), &[("colour", "red")])).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("colour"), "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step4_a_negative_size_is_invalid_a_huge_one_is_out_of_range() {
+    let h = harness();
+    let mut req = request("vol");
+    req.capacity_range = Some(CapacityRange {
+        required_bytes: -1,
+        limit_bytes: 0,
+    });
+    assert_eq!(code_of(create(&h, req).await).0, Code::InvalidArgument);
+    let mut req = request("vol");
+    req.capacity_range = Some(CapacityRange {
+        required_bytes: i64::MAX,
+        limit_bytes: 0,
+    });
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::OutOfRange, "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step4_a_limit_below_the_rounded_size_is_out_of_range() {
+    let h = harness();
+    let mut req = request("vol");
+    // 5000 bytes round up to 8192; the limit of 6000 cannot hold that.
+    req.capacity_range = Some(CapacityRange {
+        required_bytes: 5000,
+        limit_bytes: 6000,
+    });
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::OutOfRange);
+    assert!(message.contains("6000") && message.contains("8192"), "{message}");
+    assert!(h.volumes.objects.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn step4_a_limit_equal_to_the_rounded_size_passes() {
+    let h = harness();
+    let _agents = agents_report(&h.volumes);
+    let mut req = request("vol");
+    req.capacity_range = Some(CapacityRange {
+        required_bytes: 5000,
+        limit_bytes: 8192,
+    });
+    assert_eq!(create(&h, req).await.unwrap().volume.unwrap().capacity_bytes, 8192);
+}
+
+// ---- steps 5 and 6 ----
+
+#[tokio::test(start_paused = true)]
+async fn step5_an_existing_object_with_the_same_parameters_goes_to_the_wait() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    let _agents = agents_report(&h.volumes);
+    let reply = create(&h, request("vol")).await.unwrap().volume.unwrap();
+    assert_eq!(reply.volume_id, "vol");
+    assert_eq!(reply.capacity_bytes, GIB as i64);
+    assert_eq!(h.volumes.objects.lock().unwrap().len(), 1);
+    // Nothing was placed again: the object still has its minor.
+    assert_eq!(h.volumes.object("vol").unwrap().spec.minor, 1000);
+}
+
+#[tokio::test(start_paused = true)]
+async fn step6_an_existing_object_with_other_parameters_is_already_exists() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    let variants = [
+        ("size", {
+            let mut r = request("vol");
+            r.capacity_range = Some(CapacityRange {
+                required_bytes: 2 * GIB as i64,
+                limit_bytes: 0,
+            });
+            r
+        }),
+        ("protocol", with_params(request("vol"), &[("protocol", "A")])),
+        ("maxPeers", with_params(request("vol"), &[("maxPeers", "9")])),
+        ("replicas", with_params(request("vol"), &[("replicas", "2")])),
+    ];
+    for (what, req) in variants {
+        let (code, message) = code_of(create(&h, req).await);
+        assert_eq!(code, Code::AlreadyExists, "{what}: {message}");
+        assert!(message.contains("vol"), "{message}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_object_that_is_being_deleted_is_aborted() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    delete(&h, "vol").await.unwrap_err();
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::Aborted, "{message}");
+}
+
+// ---- step 7 ----
+
+#[test]
+fn step7_place_errors_map_to_the_codes_of_the_table() {
+    let invalid = [
+        PlaceError::Replicas(1),
+        PlaceError::NotEnoughNodes { replicas: 4, nodes: 3 },
+        PlaceError::UnknownSelectedNode("x".into()),
+        PlaceError::MaxPeers {
+            max_peers: 1,
+            needed: 2,
+        },
+    ];
+    for error in invalid {
+        let status = place_status(&error);
+        assert_eq!(status.code(), Code::InvalidArgument, "{error}");
+        assert_eq!(status.message(), error.to_string());
+    }
+    let exhausted = [
+        PlaceError::NoCapacity {
+            node: "n1".into(),
+            free: 0,
+            needed: 1,
+        },
+        PlaceError::NoFreeIndex,
+    ];
+    for error in exhausted {
+        assert_eq!(place_status(&error).code(), Code::ResourceExhausted, "{error}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn step7_one_replica_and_too_many_replicas_are_invalid() {
+    let h = harness();
+    assert_eq!(
+        code_of(create(&h, with_params(request("vol"), &[("replicas", "1")])).await).0,
+        Code::InvalidArgument
+    );
+    let (code, message) = code_of(create(&h, with_params(request("vol"), &[("replicas", "4")])).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("only 3 nodes"), "{message}");
+    assert!(h.volumes.objects.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn step7_an_unknown_selected_node_is_invalid() {
+    let h = harness();
+    let mut req = request("vol");
+    req.accessibility_requirements = Some(TopologyRequirement {
+        preferred: vec![topology("ghost")],
+        ..Default::default()
+    });
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(message.contains("ghost"), "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step7_max_peers_below_the_other_nodes_is_invalid() {
+    let h = harness();
+    let (code, message) = code_of(create(&h, with_params(request("vol"), &[("maxPeers", "1")])).await);
+    assert_eq!(code, Code::InvalidArgument, "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step7_no_capacity_is_resource_exhausted() {
+    let h = harness();
+    let mut req = request("vol");
+    req.capacity_range = Some(CapacityRange {
+        required_bytes: 200 * GIB as i64,
+        limit_bytes: 0,
+    });
+    let (code, message) = code_of(create(&h, req).await);
+    assert_eq!(code, Code::ResourceExhausted, "{message}");
+    assert!(h.volumes.objects.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn step7_an_unreadable_node_map_is_unavailable_and_names_the_cause() {
+    let volumes = Arc::new(FakeVolumes::default());
+    let nodes = FakeNodes(Err(ApiError::Other("the ConfigMap ambar-nodes does not exist".into())));
+    let svc = ControllerService::new(volumes.clone(), Arc::new(nodes));
+    let err = svc.create_volume(Request::new(request("vol"))).await.unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert!(err.message().contains("ambar-nodes"), "{}", err.message());
+}
+
+#[tokio::test(start_paused = true)]
+async fn step7_the_object_has_initial_sync_skip_and_the_replica_finalizers() {
+    let h = harness();
+    let _agents = agents_report(&h.volumes);
+    // Two replicas of three nodes: the third is a Witness (no finalizer).
+    create(&h, with_params(request("vol"), &[("replicas", "2")]))
+        .await
+        .unwrap();
+    let object = h.volumes.object("vol").unwrap();
+    assert_eq!(object.spec.initial_sync, crate::model::InitialSync::Skip);
+    let replicas: Vec<&str> = object
+        .spec
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Replica)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(replicas, ["n1", "n2"]);
+    assert_eq!(
+        h.volumes.finalizers("vol"),
+        [replica_finalizer("n1"), replica_finalizer("n2")]
+    );
+    assert!(object.spec.nodes.iter().any(|n| n.kind == NodeKind::Witness));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_selected_node_comes_from_preferred_first() {
+    let h = harness();
+    let _agents = agents_report(&h.volumes);
+    let mut req = with_params(request("vol"), &[("replicas", "2")]);
+    req.accessibility_requirements = Some(TopologyRequirement {
+        requisite: vec![topology("n1")],
+        preferred: vec![topology("n3"), topology("n2")],
+    });
+    create(&h, req).await.unwrap();
+    let object = h.volumes.object("vol").unwrap();
+    let replicas: Vec<&str> = object
+        .spec
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Replica)
+        .map(|n| n.name.as_str())
+        .collect();
+    // Without the topology the replicas would be n1 and n2.
+    assert!(replicas.contains(&"n3"), "{replicas:?}");
+}
+
+#[test]
+fn selected_node_falls_back_to_requisite_and_is_none_without_requirements() {
+    let mut req = request("vol");
+    assert_eq!(selected_node(&req), None);
+    req.accessibility_requirements = Some(TopologyRequirement {
+        requisite: vec![topology("n2"), topology("n3")],
+        preferred: vec![],
+    });
+    assert_eq!(selected_node(&req), Some("n2".to_string()));
+    req.accessibility_requirements = Some(TopologyRequirement {
+        requisite: vec![topology("n2")],
+        preferred: vec![topology("n3")],
+    });
+    assert_eq!(selected_node(&req), Some("n3".to_string()));
+    req.accessibility_requirements = Some(TopologyRequirement {
+        requisite: vec![],
+        preferred: vec![Topology::default()],
+    });
+    assert_eq!(selected_node(&req), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_volumes_in_a_row_get_the_indices_0_and_1() {
+    let h = harness();
+    let _agents = agents_report(&h.volumes);
+    create(&h, request("first")).await.unwrap();
+    create(&h, request("second")).await.unwrap();
+    let (a, b) = (h.volumes.object("first").unwrap(), h.volumes.object("second").unwrap());
+    assert_eq!((a.spec.minor, a.spec.port), (1000, 7000));
+    assert_eq!((b.spec.minor, b.spec.port), (1001, 7001));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_object_being_deleted_still_holds_its_minor_and_budget() {
+    let h = harness();
+    let _agents = agents_report(&h.volumes);
+    h.volumes.put(object_json("old", 99 * GIB, "C", 7, 1000, 7000, 3));
+    delete(&h, "old").await.unwrap_err();
+    assert!(h.volumes.object("old").unwrap().metadata.deletion_timestamp.is_some());
+    // The old copy still takes 99 of 100 GiB on every node: a 2 GiB volume does not fit.
+    let mut req = request("big");
+    req.capacity_range = Some(CapacityRange {
+        required_bytes: 2 * GIB as i64,
+        limit_bytes: 0,
+    });
+    assert_eq!(code_of(create(&h, req).await).0, Code::ResourceExhausted);
+    // A small one fits and takes the next index.
+    create(&h, request("small")).await.unwrap();
+    assert_eq!(h.volumes.object("small").unwrap().spec.minor, 1001);
+}
+
+// ---- concurrency ----
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_creates_of_different_names_get_different_indices() {
+    let h = harness();
+    h.volumes.yields.store(true, Ordering::SeqCst);
+    // The first object is slow to show in the list, as in a lagging cache.
+    h.volumes.hidden.lock().unwrap().insert("vol-a".to_string(), 3);
+    let _agents = agents_report(&h.volumes);
+    let (a, b) = tokio::join!(create(&h, request("vol-a")), create(&h, request("vol-b")));
+    a.unwrap();
+    b.unwrap();
+    let (a, b) = (h.volumes.object("vol-a").unwrap(), h.volumes.object("vol-b").unwrap());
+    assert_ne!(a.spec.minor, b.spec.minor);
+    assert_ne!(a.spec.port, b.spec.port);
+    let mut minors = [a.spec.minor, b.spec.minor];
+    minors.sort();
+    assert_eq!(minors, [1000, 1001]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_second_call_for_a_name_does_not_create_a_second_object() {
+    let h = harness();
+    h.volumes.yields.store(true, Ordering::SeqCst);
+    // Nothing is ready: both calls wait and time out, then a retry follows.
+    let (a, b) = tokio::join!(create(&h, request("vol")), create(&h, request("vol")));
+    assert_eq!(code_of(a).0, Code::DeadlineExceeded);
+    assert_eq!(code_of(b).0, Code::DeadlineExceeded);
+    assert_eq!(code_of(create(&h, request("vol")).await).0, Code::DeadlineExceeded);
+    assert_eq!(h.volumes.objects.lock().unwrap().len(), 1);
+    // The agents report: the retry of the provisioner now succeeds.
+    let _agents = agents_report(&h.volumes);
+    assert_eq!(
+        create(&h, request("vol")).await.unwrap().volume.unwrap().volume_id,
+        "vol"
+    );
+    assert_eq!(h.volumes.objects.lock().unwrap().len(), 1);
+}
+
+// ---- step 8 and 9 ----
+
+#[tokio::test(start_paused = true)]
+async fn step8_the_wait_ends_with_deadline_exceeded_and_leaves_the_object() {
+    let h = harness();
+    let started = tokio::time::Instant::now();
+    // One of three replicas has not reported.
+    let late = h.volumes.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        late.set_entry("vol", up_to_date("n1"));
+        late.set_entry("vol", up_to_date("n2"));
+    });
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::DeadlineExceeded);
+    assert!(message.contains("n3") && !message.contains("n1"), "{message}");
+    assert_eq!(started.elapsed(), Duration::from_secs(10));
+    assert!(h.volumes.object("vol").is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn step8_the_wait_returns_as_soon_as_every_replica_is_up_to_date() {
+    let h = harness();
+    let late = h.volumes.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        for node in ["n1", "n2", "n3"] {
+            late.set_entry("vol", up_to_date(node));
+        }
+    });
+    let started = tokio::time::Instant::now();
+    create(&h, request("vol")).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn step8_an_object_deleted_during_the_wait_is_aborted() {
+    let h = harness();
+    let vanish = h.volumes.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        vanish.objects.lock().unwrap().remove("vol");
+    });
+    let (code, message) = code_of(create(&h, request("vol")).await);
+    assert_eq!(code, Code::Aborted, "{message}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn step9_the_reply_carries_the_name_the_size_and_no_topology() {
+    let h = harness();
+    let _agents = agents_report(&h.volumes);
+    let mut req = request("vol");
+    req.capacity_range = Some(CapacityRange {
+        required_bytes: 5000,
+        limit_bytes: 0,
+    });
+    let volume = create(&h, req).await.unwrap().volume.unwrap();
+    assert_eq!(volume.volume_id, "vol");
+    assert_eq!(volume.capacity_bytes, 8192);
+    assert!(volume.accessible_topology.is_empty());
+    assert!(volume.volume_context.is_empty());
+    assert!(volume.content_source.is_none());
+}
+
+// ---- DeleteVolume ----
+
+#[tokio::test(start_paused = true)]
+async fn delete_with_an_empty_id_is_invalid() {
+    let h = harness();
+    assert_eq!(code_of(delete(&h, "").await).0, Code::InvalidArgument);
+}
+
+#[tokio::test(start_paused = true)]
+async fn delete_of_an_invalid_name_or_a_missing_object_is_ok() {
+    let h = harness();
+    delete(&h, "Not_A_Name").await.unwrap();
+    delete(&h, "gone").await.unwrap();
+    assert!(h.volumes.deleted.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn delete_with_a_finalizer_left_is_deadline_exceeded_after_one_delete_call() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    let started = tokio::time::Instant::now();
+    let (code, message) = code_of(delete(&h, "vol").await);
+    assert_eq!(code, Code::DeadlineExceeded);
+    assert!(message.contains("vol"), "{message}");
+    assert_eq!(started.elapsed(), Duration::from_secs(10));
+    assert_eq!(*h.volumes.deleted.lock().unwrap(), ["vol"]);
+    assert!(h.volumes.object("vol").unwrap().metadata.deletion_timestamp.is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn delete_returns_ok_when_the_agents_release_the_object() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    let agents = h.volumes.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let uid = agents.object("vol").unwrap().metadata.uid.unwrap();
+        for node in ["n1", "n2", "n3"] {
+            agents
+                .remove_finalizer("vol", &uid, &replica_finalizer(node))
+                .await
+                .unwrap();
+        }
+    });
+    delete(&h, "vol").await.unwrap();
+    assert!(h.volumes.object("vol").is_none());
+    assert_eq!(h.volumes.deleted.lock().unwrap().len(), 1);
+}
+
+// ---- ValidateVolumeCapabilities and the rest ----
+
+async fn validate(
+    h: &Harness,
+    id: &str,
+    caps: Vec<VolumeCapability>,
+) -> Result<ValidateVolumeCapabilitiesResponse, Status> {
+    h.svc
+        .validate_volume_capabilities(Request::new(ValidateVolumeCapabilitiesRequest {
+            volume_id: id.to_string(),
+            volume_capabilities: caps,
+            ..Default::default()
+        }))
+        .await
+        .map(|r| r.into_inner())
+}
+
+#[tokio::test(start_paused = true)]
+async fn validate_of_a_missing_volume_is_not_found() {
+    let h = harness();
+    let caps = vec![mount_capability("ext4", Mode::SingleNodeWriter)];
+    assert_eq!(code_of(validate(&h, "gone", caps.clone()).await).0, Code::NotFound);
+    assert_eq!(code_of(validate(&h, "Not_A_Name", caps).await).0, Code::NotFound);
+}
+
+#[tokio::test(start_paused = true)]
+async fn validate_confirms_supported_capabilities_and_explains_the_others() {
+    let h = harness();
+    h.volumes.put(object_json("vol", GIB, "C", 7, 1000, 7000, 3));
+    let caps = vec![mount_capability("ext4", Mode::SingleNodeWriter)];
+    let reply = validate(&h, "vol", caps.clone()).await.unwrap();
+    assert_eq!(reply.confirmed.unwrap().volume_capabilities, caps);
+
+    let bad = vec![mount_capability("ext4", Mode::MultiNodeMultiWriter)];
+    let reply = validate(&h, "vol", bad).await.unwrap();
+    assert!(reply.confirmed.is_none());
+    assert!(reply.message.contains("MULTI_NODE_MULTI_WRITER"), "{}", reply.message);
+}
+
+#[tokio::test(start_paused = true)]
+async fn controller_capabilities_are_create_delete_volume() {
+    let h = harness();
+    let caps = h
+        .svc
+        .controller_get_capabilities(Request::new(ControllerGetCapabilitiesRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .capabilities;
+    assert_eq!(caps.len(), 1);
+    match caps[0].r#type {
+        Some(controller_service_capability::Type::Rpc(rpc)) => {
+            assert_eq!(rpc.r#type, rpc::Type::CreateDeleteVolume as i32)
+        }
+        ref other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn other_calls_are_unimplemented() {
+    let h = harness();
+    let err = h
+        .svc
+        .get_capacity(Request::new(GetCapacityRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unimplemented);
+    let err = h
+        .svc
+        .controller_publish_volume(Request::new(ControllerPublishVolumeRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unimplemented);
+}
