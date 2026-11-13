@@ -79,3 +79,24 @@ fn status_fails_when_drbdsetup_fails() {
     let drbd = Drbd { runner: &runner };
     assert!(matches!(drbd.status("spike"), Err(DrbdError::Command { code: 20, .. })));
 }
+
+#[test]
+fn status_trusts_the_exit_code_before_stdout() {
+    let runner = FakeRunner::new(|_, _| out(1, "[\n]\n", "boom\n"));
+    let drbd = Drbd { runner: &runner };
+    assert_eq!(
+        drbd.status("spike"),
+        Err(DrbdError::Command {
+            command: "drbdsetup status --json".into(),
+            code: 1,
+            stderr: "boom".into(),
+        })
+    );
+}
+
+#[test]
+fn status_reports_malformed_json_after_a_successful_exit() {
+    let runner = FakeRunner::new(|_, _| out(0, "[ {\"name\": ", ""));
+    let drbd = Drbd { runner: &runner };
+    assert!(matches!(drbd.status("spike"), Err(DrbdError::Status(_))));
+}

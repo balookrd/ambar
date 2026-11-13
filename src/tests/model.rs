@@ -117,6 +117,9 @@ fn size_bytes_boundaries() {
     assert_eq!(with(|s| s.size_bytes = 0), Err(SpecError::Size(0)));
     assert_eq!(with(|s| s.size_bytes = 4096), Ok(()));
     assert_eq!(with(|s| s.size_bytes = 4097), Err(SpecError::Size(4097)));
+    assert_eq!(with(|s| s.size_bytes = MAX_SIZE_BYTES), Ok(()));
+    let too_big = MAX_SIZE_BYTES + 4096;
+    assert_eq!(with(|s| s.size_bytes = too_big), Err(SpecError::Size(too_big)));
 }
 
 #[test]
@@ -240,7 +243,10 @@ fn error_messages_are_stable() {
             SpecError::NodeName("a;b".into()),
             "invalid node name \"a;b\": use 1-63 characters A-Z, a-z, 0-9, '.', '_' and '-', starting with a letter or digit",
         ),
-        (SpecError::Size(7), "sizeBytes 7 must be a positive multiple of 4096"),
+        (
+            SpecError::Size(7),
+            "sizeBytes 7 must be a positive multiple of 4096, at most 1125899906842624",
+        ),
         (SpecError::Minor(1048576), "minor 1048576 is above 1048575"),
         (SpecError::Port(80), "port 80 is below 1024"),
         (SpecError::DuplicateName("n".into()), "duplicate node name \"n\""),

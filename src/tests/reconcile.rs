@@ -373,3 +373,49 @@ fn apply_creates_a_copy_then_skips_the_initial_sync_and_remove_undoes_it() {
     assert!(!paths.synced_marker("spike").exists());
     assert_eq!(reconciler.remove("spike").unwrap(), Vec::<&str>::new());
 }
+
+#[test]
+fn remove_detaches_every_loop_device_of_the_file() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    fs::write(paths.image("spike"), "").unwrap();
+    let runner = FakeRunner::new(|program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop1: [1]:2 (image)\n/dev/loop0: [1]:2 (image)\n", ""),
+        ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
+        _ => out(0, "", ""),
+    });
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let steps = reconciler.remove("spike").unwrap();
+    assert_eq!(steps, ["detach-loop", "detach-loop", "remove-file"]);
+    let detaches: Vec<String> = runner
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("losetup -d"))
+        .collect();
+    assert_eq!(detaches, ["losetup -d /dev/loop1", "losetup -d /dev/loop0"]);
+}
+
+#[test]
+fn apply_refuses_to_act_on_a_file_attached_twice() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    fs::write(paths.image("spike"), "").unwrap();
+    let runner = FakeRunner::new(|program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop1: [1]:2 (image)\n/dev/loop0: [1]:2 (image)\n", ""),
+        _ => out(0, "", ""),
+    });
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+    assert!(
+        matches!(err, ReconcileError::Backing(BackingError::MultipleLoopDevices { .. })),
+        "{err}"
+    );
+}
