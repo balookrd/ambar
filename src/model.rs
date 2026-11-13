@@ -49,6 +49,10 @@ pub enum SpecError {
     Json(String),
     #[error("invalid volume name {0:?}: use 1-63 characters a-z, 0-9 and '-', starting with a letter or digit")]
     Name(String),
+    #[error(
+        "invalid node name {0:?}: use 1-63 characters A-Z, a-z, 0-9, '.', '_' and '-', starting with a letter or digit"
+    )]
+    NodeName(String),
     #[error("sizeBytes {0} must be a positive multiple of 4096")]
     Size(u64),
     #[error("minor {0} is above 1048575")]
@@ -91,6 +95,9 @@ impl VolumeSpec {
         let mut names = HashSet::new();
         let mut ids = HashSet::new();
         for node in &self.nodes {
+            if !valid_node_name(&node.name) {
+                return Err(SpecError::NodeName(node.name.clone()));
+            }
             if !names.insert(node.name.as_str()) {
                 return Err(SpecError::DuplicateName(node.name.clone()));
             }
@@ -105,7 +112,9 @@ impl VolumeSpec {
         if diskful < MIN_DISKFUL {
             return Err(SpecError::Replicas(diskful));
         }
-        let needed = self.nodes.len() as u32 - 1;
+        // At least MIN_DISKFUL nodes exist here, so the subtraction cannot
+        // underflow; saturating keeps that from depending on the check above.
+        let needed = self.nodes.len().saturating_sub(1) as u32;
         if self.max_peers < needed || self.max_peers > MAX_NODE_ID {
             return Err(SpecError::MaxPeers {
                 max_peers: self.max_peers,
@@ -134,6 +143,14 @@ fn valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let allowed = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-';
     !bytes.is_empty() && bytes.len() <= 63 && bytes[0] != b'-' && bytes.iter().all(allowed)
+}
+
+/// Hostname-like: DRBD writes the name into the resource file verbatim, so
+/// anything beyond these characters could inject config syntax.
+fn valid_node_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let allowed = |b: &u8| b.is_ascii_alphanumeric() || matches!(*b, b'.' | b'_' | b'-');
+    !bytes.is_empty() && bytes.len() <= 63 && bytes[0].is_ascii_alphanumeric() && bytes.iter().all(allowed)
 }
 
 #[cfg(test)]
