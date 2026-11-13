@@ -1,6 +1,6 @@
-use std::cell::{Cell, RefCell};
 use std::fs;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
@@ -572,6 +572,86 @@ fn a_node_outside_the_description_does_not_match() {
     ));
 }
 
+/// The status of the volume as `node` sees it, in the four shapes a node
+/// can be in: not configured, configured and matching with every disk
+/// `Inconsistent`, configured and matching with every disk `UpToDate`, and
+/// configured but with another minor than the description.
+fn statuses_on(node: &str) -> [Option<ResourceStatus>; 4] {
+    let mut mismatching = seen_from(node, THREE_UPTODATE);
+    for device in &mut mismatching.devices {
+        device.minor += 1;
+    }
+    [
+        None,
+        Some(seen_from(node, THREE_INCONSISTENT)),
+        Some(seen_from(node, THREE_UPTODATE)),
+        Some(mismatching),
+    ]
+}
+
+/// Walks every combination of the inputs of `plan` and checks the rules that
+/// protect data, whatever the other inputs are.
+#[test]
+fn the_data_safety_rules_hold_for_every_combination_of_inputs() {
+    let spec = spec();
+    let mut inputs = 0;
+    let mut create_md_seen = 0;
+    let mut skip_seen = 0;
+    let mut lost_seen = 0;
+    for node in spec.nodes.iter().map(|n| n.name.as_str()) {
+        let diskful = spec.node(node).unwrap().diskful;
+        let leader = spec.initial_sync_leader().is_some_and(|l| l.name == node);
+        for file in [FileState::Absent, FileState::Pending, FileState::Ready] {
+            for status in statuses_on(node) {
+                for (synced, stale_markers, res_matches, res_applied) in
+                    (0..16).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0))
+                {
+                    inputs += 1;
+                    let obs = Observed {
+                        file,
+                        loop_device: Some("/dev/loop3".into()),
+                        link_target: Some("/dev/loop3".into()),
+                        res_matches,
+                        res_applied,
+                        synced,
+                        stale_markers,
+                        status: status.clone(),
+                    };
+                    let result = plan(&spec, node, &obs);
+                    let what = format!("{node} {obs:?}");
+
+                    if diskful && file == FileState::Pending && synced {
+                        lost_seen += 1;
+                        assert_eq!(
+                            result,
+                            Err(PlanError::ReadyMarkerLost { volume: "spike".into() }),
+                            "{what}"
+                        );
+                    }
+                    let Ok(actions) = result else { continue };
+
+                    if actions.contains(&Action::CreateMd) {
+                        create_md_seen += 1;
+                        assert!(diskful, "{what}");
+                        assert_ne!(file, FileState::Ready, "{what}");
+                        assert!(obs.status.is_none(), "{what}");
+                    }
+                    if actions.contains(&Action::SkipInitialSync) {
+                        skip_seen += 1;
+                        assert!(leader && diskful, "{what}");
+                        assert!(!synced, "{what}");
+                        assert!(obs.status.as_ref().unwrap().ready_to_skip_initial_sync(), "{what}");
+                        assert_eq!(actions, [Action::SkipInitialSync], "{what}");
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(inputs, 3 * 3 * 4 * 16);
+    // The loop above must reach the branches the rules talk about.
+    assert!(create_md_seen > 0 && skip_seen > 0 && lost_seen > 0);
+}
+
 // ---- executor ----
 
 fn temp_paths(tmp: &TempDir) -> Paths {
@@ -606,33 +686,33 @@ fn apply_rejects_an_invalid_spec_before_touching_anything() {
 /// resource appear in `drbdsetup status`, and the skip of the initial sync
 /// turns the disks `UpToDate`.
 fn fake_node() -> FakeRunner {
-    let attached = Rc::new(Cell::new(false));
-    let up = Rc::new(Cell::new(false));
-    let skipped = Rc::new(Cell::new(false));
+    let attached = Arc::new(AtomicBool::new(false));
+    let up = Arc::new(AtomicBool::new(false));
+    let skipped = Arc::new(AtomicBool::new(false));
     FakeRunner::new(move |program, args| match (program, args) {
-        ("losetup", ["-j", _]) if attached.get() => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+        ("losetup", ["-j", _]) if attached.load(Ordering::SeqCst) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
         ("losetup", ["--find", ..]) => {
-            attached.set(true);
+            attached.store(true, Ordering::SeqCst);
             out(0, "/dev/loop7\n", "")
         }
         ("losetup", ["-d", _]) => {
-            attached.set(false);
+            attached.store(false, Ordering::SeqCst);
             out(0, "", "")
         }
         ("drbdadm", ["up", _]) => {
-            up.set(true);
+            up.store(true, Ordering::SeqCst);
             out(0, "", "")
         }
         ("drbdadm", ["down", _]) => {
-            up.set(false);
+            up.store(false, Ordering::SeqCst);
             out(0, "", "")
         }
         ("drbdadm", ["new-current-uuid", ..]) => {
-            skipped.set(true);
+            skipped.store(true, Ordering::SeqCst);
             out(0, "", "")
         }
-        ("drbdsetup", _) if up.get() && skipped.get() => out(0, THREE_UPTODATE, ""),
-        ("drbdsetup", _) if up.get() => out(0, THREE_INCONSISTENT, ""),
+        ("drbdsetup", _) if up.load(Ordering::SeqCst) && skipped.load(Ordering::SeqCst) => out(0, THREE_UPTODATE, ""),
+        ("drbdsetup", _) if up.load(Ordering::SeqCst) => out(0, THREE_INCONSISTENT, ""),
         ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
         _ => out(0, "", ""),
     })
@@ -794,10 +874,10 @@ fn prepare_copy(paths: &Paths, applied: bool, synced: bool) {
 /// A node where the copy is attached to /dev/loop7 and `drbdsetup status`
 /// prints whatever `status` holds; every other command succeeds and
 /// changes nothing.
-fn configured_node(status: Rc<RefCell<String>>) -> FakeRunner {
+fn configured_node(status: Arc<Mutex<String>>) -> FakeRunner {
     FakeRunner::new(move |program, args| match (program, args) {
         ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
-        ("drbdsetup", _) => out(0, &status.borrow(), ""),
+        ("drbdsetup", _) => out(0, &status.lock().unwrap(), ""),
         _ => out(0, "", ""),
     })
 }
@@ -811,7 +891,7 @@ fn an_adjust_that_takes_effect_is_recorded() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     prepare_copy(&paths, false, true);
-    let runner = configured_node(Rc::new(RefCell::new(THREE_UPTODATE.to_string())));
+    let runner = configured_node(Arc::new(Mutex::new(THREE_UPTODATE.to_string())));
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
@@ -833,7 +913,7 @@ fn an_adjust_without_effect_is_an_error_and_is_repeated_next_time() {
     prepare_copy(&paths, false, true);
     let other_minor = THREE_UPTODATE.replace("\"minor\": 1000", "\"minor\": 1001");
     assert_ne!(other_minor, THREE_UPTODATE);
-    let runner = configured_node(Rc::new(RefCell::new(other_minor)));
+    let runner = configured_node(Arc::new(Mutex::new(other_minor)));
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
@@ -895,7 +975,7 @@ fn a_rejected_adjust_is_not_recorded_even_when_the_status_matches() {
 fn an_up_without_effect_is_an_error() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
-    let runner = configured_node(Rc::new(RefCell::new("[\n]\n".to_string())));
+    let runner = configured_node(Arc::new(Mutex::new("[\n]\n".to_string())));
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
@@ -915,7 +995,7 @@ fn the_synced_marker_is_written_only_after_the_status_shows_the_skip() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     prepare_copy(&paths, true, false);
-    let status = Rc::new(RefCell::new(THREE_INCONSISTENT.to_string()));
+    let status = Arc::new(Mutex::new(THREE_INCONSISTENT.to_string()));
     let runner = configured_node(status.clone());
     let reconciler = Reconciler {
         paths: &paths,
@@ -931,12 +1011,12 @@ fn the_synced_marker_is_written_only_after_the_status_shows_the_skip() {
     assert_eq!(count(&runner, skip), 1);
     assert!(!paths.synced_marker("spike").exists());
 
-    *status.borrow_mut() = THREE_UPTODATE.to_string();
+    *status.lock().unwrap() = THREE_UPTODATE.to_string();
     assert_eq!(reconciler.apply(&spec(), "lima-dv-1").unwrap(), [Action::MarkSynced]);
     assert!(paths.synced_marker("spike").exists());
 
     // With the marker present a gate-ready status never triggers a skip.
-    *status.borrow_mut() = THREE_INCONSISTENT.to_string();
+    *status.lock().unwrap() = THREE_INCONSISTENT.to_string();
     assert_eq!(reconciler.apply(&spec(), "lima-dv-1").unwrap(), []);
     assert_eq!(count(&runner, skip), 1);
 }
@@ -953,7 +1033,7 @@ fn a_leader_that_resyncs_from_a_peer_never_skips_the_initial_sync_later() {
         1,
     );
     assert_ne!(resyncing, THREE_INCONSISTENT);
-    let status = Rc::new(RefCell::new(resyncing));
+    let status = Arc::new(Mutex::new(resyncing));
     let runner = configured_node(status.clone());
     let reconciler = Reconciler {
         paths: &paths,
@@ -966,7 +1046,7 @@ fn a_leader_that_resyncs_from_a_peer_never_skips_the_initial_sync_later() {
 
     // The second copy is lost too and re-created: both disks are Inconsistent
     // and the gate holds, but the marker says the volume has held data.
-    *status.borrow_mut() = THREE_INCONSISTENT.to_string();
+    *status.lock().unwrap() = THREE_INCONSISTENT.to_string();
     assert_eq!(reconciler.apply(&spec(), "lima-dv-1").unwrap(), []);
     assert_eq!(count(&runner, skip), 0);
 }
@@ -1053,7 +1133,7 @@ fn remove_deletes_nothing_when_the_resource_stays_configured_after_down() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     prepare_copy(&paths, true, true);
-    let runner = configured_node(Rc::new(RefCell::new(THREE_UPTODATE.to_string())));
+    let runner = configured_node(Arc::new(Mutex::new(THREE_UPTODATE.to_string())));
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
@@ -1150,6 +1230,80 @@ fn remove_leaves_a_loop_device_of_another_file_alone() {
     };
     assert_eq!(reconciler.remove("spike").unwrap(), ["remove-marker", "remove-link"]);
     assert_eq!(count(&runner, "losetup -d"), 0);
+}
+
+// ---- durability of the image ----
+
+#[test]
+fn sync_file_flushes_an_existing_file_and_reports_a_missing_one() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("x.img");
+    fs::write(&path, "data").unwrap();
+    sync_file(&path).unwrap();
+
+    let err = sync_file(&tmp.path().join("missing.img")).unwrap_err();
+    assert!(matches!(err, ReconcileError::Io { action: "sync", .. }), "{err}");
+}
+
+// ---- unreadable markers ----
+
+/// Makes `path` a symbolic link to itself: `stat` fails with ELOOP, also for
+/// a process that ignores file permissions.
+fn make_unreadable(path: &Path) {
+    std::os::unix::fs::symlink(path, path).unwrap();
+}
+
+#[test]
+fn a_marker_or_image_that_cannot_be_inspected_stops_observe_and_apply() {
+    type PathOf = fn(&Paths) -> PathBuf;
+    let targets: [(&str, PathOf); 3] = [
+        ("image", |p| p.image("spike")),
+        ("ready marker", |p| p.ready_marker("spike")),
+        ("synced marker", |p| p.synced_marker("spike")),
+    ];
+    for (what, path_of) in targets {
+        let tmp = TempDir::new().unwrap();
+        let paths = temp_paths(&tmp);
+        prepare_copy(&paths, true, true);
+        let path = path_of(&paths);
+        fs::remove_file(&path).ok();
+        make_unreadable(&path);
+        let runner = configured_node(Arc::new(Mutex::new(THREE_UPTODATE.to_string())));
+        let reconciler = Reconciler {
+            paths: &paths,
+            runner: &runner,
+        };
+
+        let err = reconciler.observe(&spec(), "lima-dv-1").unwrap_err();
+        assert!(
+            matches!(err, ReconcileError::Io { action: "inspect", .. }),
+            "{what}: {err}"
+        );
+        let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+        assert!(
+            matches!(err, ReconcileError::Io { action: "inspect", .. }),
+            "{what}: {err}"
+        );
+        assert_eq!(count(&runner, "drbdadm"), 0, "{what}: {:?}", runner.calls());
+    }
+}
+
+#[test]
+fn remove_stops_when_the_image_cannot_be_inspected() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_copy(&paths, true, true);
+    fs::remove_file(paths.image("spike")).unwrap();
+    make_unreadable(&paths.image("spike"));
+    let runner = FakeRunner::new(|_, _| out(0, "[\n]\n", ""));
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler.remove("spike").unwrap_err();
+    assert!(matches!(err, ReconcileError::Io { action: "inspect", .. }), "{err}");
+    assert!(paths.ready_marker("spike").exists());
+    assert!(paths.synced_marker("spike").exists());
 }
 
 // ---- lock ----

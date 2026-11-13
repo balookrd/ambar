@@ -50,8 +50,10 @@ impl Drbd<'_> {
     }
 
     /// Declares all copies of a brand-new volume identical, so DRBD does not
-    /// copy an empty device across the network. Run on one node only, and
-    /// only when `ResourceStatus::ready_to_skip_initial_sync` holds.
+    /// copy an empty device across the network. Run on one node only: the
+    /// leader (lowest `nodeId` among the nodes with a copy), only when
+    /// `ResourceStatus::ready_to_skip_initial_sync` holds and the local
+    /// synced marker is absent; the reconcile logic enforces all three.
     pub fn skip_initial_sync(&self, volume: &str) -> Result<(), DrbdError> {
         let target = format!("{volume}/0");
         self.checked("drbdadm", &["new-current-uuid", "--clear-bitmap", &target])

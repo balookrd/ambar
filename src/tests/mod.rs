@@ -1,34 +1,34 @@
 //! Helpers shared by the unit tests of this crate.
 
-use std::cell::RefCell;
 use std::io;
+use std::sync::Mutex;
 
 use crate::exec::{Output, Runner, command_line};
 
-type Reply = Box<dyn Fn(&str, &[&str]) -> Output>;
+type Reply = Box<dyn Fn(&str, &[&str]) -> Output + Send + Sync>;
 
 /// Records every command line and answers from a closure.
 pub(crate) struct FakeRunner {
-    calls: RefCell<Vec<String>>,
+    calls: Mutex<Vec<String>>,
     reply: Reply,
 }
 
 impl FakeRunner {
-    pub(crate) fn new(reply: impl Fn(&str, &[&str]) -> Output + 'static) -> Self {
+    pub(crate) fn new(reply: impl Fn(&str, &[&str]) -> Output + Send + Sync + 'static) -> Self {
         Self {
-            calls: RefCell::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
             reply: Box::new(reply),
         }
     }
 
     pub(crate) fn calls(&self) -> Vec<String> {
-        self.calls.borrow().clone()
+        self.calls.lock().unwrap().clone()
     }
 }
 
 impl Runner for FakeRunner {
     fn run(&self, program: &str, args: &[&str]) -> io::Result<Output> {
-        self.calls.borrow_mut().push(command_line(program, args));
+        self.calls.lock().unwrap().push(command_line(program, args));
         Ok((self.reply)(program, args))
     }
 }

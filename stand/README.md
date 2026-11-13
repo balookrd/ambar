@@ -15,6 +15,7 @@
 | Хост | macOS на Apple silicon |
 | Lima | 2.3.0, `vmType: vz`, сеть `user-v2` (`stand/lima/node.yaml`) |
 | Docker | `docker buildx`, сборка под `linux/arm64` |
+| Для `image/build.sh` на хосте | Rust stable 1.89 или новее, `cargo-zigbuild`, `zig`, цель `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.99.1) |
 | Ресурсы | по 2 CPU, 3 ГиБ RAM и 20 ГиБ диска на ВМ |
 
 ## Порядок запуска
@@ -84,12 +85,23 @@ stand/agent-smoke.sh --reboot
 его через `stand/up.sh` и проверяет, что `ambar load-module` загружает модуль, а
 `ambar apply` поднимает ресурс. `dv-1` скрипт не останавливает.
 
-Скрипт можно запускать повторно: сначала он вызывает `ambar remove` для тома
-`smoke` на всех узлах. Если запуск упал на полпути, удалите том вручную:
+Скрипт можно запускать повторно. В начале он убирает остатки прошлого запуска в
+таком порядке: размонтирует `/mnt/smoke` на всех узлах, затем выполняет
+`ambar remove --name smoke` на всех узлах и проверяет, что `ambar status`
+печатает `smoke: not configured`. Размонтирование идёт на всех узлах до первого
+`remove`: пока узел без диска держит устройство открытым, `drbdadm down` на
+других узлах отказывает (`State change was refused by peer node`). Ошибка
+`remove` останавливает скрипт. Если запуск упал на полпути, запустите скрипт
+ещё раз или выполните то же вручную:
 
 ```bash
-bash -c 'source stand/lib.sh; for n in "${NODES[@]}"; do tb "$n" "ambar remove --name smoke"; done'
+bash -c 'source stand/lib.sh
+  for n in "${NODES[@]}"; do vm "$n" "if mountpoint -q /mnt/smoke; then umount /mnt/smoke; fi"; done
+  for n in "${NODES[@]}"; do tb "$n" "ambar remove --name smoke"; done'
 ```
 
-Блокировку от одновременных запусков (код выхода 75) скрипт не проверяет:
-проверяется только наличие файла `smoke.lock` у существующего тома.
+Блокировку от одновременных запусков скрипт проверяет на `dv-1`: утилита `flock`
+в поде `toolbox` держит `/var/lib/rancher/ambar/volumes/smoke.lock` 6 с, за это
+время `ambar apply` должен завершиться с кодом 75, а после освобождения
+блокировки с кодом 0. После шага c скрипт также проверяет, что
+`blockdev --getsize64 /dev/drbd1010` на `dv-1` не меньше 1073741824.

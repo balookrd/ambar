@@ -12,7 +12,7 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; са�
 
 | Часть | Состояние |
 |---|---|
-| Спека | написана, в конце пять открытых вопросов |
+| Спека | написана, в конце шесть открытых вопросов |
 | Образ с собранным модулем DRBD 9.3.4 и drbd-utils 9.35.0 | собирается, есть тесты |
 | Стенд: три ВМ Lima с k3s | скрипты в `stand/` |
 | Опыты с отказами DRBD 9 на стенде | записаны с выводом команд |
@@ -39,7 +39,7 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; са�
 |---|---|
 | `docs/superpowers/specs/2026-11-12-ambar-design.md` | спека |
 | `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | протокол опытов с DRBD 9 |
-| `docs/superpowers/plans/` | исполненный план подготовительной фазы (исторический) |
+| `docs/superpowers/plans/` | исполненные планы фаз 0 и 1 (исторические) |
 | `src/` | агент `ambar` (Rust) |
 | `image/` | Dockerfile, загрузчик модуля, тесты образа |
 | `stand/` | скрипты стенда; см. `stand/README.md` |
@@ -53,6 +53,7 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; са�
 | Lima | 2.3.0, `vmType: vz` |
 | Docker | `docker buildx`, `linux/arm64` |
 | Ядро, под которое собран модуль | `6.12.116+deb13-arm64` (штатное ядро Debian 13) |
+| Для `image/build.sh` на хосте | Rust stable 1.89 или новее (`rust-version` крейта), `cargo-zigbuild`, `zig` и цель, добавленная командой `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.99.1) |
 
 ## Сборка и проверка образа
 
@@ -82,7 +83,7 @@ Docker, ни ядро Linux.
 cargo test
 ```
 
-Ожидаемая строка: `test result: ok. 137 passed`. На стенде агент проверяет
+Ожидаемая строка: `test result: ok. 144 passed`. На стенде агент проверяет
 `stand/agent-smoke.sh`, см. `stand/README.md`.
 
 Запуск стенда описан в `stand/README.md`.

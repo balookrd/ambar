@@ -34,10 +34,14 @@ impl Paths {
         self.volumes_dir.join(format!("{volume}.img.ready"))
     }
 
-    /// Empty marker written once the copy on this node has been in sync: after
-    /// the leader skipped the initial sync, or when the local disk was first
-    /// seen `UpToDate`. While it is absent the volume counts as never
-    /// synchronised on this node.
+    /// Empty marker that says the volume has a data source. Written by a
+    /// later `apply` pass, never by the pass that ran the skip of the initial
+    /// sync: only on a node with a copy, only in a pass that has nothing else
+    /// to do, and only when the status matches the description and shows the
+    /// local volume-0 disk `UpToDate`, or a peer's volume-0 disk `UpToDate`,
+    /// `Consistent` or `Outdated` (a peer holds data, so this copy resyncs
+    /// from it). While it is absent the volume counts as never synchronised
+    /// on this node.
     pub fn synced_marker(&self, volume: &str) -> PathBuf {
         self.volumes_dir.join(format!("{volume}.img.synced"))
     }

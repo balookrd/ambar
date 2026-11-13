@@ -7,7 +7,7 @@ IMAGE="${IMAGE:-ambar-drbd:dev}"
 cd "$(dirname "$0")"
 
 # The agent is cross-compiled on the host and copied into the build context.
-(cd .. && cargo zigbuild --release --target aarch64-unknown-linux-musl)
+(cd .. && cargo zigbuild --release --locked --target aarch64-unknown-linux-musl)
 cp ../target/aarch64-unknown-linux-musl/release/ambar ambar
 
 docker buildx build \

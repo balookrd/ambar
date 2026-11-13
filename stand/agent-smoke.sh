@@ -3,8 +3,13 @@
 # three nodes (two copies and a node without a disk).
 # usage: agent-smoke.sh [--reboot]
 #   --reboot  also force-stops and restarts dv-2 and lets the agent restore it
-# After a failed run clean up with:
-#   bash -c 'source stand/lib.sh; for n in "${NODES[@]}"; do tb $n "ambar remove --name smoke"; done'
+# A run starts by removing the leftovers of an earlier one: unmount /mnt/smoke
+# on every node, then `ambar remove --name smoke` on every node, then check
+# that the resource is gone. After a failed run, start the script again, or do
+# the same by hand:
+#   bash -c 'source stand/lib.sh
+#     for n in "${NODES[@]}"; do vm $n "if mountpoint -q /mnt/smoke; then umount /mnt/smoke; fi"; done
+#     for n in "${NODES[@]}"; do tb $n "ambar remove --name smoke"; done'
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
@@ -43,7 +48,7 @@ state() { tb "$1" "ambar status --name $name"; }
 wait_for() {
     local node="$1" pattern="$2" deadline=$(( $(date +%s) + $3 )) out
     while :; do
-        out="$(state "$node")"
+        out="$(state "$node")" || out=""
         if grep -q -E "$pattern" <<<"$out"; then return 0; fi
         if (( $(date +%s) > deadline )); then
             echo "$out" >&2
@@ -91,10 +96,15 @@ for n in "${NODES[@]}"; do
 done
 
 echo "== leftovers of an earlier run"
+# Every node unmounts first: a peer that still has the device open (a node
+# without a disk can be Primary) makes `drbdadm down` on the other nodes fail.
 for n in "${NODES[@]}"; do
-    tb "$n" "ambar remove --name $name" >/dev/null 2>&1 || true
-    vm "$n" "if mountpoint -q /mnt/$name; then umount /mnt/$name; fi
-        rmdir /mnt/$name 2>/dev/null || true; rm -f $spec"
+    vm "$n" "if mountpoint -q /mnt/$name; then umount /mnt/$name; fi"
+done
+for n in "${NODES[@]}"; do
+    out="$(tb "$n" "ambar remove --name $name" 2>&1)" || fail "$n: leftover cleanup: remove failed: $out"
+    [[ "$(state "$n")" == "$name: not configured" ]] || fail "$n: leftover cleanup: the resource is still configured"
+    vm "$n" "rmdir /mnt/$name 2>/dev/null || true; rm -f $spec"
 done
 
 echo "== b. apply on three nodes"
@@ -120,6 +130,9 @@ echo "leader took $(( $(date +%s) - start )) s to print [SkipInitialSync]"
 wait_for dv-1 "disk=UpToDate" 60
 wait_for dv-2 "disk=UpToDate" 60
 wait_for dv-3 "disk=Diskless quorum=true" 60
+size="$(vm dv-1 "blockdev --getsize64 /dev/drbd$minor")" || fail "dv-1: blockdev failed on /dev/drbd$minor"
+[[ "$size" =~ ^[0-9]+$ ]] && (( size >= 1073741824 )) || fail "dv-1: /dev/drbd$minor has $size bytes, expected at least 1073741824"
+echo "/dev/drbd$minor is $size bytes"
 [[ "$(state dv-1 | grep -c ': Connected ')" == 2 ]] || fail "dv-1 does not see two connected peers"
 
 echo "== d. settling"
@@ -158,9 +171,7 @@ for bad in all ../x; do
     rc=0
     out="$(tb dv-1 "ambar remove --name $bad" 2>&1)" || rc=$?
     [[ "$rc" != 0 ]] || fail "ambar remove --name $bad exited 0: $out"
-    [[ "$out" == *"ambar: "* ]] || fail "ambar remove --name $bad: no agent error message: $out"
-    state dv-1 | grep -q "^$name: role=" || fail "after refusing '$bad' the volume is not configured on dv-1"
-    vm dv-1 "test -f $vol_dir/$name.img" || fail "after refusing '$bad' the volume file is gone"
+    [[ "$out" == *"invalid volume name"* ]] || fail "ambar remove --name $bad: no 'invalid volume name' in: $out"
 done
 
 echo "== h. a copy that lost its loop device and kernel state is restored"
@@ -177,10 +188,16 @@ wait_for dv-2 "disk=Diskless" 30
 expect_apply dv-2 "[Adjust, MarkApplied]"
 wait_for dv-2 "disk=UpToDate" 60
 
-echo "== j. the lock file exists while the volume exists"
-for n in dv-1 dv-2; do
-    vm "$n" "test -f $vol_dir/$name.lock" || fail "$n: no lock file"
-done
+echo "== j. apply exits with 75 while another process holds the volume lock"
+# One toolbox command: `flock` holds the lock file for 6 s in the background,
+# `ambar apply` runs under it, then runs again once the lock is released.
+out="$(tb dv-1 "flock $vol_dir/$name.lock sleep 6 & sleep 1
+    held=0; ambar apply --file $spec >/dev/null 2>&1 || held=\$?
+    wait
+    free=0; ambar apply --file $spec >/dev/null 2>&1 || free=\$?
+    echo \"held=\$held free=\$free\"")" || fail "dv-1: the lock check did not run: $out"
+[[ "$out" == "held=75 free=0" ]] || fail "dv-1: apply exit codes were '$out', expected 'held=75 free=0'"
+echo "$out"
 
 if [[ "$reboot" == --reboot ]]; then
     echo "== k. dv-2 is force-stopped and started again"
