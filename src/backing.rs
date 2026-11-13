@@ -134,8 +134,31 @@ pub struct LoopHolder {
 /// <path>` cannot be used for this: it looks the file up by its path and says
 /// nothing for a path that no longer exists (checked on the stand), so the
 /// whole listing is read. This is the one place that matches a listing
-/// against an image: the path is compared as given and with its parent
-/// directory resolved, because `losetup` stores the canonical path.
+/// against an image.
+///
+/// A line belongs to `image` when its BACK-FILE, without a trailing
+/// ` (deleted)`, is one of:
+///
+/// * the image path as given;
+/// * the image path with its parent directory resolved (`losetup` stores the
+///   canonical path);
+/// * exactly `/<file name of image>`. The kernel renders the backing path
+///   through the mount that the attaching process had open. The agent pod
+///   attaches through its own bind mount of the volumes directory; once that
+///   pod is replaced the mount is detached and the same loop device is
+///   listed as `/<name>.img`, in the new pod and on the host (stand,
+///   Task 13). Without this form a restarted agent would find no loop device
+///   of its volumes.
+///
+/// The third form identifies the file by its name only. A holder matched by
+/// it alone and not marked `(deleted)` is confirmed by inode while the image
+/// exists: `losetup -j <image>` must list that device, otherwise the line is
+/// somebody else's file and is dropped. When the image does not exist, or the
+/// line says `(deleted)`, the holder is kept: that is the conservative
+/// direction, "something may still hold this volume's file". Residual
+/// imprecision: a foreign file named `/<name>.img` at the root of another
+/// detached mount is taken for ours in those two cases; volume names are
+/// `pvc-<uuid>`, so a collision is not expected.
 ///
 /// Anything that cannot be understood is an error, never "no loop device": a
 /// failed `losetup`, a parent directory that cannot be resolved, a non-empty
@@ -144,6 +167,7 @@ pub struct LoopHolder {
 /// this image's).
 pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>, BackingError> {
     let mut candidates = vec![image.to_string_lossy().into_owned()];
+    let mut detached_form = None;
     if let (Some(parent), Some(name)) = (image.parent(), image.file_name()) {
         let parent = parent.canonicalize().map_err(|source| BackingError::Io {
             action: "resolve",
@@ -154,10 +178,13 @@ pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>
         if !candidates.contains(&resolved) {
             candidates.push(resolved);
         }
+        detached_form = Some(format!("/{}", name.to_string_lossy()));
     }
     let args = ["--list", "--noheadings", "--output", "NAME,BACK-FILE"];
     let listing = checked(runner, "losetup", &args)?;
-    let mut holders = Vec::new();
+    // The holders and, for each, whether only the name form matched it and
+    // the inode still has to confirm it.
+    let mut holders: Vec<(LoopHolder, bool)> = Vec::new();
     for line in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let unexpected = || BackingError::UnexpectedOutput {
             command: command_line("losetup", &args),
@@ -172,14 +199,36 @@ pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>
             Some(path) => (path, true),
             None => (back_file, false),
         };
-        if candidates.iter().any(|candidate| candidate == path) {
-            holders.push(LoopHolder {
+        let by_path = candidates.iter().any(|candidate| candidate == path);
+        let by_name = detached_form.as_deref() == Some(path);
+        if by_path || by_name {
+            let holder = LoopHolder {
                 device: device.to_string(),
                 deleted,
-            });
+            };
+            holders.push((holder, !by_path && !deleted));
         }
     }
-    Ok(holders)
+    if !holders.iter().any(|(_, unconfirmed)| *unconfirmed) {
+        return Ok(holders.into_iter().map(|(holder, _)| holder).collect());
+    }
+    let exists = image.try_exists().map_err(|source| BackingError::Io {
+        action: "inspect",
+        path: image.display().to_string(),
+        source,
+    })?;
+    // `Some` only when the image exists: the devices that hold its inode.
+    let same_inode = if exists { Some(find_loops(runner, image)?) } else { None };
+    Ok(holders
+        .into_iter()
+        .filter(|(holder, unconfirmed)| {
+            !*unconfirmed
+                || same_inode
+                    .as_ref()
+                    .is_none_or(|devices| devices.contains(&holder.device))
+        })
+        .map(|(holder, _)| holder)
+        .collect())
 }
 
 /// Attaches a file to a free loop device with direct I/O; returns the device.

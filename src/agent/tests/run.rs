@@ -1291,6 +1291,8 @@ struct Script {
     kernel: Arc<Mutex<String>>,
     /// The answer of `losetup --list`.
     loops: Arc<Mutex<Output>>,
+    /// The answer of `losetup -j <image>`: the devices that hold the file's inode.
+    same_inode: Arc<Mutex<Output>>,
     /// The answers of `drbdadm dump-md`, in order; the last one repeats.
     dump_md: Arc<Mutex<Vec<Output>>>,
     dump_calls: Arc<AtomicUsize>,
@@ -1304,6 +1306,7 @@ impl Script {
         Self {
             kernel: Arc::new(Mutex::new(kernel.to_string())),
             loops: Arc::new(Mutex::new(out(0, "", ""))),
+            same_inode: Arc::new(Mutex::new(out(0, "", ""))),
             dump_md: Arc::new(Mutex::new(vec![dump_md])),
             dump_calls: Arc::new(AtomicUsize::new(0)),
             loop_calls: Arc::new(AtomicUsize::new(0)),
@@ -1322,6 +1325,20 @@ impl Script {
     /// `/dev/loop7` holds the file under its live path, as the device link of `prepare_copy` says.
     fn attach_loop(&self, image: &Path) {
         *self.loops.lock().unwrap() = out(0, &format!("/dev/loop7 {}\n", image.display()), "");
+    }
+
+    /// `losetup --list` shows `/dev/loop7` as `/<name>.img`, the form of a loop device
+    /// attached by a pod that is gone (`live`: without `(deleted)`); `inode`: `losetup -j`
+    /// confirms the device holds the file.
+    fn detached_form(&self, live: bool, inode: bool) {
+        let suffix = if live { "" } else { " (deleted)" };
+        *self.loops.lock().unwrap() = out(0, &format!("/dev/loop7 /{VOLUME}.img{suffix}\n"), "");
+        let confirmed = if inode {
+            format!("/dev/loop7: [65025]:262217 (/{VOLUME}.img)\n")
+        } else {
+            String::new()
+        };
+        *self.same_inode.lock().unwrap() = out(0, &confirmed, "");
     }
 
     /// The listing is `text` as it is.
@@ -1349,6 +1366,7 @@ impl Script {
                     announce("losetup", n);
                     reply
                 }
+                ("losetup", ["-j", _]) => script.same_inode.lock().unwrap().clone(),
                 ("drbdadm", ["dump-md", _]) => {
                     let n = script.dump_calls.fetch_add(1, Ordering::SeqCst);
                     let reply = {
@@ -1537,6 +1555,21 @@ async fn a_missing_file_that_a_loop_device_still_holds_is_kept() {
 }
 
 #[tokio::test]
+async fn a_missing_file_held_by_a_loop_device_in_the_detached_mount_form_is_kept() {
+    // After the agent pod that attached the loop is replaced, the kernel lists
+    // `/<name>.img (deleted)` (Task 13, stand).
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Absent, &script, &[]).await;
+    script.detached_form(false, false);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(
+        &e,
+        "the backing file is gone but a loop device still holds it (/dev/loop7)",
+    );
+}
+
+#[tokio::test]
 async fn a_missing_file_that_no_loop_device_holds_is_removed_without_the_peer_checks() {
     // Another file's loop device is not this file's. dv-2 has an entry and is
     // not connected: the peer checks would keep the copy.
@@ -1647,6 +1680,26 @@ async fn a_pending_file_whose_device_link_is_on_its_loop_device_is_removed_when_
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert_copy_removed(&e);
     assert!(script.dump_calls.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_device_link_is_on_a_loop_in_the_detached_mount_form_is_removed_once_losetup_j_confirms_it()
+ {
+    let (script, e) = fresh_pending_copy().await;
+    script.detached_form(true, true);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_loop_in_the_detached_mount_form_is_not_confirmed_by_inode_is_kept() {
+    let (script, e) = fresh_pending_copy().await;
+    script.detached_form(true, false);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "no loop device holds");
+    assert_no_dump_md(&e, &script);
 }
 
 #[tokio::test]
