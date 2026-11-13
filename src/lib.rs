@@ -1,5 +1,6 @@
 //! ambar: replicated volumes for k3s on top of DRBD 9.
 
+pub mod agent;
 pub mod backing;
 pub mod cli;
 pub mod config;
