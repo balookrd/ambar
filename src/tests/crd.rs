@@ -2,7 +2,7 @@ use kube::CustomResourceExt;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::model::{InitialSync, Protocol, SpecError};
+use crate::model::{InitialSync, MAX_MINOR, MAX_NODE_ID, MAX_NODE_NAME_LEN, MAX_SIZE_BYTES, Protocol, SpecError};
 
 fn spec_json() -> Value {
     json!({
@@ -85,13 +85,9 @@ fn missing_initial_sync_reads_as_done() {
     assert_eq!(spec.initial_sync, InitialSync::Done);
 }
 
-fn generated() -> String {
-    format!("{}\n", serde_json::to_string_pretty(&ReplicatedVolume::crd()).unwrap())
-}
-
 #[test]
 fn committed_crd_equals_generator_output() {
-    assert_eq!(include_str!("../../deploy/crd.json"), generated());
+    assert_eq!(include_str!("../../deploy/crd.json"), crd_json());
 }
 
 fn crd_value() -> Value {
@@ -122,16 +118,21 @@ fn node_lists_are_maps_keyed_by_name() {
     }
 }
 
-#[test]
-fn spec_carries_four_transition_rules_and_default() {
-    let crd = crd_value();
-    let spec = spec_schema(&crd);
-    let messages: Vec<&str> = spec["x-kubernetes-validations"]
+fn rules(crd: &Value) -> Vec<(&str, &str)> {
+    spec_schema(crd)["x-kubernetes-validations"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|rule| rule["message"].as_str().unwrap())
-        .collect();
+        .map(|rule| (rule["rule"].as_str().unwrap(), rule["message"].as_str().unwrap()))
+        .collect()
+}
+
+#[test]
+fn spec_carries_transition_and_create_rules_and_default() {
+    let crd = crd_value();
+    let rules = rules(&crd);
+    assert!(rules.iter().all(|(rule, _)| !rule.is_empty()));
+    let messages: Vec<&str> = rules.iter().map(|(_, message)| *message).collect();
     assert_eq!(
         messages,
         [
@@ -139,7 +140,55 @@ fn spec_carries_four_transition_rules_and_default() {
             "the set of Replica and Witness nodes is immutable",
             "a member node cannot change nodeId, address or kind",
             "initialSync cannot go back to Skip",
+            "at least two Replica nodes are required",
+            "nodeId must be unique among nodes",
+            "address must be unique among nodes",
+            "sizeBytes must be a multiple of 4096",
+            "maxPeers must be at least the number of other nodes",
         ]
     );
-    assert_eq!(spec["properties"]["initialSync"]["default"], "Done");
+    // The first four are transition rules, the rest run on create too.
+    for (rule, message) in &rules[..4] {
+        assert!(rule.contains("oldSelf"), "{message}");
+    }
+    for (rule, message) in &rules[4..] {
+        assert!(!rule.contains("oldSelf"), "{message}");
+    }
+    assert_eq!(spec_schema(&crd)["properties"]["initialSync"]["default"], "Done");
+}
+
+#[test]
+fn numeric_bounds_follow_model_constants() {
+    let crd = crd_value();
+    let props = &spec_schema(&crd)["properties"];
+    // schemars writes bounds as JSON numbers with a fraction; 2^50 is exact in f64.
+    let bounds = |v: &Value| (v["minimum"].as_f64().unwrap(), v["maximum"].as_f64().unwrap());
+    assert_eq!(bounds(&props["sizeBytes"]), (4096.0, MAX_SIZE_BYTES as f64));
+    assert_eq!(bounds(&props["port"]), (1024.0, 65535.0));
+    assert_eq!(bounds(&props["minor"]), (0.0, f64::from(MAX_MINOR)));
+    assert_eq!(bounds(&props["maxPeers"]), (1.0, f64::from(MAX_NODE_ID)));
+    let node_id = &props["nodes"]["items"]["properties"]["nodeId"];
+    assert_eq!(bounds(node_id), (0.0, f64::from(MAX_NODE_ID)));
+    assert_eq!(props["nodes"]["minItems"], 2);
+}
+
+#[test]
+fn caps_mirror_model_limits() {
+    let crd = crd_value();
+    let nodes = &spec_schema(&crd)["properties"]["nodes"];
+    assert_eq!(nodes["maxItems"], u64::from(MAX_NODE_ID) + 1);
+    let item = &nodes["items"]["properties"];
+    assert_eq!(item["name"]["maxLength"], MAX_NODE_NAME_LEN);
+    assert_eq!(item["address"]["maxLength"], MAX_ADDRESS_LEN);
+    assert_eq!(MAX_ADDRESS_LEN, "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255".len());
+}
+
+#[test]
+fn crd_has_no_unknown_integer_formats() {
+    assert!(!crd_json().contains("\"format\": \"uint"));
+}
+
+#[test]
+fn crd_json_ends_with_newline() {
+    assert!(crd_json().ends_with("}\n"));
 }

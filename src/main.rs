@@ -4,10 +4,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use kube::CustomResourceExt;
 
 use ambar::cli;
-use ambar::crd::ReplicatedVolume;
 use ambar::drbd::adm::Drbd;
 use ambar::drbd::status::ResourceStatus;
 use ambar::exec::SystemRunner;
@@ -99,7 +97,7 @@ fn run(cli: Cli) -> Result<()> {
             .remove(&name)?;
             println!("{name}: {steps:?}");
         }
-        Command::Crd => println!("{}", serde_json::to_string_pretty(&ReplicatedVolume::crd())?),
+        Command::Crd => print!("{}", ambar::crd::crd_json()),
         Command::Status { name } => match status_of(&runner, &name)? {
             None => println!("{name}: not configured"),
             Some(status) => {

@@ -34,12 +34,12 @@
                     "type": "string"
                   },
                   "maxPeers": {
-                    "format": "uint32",
-                    "minimum": 0.0,
+                    "maximum": 31.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   "minor": {
-                    "format": "uint32",
+                    "maximum": 1048575.0,
                     "minimum": 0.0,
                     "type": "integer"
                   },
@@ -65,7 +65,7 @@
                           "type": "string"
                         },
                         "nodeId": {
-                          "format": "uint32",
+                          "maximum": 31.0,
                           "minimum": 0.0,
                           "type": "integer"
                         }
@@ -79,6 +79,7 @@
                       "type": "object"
                     },
                     "maxItems": 32,
+                    "minItems": 2,
                     "type": "array",
                     "x-kubernetes-list-map-keys": [
                       "name"
@@ -86,9 +87,8 @@
                     "x-kubernetes-list-type": "map"
                   },
                   "port": {
-                    "format": "uint16",
                     "maximum": 65535.0,
-                    "minimum": 0.0,
+                    "minimum": 1024.0,
                     "type": "integer"
                   },
                   "protocol": {
@@ -99,8 +99,8 @@
                     "type": "string"
                   },
                   "sizeBytes": {
-                    "format": "uint64",
-                    "minimum": 0.0,
+                    "maximum": 1125899906842624.0,
+                    "minimum": 4096.0,
                     "type": "integer"
                   }
                 },
@@ -129,6 +129,26 @@
                   {
                     "message": "initialSync cannot go back to Skip",
                     "rule": "!(oldSelf.initialSync == 'Done' && self.initialSync == 'Skip')"
+                  },
+                  {
+                    "message": "at least two Replica nodes are required",
+                    "rule": "self.nodes.filter(n, n.kind == 'Replica').size() >= 2"
+                  },
+                  {
+                    "message": "nodeId must be unique among nodes",
+                    "rule": "self.nodes.all(a, self.nodes.exists_one(b, b.nodeId == a.nodeId))"
+                  },
+                  {
+                    "message": "address must be unique among nodes",
+                    "rule": "self.nodes.all(a, self.nodes.exists_one(b, b.address == a.address))"
+                  },
+                  {
+                    "message": "sizeBytes must be a multiple of 4096",
+                    "rule": "self.sizeBytes % 4096 == 0"
+                  },
+                  {
+                    "message": "maxPeers must be at least the number of other nodes",
+                    "rule": "self.maxPeers >= size(self.nodes) - 1"
                   }
                 ]
               },

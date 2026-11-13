@@ -13,6 +13,8 @@ pub const MAX_MINOR: u32 = (1 << 20) - 1;
 /// Largest volume the agent accepts: 1 PiB.
 pub const MAX_SIZE_BYTES: u64 = 1 << 50;
 /// A volume keeps at least two copies; single-copy volumes stay on local-path.
+/// Longest node name `valid_node_name` accepts (a DNS label).
+pub const MAX_NODE_NAME_LEN: usize = 63;
 pub const MIN_DISKFUL: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -175,7 +177,10 @@ pub fn valid_volume_name(name: &str) -> bool {
 fn valid_node_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let allowed = |b: &u8| b.is_ascii_alphanumeric() || matches!(*b, b'.' | b'_' | b'-');
-    !bytes.is_empty() && bytes.len() <= 63 && bytes[0].is_ascii_alphanumeric() && bytes.iter().all(allowed)
+    !bytes.is_empty()
+        && bytes.len() <= MAX_NODE_NAME_LEN
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes.iter().all(allowed)
 }
 
 #[cfg(test)]
