@@ -58,10 +58,16 @@ spec:
             - {name: volumes, mountPath: /var/lib/rancher/ambar/volumes}
             # Mounts made by the agent (NodeStageVolume, NodePublishVolume)
             # must be visible to kubelet and the container runtime on the host.
+            # The CSI socket directory /var/lib/kubelet/plugins/ambar is part of
+            # this mount: do NOT add a second mount of it below
+            # /var/lib/kubelet. With Bidirectional propagation that bind mount
+            # propagates to the host and the next pod start binds the stack
+            # again: the number of mounts doubles with every start of the agent
+            # pod (observed on the stand: 32767 mounts of plugins/ambar on a
+            # node after 15 starts, container starts of 40 s and more).
             - name: kubelet
               mountPath: /var/lib/kubelet
               mountPropagation: Bidirectional
-            - {name: socket-dir, mountPath: /var/lib/kubelet/plugins/ambar}
         - name: node-driver-registrar
           # registry.k8s.io/sig-storage/csi-node-driver-registrar v2.18.0
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar@sha256:b7fefd08651f00ac4df1a196ed4c621c2451fbb899297fe9fad9e36c667af0c0
