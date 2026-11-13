@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Pre-CSI checks on the stand. Each check cleans up before and after itself.
+# Pre-CSI checks on the stand. Each check cleans up before it starts and again on exit
+# (EXIT trap, so also after a failed step). A resource that is still in `drbdsetup status`
+# after `drbdsetup down` keeps its backing file and loop device; a message names the node.
 # usage: pre-csi.sh <p7|p8|p9|clean>
 #   p7  drbdadm dump-md on a file without metadata, with metadata, and on a resource that is up
 #   p8  removing a node without a disk from a running resource with a writer
@@ -14,20 +16,37 @@ names=(p7 p8 p9)
 say() { printf '\n### %s\n' "$*"; }
 
 cleanup() {
-    local n r
-    for n in "${NODES[@]}"; do
-        vm "$n" "pkill -f '^bash /usr/local/bin/(probe|watch)\\.sh' || true
-            if mountpoint -q /mnt/pa; then umount /mnt/pa; fi
-            rmdir /mnt/pa 2>/dev/null || true"
-        for r in "${names[@]}"; do
-            tb "$n" "drbdsetup down $r 2>/dev/null || true"
-        done
-        vm "$n" "for r in ${names[*]}; do
-                for d in \$(losetup -j $vol/\$r.img 2>/dev/null | cut -d: -f1); do losetup -d \$d; done
-                rm -f /dev/ambar/\$r $vol/\$r.img $res/\$r.res
+    (
+        set +e
+        local n r st
+        for n in "${NODES[@]}"; do
+            vm "$n" "pkill -f '^bash /usr/local/bin/(probe|watch)\\.sh' || true
+                for i in 1 2 3 4 5 6 7 8 9 10; do
+                    pgrep -f '^bash /usr/local/bin/(probe|watch)\\.sh' >/dev/null || break
+                    sleep 0.5
+                done
+                if mountpoint -q /mnt/pa; then umount /mnt/pa || echo 'cleanup: umount /mnt/pa failed' >&2; fi
+                rmdir /mnt/pa 2>/dev/null || true"
+            for r in "${names[@]}"; do
+                tb "$n" "drbdsetup down $r 2>/dev/null || true"
             done
-            rm -f /var/tmp/pa-acked /var/tmp/pa-probe.log /var/tmp/pa-watch.log"
-    done
+            for r in "${names[@]}"; do
+                st="$(tb "$n" "drbdsetup status 2>&1; echo status-rc=\$?" 2>/dev/null)"
+                if [[ "$st" != *status-rc=* ]]; then
+                    echo "cleanup: cannot read drbdsetup status on $n; leaving files of $r" >&2
+                    continue
+                fi
+                if grep -q "^$r " <<<"$st"; then
+                    echo "cleanup: resource $r is still in drbdsetup status on $n; leaving $vol/$r.img and its loop device" >&2
+                    continue
+                fi
+                vm "$n" "for d in \$(losetup -j $vol/$r.img 2>/dev/null | cut -d: -f1); do losetup -d \$d; done
+                    rm -f /dev/ambar/$r $vol/$r.img $res/$r.res"
+            done
+            vm "$n" "rm -f /var/tmp/pa-acked /var/tmp/pa-probe.log /var/tmp/pa-watch.log"
+        done
+    )
+    return 0
 }
 
 # on_block <node> <node-id> <disk|none> <name> <minor> <port>
@@ -68,27 +87,65 @@ ${body}    connection-mesh { hosts$hosts; }
 
 # backing <node> <name>: 1 GiB sparse file, loop device with direct I/O, link.
 backing() {
-    vm "$1" "f=$vol/$2.img
+    vm "$1" "set -e
+        f=$vol/$2.img
         truncate -s 1G \$f
-        ln -sfn \$(losetup --find --show --direct-io=on \$f) /dev/ambar/$2"
+        d=\$(losetup --find --show --direct-io=on \$f)
+        [[ -n \$d ]] || { echo 'backing: losetup returned no device for $2 on $1' >&2; exit 1; }
+        ln -sfn \$d /dev/ambar/$2"
 }
 
-# run_rc <node> <command>: run in the toolbox, print output and return code.
+# RC holds the return code printed by the last run_rc / run_split / must.
+RC=""
+
+# parse_rc <first|last> <output>: set RC from the rc= line; exit if there is none
+# (the transport to the toolbox failed, the command's own code was not captured).
+parse_rc() {
+    local which="$1" out="$2" line
+    if [[ "$which" == first ]]; then
+        line="$(grep -m1 '^rc=[0-9][0-9]*$' <<<"$out" || true)"
+    else
+        line="$(grep '^rc=[0-9][0-9]*$' <<<"$out" | tail -n1 || true)"
+    fi
+    if [[ -z "$line" ]]; then
+        echo "pre-csi: no rc= line in the output of '$cmd_desc': transport failure" >&2
+        exit 1
+    fi
+    RC="${line#rc=}"
+}
+
+# run_rc <node> <command>: run in the toolbox, print output and return code (RC).
+# A non-zero rc of the command is not an error here: it is what gets measured.
 run_rc() {
-    local node="$1"; shift
-    echo "\$ [$node] $*"
-    tb "$node" "$*; echo rc=\$?" || true
+    local node="$1" out cmd_desc; shift
+    cmd_desc="[$node] $*"
+    echo "\$ $cmd_desc"
+    out="$(tb "$node" "$*; echo rc=\$?" || true)"
+    printf '%s\n' "$out"
+    parse_rc last "$out"
+}
+
+# must <node> <command>: run_rc for a setup step; stops the experiment on a non-zero rc.
+must() {
+    run_rc "$@"
+    if [[ "$RC" != 0 ]]; then
+        echo "pre-csi: setup step failed with rc=$RC: [$1] ${*:2}" >&2
+        exit 1
+    fi
 }
 
 # run_split <node> <command>: run in the toolbox, print rc, the first 20 lines
 # of stdout and the whole stderr separately.
 run_split() {
-    local node="$1"; shift
-    echo "\$ [$node] $*"
-    tb "$node" "{ set -o pipefail; $*; } >/tmp/rs.out 2>/tmp/rs.err </dev/null; rc=\$?
+    local node="$1" out cmd_desc; shift
+    cmd_desc="[$node] $*"
+    echo "\$ $cmd_desc"
+    out="$(tb "$node" "t=\$(mktemp -d); { set -o pipefail; $*; } >\$t/out 2>\$t/err </dev/null; rc=\$?
         echo rc=\$rc
-        echo '--- stdout (first 20 lines)'; head -n 20 /tmp/rs.out
-        echo '--- stderr'; cat /tmp/rs.err; rm -f /tmp/rs.out /tmp/rs.err" || true
+        echo '--- stdout (first 20 lines)'; head -n 20 \$t/out
+        echo '--- stderr'; cat \$t/err; rm -rf \$t" || true)"
+    printf '%s\n' "$out"
+    parse_rc first "$out"
 }
 
 p7() {
@@ -98,10 +155,10 @@ p7() {
     say "P7 (1): empty sparse file, no metadata"
     run_split dv-1 "drbdadm dump-md p7"
     say "P7 (2): after create-md --force --max-peers=7"
-    run_rc dv-1 "drbdadm create-md --force --max-peers=7 p7"
+    must dv-1 "drbdadm create-md --force --max-peers=7 p7"
     run_split dv-1 "drbdadm dump-md p7"
     say "P7 (3): after drbdadm up (disk attached)"
-    run_rc dv-1 "drbdadm up p7"
+    must dv-1 "drbdadm up p7"
     run_split dv-1 "drbdadm dump-md p7"
     run_rc dv-1 "drbdsetup status p7 --verbose"
 }
@@ -112,18 +169,20 @@ p8() {
     local n
     for n in dv-1 dv-2; do
         backing "$n" p8
-        run_rc "$n" "drbdadm create-md --force --max-peers=7 p8"
+        must "$n" "drbdadm create-md --force --max-peers=7 p8"
     done
-    for n in "${NODES[@]}"; do run_rc "$n" "drbdadm up p8"; done
+    for n in "${NODES[@]}"; do must "$n" "drbdadm up p8"; done
     sleep 5
-    run_rc dv-1 "drbdadm new-current-uuid --clear-bitmap p8/0"
+    must dv-1 "drbdadm new-current-uuid --clear-bitmap p8/0"
     sleep 3
     run_rc dv-1 "drbdsetup status p8 --verbose"
-    tb dv-1 "mkfs.ext4 -q /dev/drbd1008"
-    cat "$(dirname "$0")/probe.sh" | vm_put dv-1 /usr/local/bin/probe.sh
-    cat "$(dirname "$0")/watch.sh" | vm_put dv-1 /usr/local/bin/watch.sh
-    vm dv-1 "chmod +x /usr/local/bin/probe.sh /usr/local/bin/watch.sh
-        mkdir -p /mnt/pa && mount /dev/drbd1008 /mnt/pa
+    must dv-1 "mkfs.ext4 -q /dev/drbd1008"
+    vm_put dv-1 /usr/local/bin/probe.sh <"$(dirname "$0")/probe.sh"
+    vm_put dv-1 /usr/local/bin/watch.sh <"$(dirname "$0")/watch.sh"
+    vm dv-1 "set -e
+        chmod +x /usr/local/bin/probe.sh /usr/local/bin/watch.sh
+        mkdir -p /mnt/pa
+        mount /dev/drbd1008 /mnt/pa
         nohup bash /usr/local/bin/probe.sh /mnt/pa /var/tmp/pa-acked >/var/tmp/pa-probe.log 2>&1 &
         nohup bash /usr/local/bin/watch.sh /var/tmp/pa-acked >/var/tmp/pa-watch.log 2>&1 &
         sleep 5; date +%T.%3N; cat /var/tmp/pa-acked"
@@ -175,11 +234,11 @@ p9() {
     local n
     for n in "${NODES[@]}"; do
         backing "$n" p9
-        run_rc "$n" "drbdadm create-md --force --max-peers=7 p9"
-        run_rc "$n" "drbdadm up p9"
+        must "$n" "drbdadm create-md --force --max-peers=7 p9"
+        must "$n" "drbdadm up p9"
     done
     sleep 5
-    run_rc dv-1 "drbdadm new-current-uuid --clear-bitmap p9/0"
+    must dv-1 "drbdadm new-current-uuid --clear-bitmap p9/0"
     sleep 3
     run_rc dv-1 "drbdsetup status p9 --verbose"
     local blk="blkid -p -o value -s TYPE /dev/drbd1009"
@@ -188,12 +247,12 @@ p9() {
     run_split dv-2 "$blk"
     run_split dv-2 "$rd"
     say "P9 (2): after mkfs.ext4 -q on dv-1, not mounted"
-    run_rc dv-1 "mkfs.ext4 -q /dev/drbd1009"
+    must dv-1 "mkfs.ext4 -q /dev/drbd1009"
     sleep 3
     run_split dv-2 "$blk"
     run_split dv-2 "$rd"
     say "P9 (3): mounted on dv-1"
-    vm dv-1 "mkdir -p /mnt/pa && mount /dev/drbd1009 /mnt/pa"
+    vm dv-1 "set -e; mkdir -p /mnt/pa; mount /dev/drbd1009 /mnt/pa"
     run_rc dv-1 "drbdsetup status p9 --verbose"
     run_split dv-2 "$blk"
     run_split dv-2 "$rd"
@@ -206,7 +265,13 @@ p9() {
 }
 
 case "${1:-}" in
-    p7|p8|p9) cleanup; "$1"; cleanup ;;
+    p7|p8|p9)
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        trap cleanup EXIT
+        cleanup
+        "$1"
+        ;;
     clean) cleanup ;;
     *) echo "usage: $0 <p7|p8|p9|clean>" >&2; exit 2 ;;
 esac
