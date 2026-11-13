@@ -49,7 +49,9 @@ pub struct VolumeSpec {
 pub enum SpecError {
     #[error("invalid volume json: {0}")]
     Json(String),
-    #[error("invalid volume name {0:?}: use 1-63 characters a-z, 0-9 and '-', starting with a letter or digit")]
+    #[error(
+        "invalid volume name {0:?}: use 1-63 characters a-z, 0-9 and '-', starting with a letter or digit; \"all\" is reserved by drbdadm"
+    )]
     Name(String),
     #[error(
         "invalid node name {0:?}: use 1-63 characters A-Z, a-z, 0-9, '.', '_' and '-', starting with a letter or digit"
@@ -82,7 +84,7 @@ impl VolumeSpec {
     }
 
     pub fn validate(&self) -> Result<(), SpecError> {
-        if !valid_name(&self.name) {
+        if !valid_volume_name(&self.name) {
             return Err(SpecError::Name(self.name.clone()));
         }
         if self.size_bytes == 0 || !self.size_bytes.is_multiple_of(4096) || self.size_bytes > MAX_SIZE_BYTES {
@@ -141,10 +143,15 @@ impl VolumeSpec {
     }
 }
 
-fn valid_name(name: &str) -> bool {
+/// Volume name rule: 1-63 characters a-z, 0-9 and '-', not starting with
+/// '-', and not `all`. The name becomes part of file paths and DRBD resource
+/// names; `all` is a drbdadm keyword (`drbdadm down all` acts on every
+/// resource of the node), so a volume named `all` would make `ambar remove`
+/// take down every volume.
+pub fn valid_volume_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let allowed = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-';
-    !bytes.is_empty() && bytes.len() <= 63 && bytes[0] != b'-' && bytes.iter().all(allowed)
+    !bytes.is_empty() && bytes.len() <= 63 && bytes[0] != b'-' && bytes.iter().all(allowed) && name != "all"
 }
 
 /// Hostname-like: DRBD writes the name into the resource file verbatim, so

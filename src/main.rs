@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use ambar::drbd::adm::Drbd;
+use ambar::drbd::status::ResourceStatus;
 use ambar::exec::SystemRunner;
-use ambar::model::VolumeSpec;
+use ambar::model::{SpecError, VolumeSpec, valid_volume_name};
 use ambar::module_loader::{self, LoaderEnv};
 use ambar::paths::Paths;
 use ambar::reconcile::Reconciler;
@@ -26,14 +27,12 @@ enum Command {
         #[arg(long, default_value = "/opt/ambar/modules")]
         modules_dir: PathBuf,
     },
-    /// Bring this node in line with a volume description.
+    /// Bring this node in line with a volume description. The node is the
+    /// host name: `drbdadm` picks the `on <host>` section by it.
     Apply {
         /// JSON file with the volume description.
         #[arg(long)]
         file: PathBuf,
-        /// Node name; defaults to the host name.
-        #[arg(long)]
-        node: Option<String>,
     },
     /// Take a volume down on this node and delete its local files.
     Remove {
@@ -70,13 +69,11 @@ fn run(cli: Cli) -> Result<()> {
             };
             println!("{}", module_loader::load(&env, &runner)?);
         }
-        Command::Apply { file, node } => {
+        Command::Apply { file } => {
             let json = fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
             let spec = VolumeSpec::from_json(&json)?;
-            let node = match node {
-                Some(node) => node,
-                None => read_trimmed(Path::new("/proc/sys/kernel/hostname"))?,
-            };
+            // Equals `uname -n`, which `drbdadm` matches against `on <host>`.
+            let node = read_trimmed(Path::new("/proc/sys/kernel/hostname"))?;
             let done = Reconciler {
                 paths: &paths,
                 runner: &runner,
@@ -92,7 +89,7 @@ fn run(cli: Cli) -> Result<()> {
             .remove(&name)?;
             println!("{name}: {steps:?}");
         }
-        Command::Status { name } => match (Drbd { runner: &runner }).status(&name)? {
+        Command::Status { name } => match status_of(&runner, &name)? {
             None => println!("{name}: not configured"),
             Some(status) => {
                 let device = status.device().context("the resource has no volume 0")?;
@@ -101,7 +98,11 @@ fn run(cli: Cli) -> Result<()> {
                     status.role, device.disk_state, device.quorum, device.open
                 );
                 for conn in &status.connections {
-                    let peer_disk = conn.peer_devices.first().map(|p| format!("{:?}", p.peer_disk_state));
+                    let peer_disk = conn
+                        .peer_devices
+                        .iter()
+                        .find(|p| p.volume == 0)
+                        .map(|p| format!("{:?}", p.peer_disk_state));
                     println!(
                         "  {}: {:?} role={:?} disk={}",
                         conn.name,
@@ -114,6 +115,13 @@ fn run(cli: Cli) -> Result<()> {
         },
     }
     Ok(())
+}
+
+fn status_of(runner: &SystemRunner, name: &str) -> Result<Option<ResourceStatus>> {
+    if !valid_volume_name(name) {
+        return Err(SpecError::Name(name.to_string()).into());
+    }
+    Ok(Drbd { runner }.status(name)?)
 }
 
 fn read_trimmed(path: &Path) -> Result<String> {
