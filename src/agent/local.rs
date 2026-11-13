@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::model::{SpecError, valid_volume_name};
 use crate::paths::Paths;
-use crate::reconcile::ReconcileError;
+use crate::reconcile::{FileState, ReconcileError};
 
 use super::decide::Local;
 
@@ -75,6 +75,23 @@ pub fn local(paths: &Paths, volume: &str) -> Result<Local, ReconcileError> {
         || exists(&paths.applied_res(volume))?
         || link_exists(&paths.device_link(volume))?;
     Ok(Local { image, traces, synced })
+}
+
+/// The state of the backing file of `volume`, as `Reconciler::observe` sees
+/// it: absent, present without the ready marker (DRBD metadata was never
+/// created on it), or present with it. A path that cannot be inspected is an
+/// error, never "absent".
+pub fn file_state(paths: &Paths, volume: &str) -> Result<FileState, ReconcileError> {
+    if !valid_volume_name(volume) {
+        return Err(SpecError::Name(volume.to_string()).into());
+    }
+    let image = exists(&paths.image(volume))?;
+    let ready = exists(&paths.ready_marker(volume))?;
+    Ok(match (image, ready) {
+        (false, _) => FileState::Absent,
+        (true, false) => FileState::Pending,
+        (true, true) => FileState::Ready,
+    })
 }
 
 fn exists(path: &Path) -> Result<bool, ReconcileError> {

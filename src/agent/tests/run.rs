@@ -38,6 +38,9 @@ struct FakeVolumes {
     conflicts: Mutex<u32>,
     version: AtomicU32,
     fail: AtomicBool,
+    /// `list` fails while set; the number of failed calls is in `list_failures`.
+    fail_list: AtomicBool,
+    list_failures: AtomicU32,
     /// `get` of these names fails.
     failing: Mutex<BTreeSet<String>>,
     /// Runs once at the start of the next `list`.
@@ -212,6 +215,10 @@ impl Volumes for FakeVolumes {
     }
 
     async fn list(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
+        if self.fail_list.load(Ordering::SeqCst) {
+            self.list_failures.fetch_add(1, Ordering::SeqCst);
+            return Err(ApiError::Other("the API server is down".into()));
+        }
         let hook = self.on_list.lock().unwrap().take();
         if let Some(hook) = hook {
             hook();
@@ -755,18 +762,67 @@ fn assert_deleted(e: &Env) {
     assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
 }
 
+/// A node whose resource is not configured: `drbdadm up` makes the kernel
+/// show `after_up` and calls `on_up`; `drbdadm down` empties it again.
+fn node_coming_up(after_up: String, on_up: impl Fn() + Send + Sync + 'static) -> FakeRunner {
+    let status = Arc::new(Mutex::new(EMPTY_KERNEL.to_string()));
+    FakeRunner::new(move |program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+        ("drbdadm", ["up", _]) => {
+            *status.lock().unwrap() = after_up.clone();
+            on_up();
+            out(0, "", "")
+        }
+        ("drbdadm", ["down", _]) => {
+            *status.lock().unwrap() = EMPTY_KERNEL.to_string();
+            out(0, "", "")
+        }
+        ("drbdsetup", _) => out(0, &status.lock().unwrap(), ""),
+        _ => out(0, "", ""),
+    })
+}
+
+/// Like `deleting`, for a node that holds a ready copy whose resource is not
+/// configured; `drbdadm up` makes the kernel show `after_up`.
+async fn deleting_unconfigured(after_up: String, entries: &[&str], third_kind: &str) -> Env {
+    let e = env(DV1, node_coming_up(after_up, || {}));
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike_with_third(third_kind, &[DV1, DV2]));
+    for node in entries {
+        e.volumes.set_entry(VOLUME, reported(node));
+    }
+    e.volumes.delete(VOLUME).await.unwrap();
+    e
+}
+
 #[tokio::test]
-async fn a_resource_that_is_not_configured_keeps_the_copy_while_another_node_has_an_entry() {
-    // After a reboot nothing configures the resource of a deleting object:
-    // the status shows no peers, so it proves nothing about who uses the volume.
-    let e = deleting(EMPTY_KERNEL, &[DV2], "Witness").await;
+async fn a_resource_that_is_not_configured_is_brought_up_and_then_kept_while_another_node_has_an_entry() {
+    // After a reboot nothing configures the resource of a deleting object, so
+    // the status shows no peers. The copy is not deleted on that: the
+    // resource is brought up first (round 2), and the next pass, which sees
+    // the peers, keeps the copy while one of them has not reported cleanup.
+    let after_up = kernel_peers(
+        "Secondary",
+        &[(DV2, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
+    );
+    let e = deleting_unconfigured(after_up, &[DV2], "Witness").await;
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.paths.image(VOLUME).exists());
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert_kept(&e, &[DV2, "not connected", "has not reported cleanup"]);
 }
 
 #[tokio::test]
-async fn a_resource_that_is_not_configured_is_deleted_when_nobody_else_has_an_entry() {
-    let e = deleting(EMPTY_KERNEL, &[], "Witness").await;
+async fn a_resource_that_is_not_configured_is_brought_up_and_then_deleted_when_nobody_else_has_an_entry() {
+    let after_up = kernel_peers(
+        "Secondary",
+        &[(DV2, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
+    );
+    let e = deleting_unconfigured(after_up, &[], "Witness").await;
+    // The first pass brings the resource up and deletes nothing.
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.paths.image(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert_deleted(&e);
 }
@@ -1083,6 +1139,396 @@ async fn a_kernel_resource_with_an_applied_copy_of_ambars_is_cleaned_up() {
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert_eq!(commands(&e.runner, &["drbdadm down"]), ["drbdadm down spike"]);
     assert!(!e.paths.applied_res(VOLUME).exists());
+}
+
+// ---- reconcile_one: a copy with data rejoins before it decides (round 2) ----
+
+/// The status as `node` sees `peers` with the role `role`; node ids as in `spike`.
+fn kernel_of(node: &str, role: &str, peers: &[(&str, &str, &str)]) -> String {
+    let id_of = |name: &str| match name {
+        DV1 => 0,
+        DV2 => 1,
+        _ => 2,
+    };
+    let mut all: Value = serde_json::from_str(&kernel_peers(role, peers)).unwrap();
+    all[0]["node-id"] = json!(id_of(node));
+    for connection in all[0]["connections"].as_array_mut().unwrap() {
+        let peer = connection["name"].as_str().unwrap().to_string();
+        connection["peer-node-id"] = json!(id_of(&peer));
+    }
+    serde_json::to_string(&all).unwrap()
+}
+
+fn secondary<'a>(a: &'a str, b: &'a str) -> [(&'a str, &'static str, &'static str); 2] {
+    [(a, "Connected", "Secondary"), (b, "Connected", "Secondary")]
+}
+
+fn assert_nothing_destructive_ran(e: &Env) {
+    for call in e.runner.calls() {
+        for forbidden in ["create-md", "new-current-uuid", "primary", "drbdadm down", "losetup -d"] {
+            assert!(!call.contains(forbidden), "{call:?} ran: {:?}", e.runner.calls());
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_ready_copy_whose_resource_is_not_configured_is_brought_up_before_it_decides() {
+    let after_up = kernel_of(
+        DV1,
+        "Secondary",
+        &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")],
+    );
+    let e = deleting_unconfigured(after_up, &[DV2], "Witness").await;
+
+    // Pass 1: the resource is brought up, nothing is deleted.
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_eq!(commands(&e.runner, &["drbdadm up"]), ["drbdadm up spike"]);
+    assert_nothing_destructive_ran(&e);
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.paths.ready_marker(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the status is written");
+    assert_eq!(entry.role, "Secondary");
+    assert!(!entry.connections.is_empty(), "the status shows the resource up");
+
+    // Pass 2: peers Connected and Secondary: deleted.
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_deleted(&e);
+    assert_eq!(commands(&e.runner, &["drbdadm up"]).len(), 1, "no second bring-up");
+}
+
+#[tokio::test]
+async fn the_bring_up_of_a_deleting_object_never_skips_the_initial_sync() {
+    // initialSync is Skip, this node is the leader, the synced marker is
+    // missing and the peers show the fresh state the skip waits for: `apply`
+    // of a live object would run `new-current-uuid` here.
+    let e = env(DV1, node_coming_up(crate::tests::THREE_INCONSISTENT.to_string(), || {}));
+    prepare_copy(&e.paths, true, false);
+    e.volumes.put(spike("Skip"));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_eq!(commands(&e.runner, &["drbdadm up"]).len(), 1);
+    assert_nothing_destructive_ran(&e);
+    assert!(e.volumes.object(VOLUME).unwrap().spec.initial_sync == InitialSync::Skip);
+}
+
+#[tokio::test]
+async fn the_scenario_of_a_reboot_with_three_replicas_ends_with_all_three_deleted() {
+    // dv-1 was rebooted (resource not configured); dv-2 and dv-3 are
+    // configured, see dv-1 `Connecting` and wait for its entry to go. dv-1
+    // waited for theirs. Bringing the resource up lets everyone see everyone.
+    let volumes = Arc::new(FakeVolumes::default());
+    let mut volume = spike_with_third("Replica", &[DV1, DV2, DV3]);
+    volume.spec.nodes[2].kind = crate::crd::NodeKind::Replica;
+    volumes.put(volume);
+    for node in [DV1, DV2, DV3] {
+        volumes.set_entry(VOLUME, reported(node));
+    }
+    volumes.delete(VOLUME).await.unwrap();
+
+    let lonely = |node: &str| {
+        let other = if node == DV2 { DV3 } else { DV2 };
+        kernel_of(
+            node,
+            "Secondary",
+            &[(DV1, "Connecting", "Unknown"), (other, "Connected", "Secondary")],
+        )
+    };
+    let kernel2 = Arc::new(Mutex::new(lonely(DV2)));
+    let kernel3 = Arc::new(Mutex::new(lonely(DV3)));
+    let (hook2, hook3) = (kernel2.clone(), kernel3.clone());
+    let a = env_sharing(
+        DV1,
+        node_coming_up(kernel_of(DV1, "Secondary", &secondary(DV2, DV3)), move || {
+            // dv-1 is up: the others see it connect.
+            *hook2.lock().unwrap() = kernel_of(DV2, "Secondary", &secondary(DV1, DV3));
+            *hook3.lock().unwrap() = kernel_of(DV3, "Secondary", &secondary(DV1, DV2));
+        }),
+        true,
+        volumes.clone(),
+    );
+    prepare_copy(&a.paths, true, true);
+    let others = [(DV2, kernel2), (DV3, kernel3)].map(|(node, kernel)| {
+        let e = env_sharing(node, node_with_status(kernel, true), true, volumes.clone());
+        prepare_copy(&e.paths, true, true);
+        e
+    });
+    let [b, c] = others;
+
+    // Before dv-1 is up nobody can delete.
+    assert_eq!(b.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(c.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(b.paths.image(VOLUME).exists() && c.paths.image(VOLUME).exists());
+
+    // dv-1 brings the resource up and keeps its copy.
+    assert_eq!(a.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(a.paths.image(VOLUME).exists());
+    assert_nothing_destructive_ran(&a);
+    assert_eq!(commands(&a.runner, &["drbdadm up"]).len(), 1);
+
+    // Now everyone sees everyone Connected and Secondary.
+    assert_eq!(a.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(!a.paths.image(VOLUME).exists());
+    assert_eq!(b.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(!b.paths.image(VOLUME).exists());
+    assert_eq!(c.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(!c.paths.image(VOLUME).exists());
+    assert!(volumes.object(VOLUME).is_none());
+}
+
+#[tokio::test]
+async fn a_ready_copy_whose_spec_cannot_be_converted_is_kept() {
+    let e = env(DV1, node_coming_up(kernel_json(DV1, |_| {}), || {}));
+    prepare_copy(&e.paths, true, true);
+    let mut volume = spike("Done");
+    volume.spec.nodes[2].address = "bogus".to_string();
+    e.volumes.put(volume);
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(commands(&e.runner, &["drbdadm"]).is_empty(), "{:?}", e.runner.calls());
+    assert!(e.paths.image(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the reason is in the status");
+    assert!(entry.message.contains("bogus"), "{}", entry.message);
+    assert!(entry.message.contains("kept"), "{}", entry.message);
+}
+
+#[tokio::test]
+async fn a_ready_copy_whose_bring_up_fails_is_kept_with_the_error() {
+    let e = env(
+        DV1,
+        FakeRunner::new(|program, args| match (program, args) {
+            ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+            ("drbdadm", ["up", _]) => out(10, "", "cannot load the drbd module"),
+            ("drbdsetup", _) => out(0, EMPTY_KERNEL, ""),
+            _ => out(0, "", ""),
+        }),
+    );
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike("Done"));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_nothing_destructive_ran(&e);
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.paths.res_file(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the error is in the status");
+    assert!(
+        entry.message.contains("cannot load the drbd module"),
+        "{}",
+        entry.message
+    );
+}
+
+#[tokio::test]
+async fn a_busy_volume_is_not_brought_up_and_is_retried() {
+    let e = env(DV1, node_coming_up(kernel_json(DV1, |_| {}), || {}));
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike("Done"));
+    e.volumes.delete(VOLUME).await.unwrap();
+    let held = File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(e.paths.lock_file(VOLUME))
+        .unwrap();
+    held.try_lock().unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(commands(&e.runner, &["drbdadm up"]).is_empty());
+    assert!(e.volumes.status_writes().is_empty());
+    assert!(e.paths.image(VOLUME).exists());
+}
+
+#[tokio::test]
+async fn a_node_with_only_traces_removes_without_the_peer_checks() {
+    // No backing file: nothing to lose. Another node has an entry and the
+    // resource is not configured, which would keep a copy with data.
+    let e = env(DV1, node_coming_up(kernel_json(DV1, |_| {}), || {}));
+    prepare_copy(&e.paths, true, true);
+    fs::remove_file(e.paths.image(VOLUME)).unwrap();
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    fs::remove_file(e.paths.synced_marker(VOLUME)).unwrap();
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    e.volumes.set_entry(VOLUME, reported(DV2));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(
+        commands(&e.runner, &["drbdadm up"]).is_empty(),
+        "{:?}",
+        e.runner.calls()
+    );
+    assert!(!e.paths.res_file(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME), [replica_finalizer(DV2)]);
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+}
+
+#[tokio::test]
+async fn a_backing_file_without_the_ready_marker_removes_without_the_peer_checks() {
+    // The copy never finished initialisation: it never held data. The
+    // resource is live and a peer is connecting and has an entry.
+    let kernel = kernel_peers(
+        "Secondary",
+        &[(DV2, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
+    );
+    let e = deleting_pending(&kernel, &[DV2]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(!e.paths.image(VOLUME).exists());
+    assert!(!e.paths.res_file(VOLUME).exists());
+    assert_eq!(commands(&e.runner, &["drbdadm down"]), ["drbdadm down spike"]);
+    assert_eq!(e.volumes.finalizers(VOLUME), [replica_finalizer(DV2)]);
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+}
+
+/// A deleting `spike` on dv-1 whose backing file has no ready marker.
+async fn deleting_pending(kernel: &str, entries: &[&str]) -> Env {
+    let e = env(DV1, node_with_status(Arc::new(Mutex::new(kernel.to_string())), true));
+    prepare_copy(&e.paths, true, false);
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    for node in entries {
+        e.volumes.set_entry(VOLUME, reported(node));
+    }
+    e.volumes.delete(VOLUME).await.unwrap();
+    e
+}
+
+#[tokio::test]
+async fn a_copy_without_data_is_kept_while_this_node_is_primary() {
+    for pending in [false, true] {
+        let kernel = kernel_peers(
+            "Primary",
+            &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")],
+        );
+        let e = if pending {
+            deleting_pending(&kernel, &[]).await
+        } else {
+            let e = env(DV1, node_with_status(Arc::new(Mutex::new(kernel)), true));
+            prepare_copy(&e.paths, true, false);
+            fs::remove_file(e.paths.image(VOLUME)).unwrap();
+            fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+            e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+            e.volumes.delete(VOLUME).await.unwrap();
+            e
+        };
+        assert_eq!(
+            e.agent.reconcile_one(VOLUME).await.unwrap(),
+            Outcome::Kept,
+            "pending={pending}"
+        );
+        assert!(commands(&e.runner, &["drbdadm down"]).is_empty());
+        assert!(e.paths.res_file(VOLUME).exists());
+        assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+        let entry = e.volumes.entry_of(VOLUME, DV1).unwrap();
+        assert!(entry.message.contains("this node is Primary"), "{}", entry.message);
+    }
+}
+
+#[tokio::test]
+async fn a_copy_without_data_is_kept_when_the_status_cannot_be_read() {
+    let e = env(
+        DV1,
+        FakeRunner::new(|program, _| match program {
+            "drbdsetup" => out(1, "", "no kernel module"),
+            _ => out(0, "", ""),
+        }),
+    );
+    prepare_copy(&e.paths, true, false);
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    e.volumes.put(spike("Done"));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert!(e.agent.reconcile_one(VOLUME).await.is_err());
+    assert!(commands(&e.runner, &["drbdadm", "losetup"]).is_empty());
+    assert!(e.paths.image(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+}
+
+#[tokio::test]
+async fn a_ready_file_that_appears_before_the_lock_goes_through_the_peer_checks() {
+    // The pass sees no backing file and reads the status; before the lock is
+    // taken the file and its ready marker appear (the CLI, a CSI call). The
+    // guard under the lock must stop the removal.
+    let paths_cell: Arc<Mutex<Option<Paths>>> = Arc::new(Mutex::new(None));
+    let cell = paths_cell.clone();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = reads.clone();
+    let kernel = kernel_peers(
+        "Secondary",
+        &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")],
+    );
+    let e = env(
+        DV1,
+        FakeRunner::new(move |program, args| match (program, args) {
+            ("drbdsetup", _) => {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let paths = cell.lock().unwrap().clone().unwrap();
+                    fs::write(paths.image(VOLUME), "data").unwrap();
+                    fs::write(paths.ready_marker(VOLUME), "").unwrap();
+                }
+                out(0, &kernel, "")
+            }
+            ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+            _ => out(0, "", ""),
+        }),
+    );
+    *paths_cell.lock().unwrap() = Some(e.paths.clone());
+    prepare_copy(&e.paths, true, false);
+    fs::remove_file(e.paths.image(VOLUME)).unwrap();
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(commands(&e.runner, &["drbdadm down", "losetup -d"]).is_empty());
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.paths.ready_marker(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+}
+
+#[tokio::test]
+async fn a_node_that_becomes_primary_before_the_lock_keeps_a_copy_without_data() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = reads.clone();
+    let calm = kernel_peers(
+        "Secondary",
+        &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")],
+    );
+    let busy = kernel_peers(
+        "Primary",
+        &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")],
+    );
+    let e = env(
+        DV1,
+        FakeRunner::new(move |program, args| match (program, args) {
+            ("drbdsetup", _) => out(
+                0,
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    &calm
+                } else {
+                    &busy
+                },
+                "",
+            ),
+            ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+            _ => out(0, "", ""),
+        }),
+    );
+    prepare_copy(&e.paths, true, false);
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    e.volumes.put(spike("Done"));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(commands(&e.runner, &["drbdadm down", "losetup -d"]).is_empty());
+    assert!(e.paths.image(VOLUME).exists());
+    let entry = e.volumes.entry_of(VOLUME, DV1).unwrap();
+    assert!(entry.message.contains("this node is Primary"), "{}", entry.message);
 }
 
 // ---- reconcile_one: no object, not a member, refusals ----
@@ -1657,6 +2103,35 @@ async fn readiness_comes_when_the_only_name_fails_three_times() {
         async move { agent.run(shutdown).await }
     });
     wait_for_virtual("readiness", || e.agent.ready.load(Ordering::SeqCst)).await;
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_first_listing_is_retried_and_readiness_waits_for_it() {
+    let e = env(DV1, fake_node());
+    e.volumes.put(spike("Skip"));
+    e.volumes.fail_list.store(true, Ordering::SeqCst);
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn({
+        let agent = e.agent.clone();
+        let shutdown = shutdown.clone();
+        async move { agent.run(shutdown).await }
+    });
+
+    // 12 s of virtual time: the listing is tried at 0, 5 and 10 s.
+    for _ in 0..120 {
+        std::thread::sleep(Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(e.volumes.list_failures.load(Ordering::SeqCst) >= 3);
+    assert!(!e.agent.ready.load(Ordering::SeqCst), "ready before any listing worked");
+    assert!(!e.paths.image(VOLUME).exists(), "nothing is known to reconcile yet");
+
+    e.volumes.fail_list.store(false, Ordering::SeqCst);
+    wait_for_virtual("readiness", || e.agent.ready.load(Ordering::SeqCst)).await;
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_some());
+
     shutdown.cancel();
     task.await.unwrap().unwrap();
 }
