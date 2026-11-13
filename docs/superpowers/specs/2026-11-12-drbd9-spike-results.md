@@ -7139,3 +7139,110 @@ Warning   FailedMount   MountVolume.MountDevice failed for volume "pvc-49ebb6ca-
 | `stand/install.sh --remove` и `stand/agent-smoke.sh` (шаг 5 задачи) | Удаление CRD и пространства имён ждёт решения владельца репозитория; не запускалось |
 | Бездисковый `Client` без доступной копии | Нужен разрыв сети; фаза 3 |
 | Ветка установки ядра в `stand/up.sh` | Не выполнялась: ядро на `dv-4` совпало с `KVER` после создания ВМ |
+
+## Повторная проверка CSI после второго раунда исправлений
+
+Стенд 2026-11-14: те же четыре ВМ (`dv-1`..`dv-4`), драйвер из `deploy/`, образ `ambar-drbd:dev`, собранный `image/build.sh` из дерева с коммитом `f26563d` (правила: снятие членства `Client` по состоянию узла, `Open { in_use: true }` отдаётся как `UNAVAILABLE`, повтор через 5 с для копий, удерживаемых из-за состояния DRBD). Перед прогонами выполнены `image/build.sh` и `NODES="dv-1 dv-2 dv-3 dv-4" stand/install.sh` (16 с, последняя строка `OK: ambar installed on 4 nodes`).
+
+### Сквозная проверка
+
+| Прогон | Время | Итог |
+|---|---|---|
+| 1 из 2 | 3 мин 11 с | `OK: csi e2e` |
+| 2 из 2 | 2 мин 34 с | `OK: csi e2e` |
+
+Шаг c2 (второй под с тем же PVC на узле вне тома, пока `dv-2` держит том смонтированным), прогон 1:
+
+```
+Warning   FailedMount   MountVolume.MountDevice failed for volume "pvc-3eb0a280-b2b2-4506-b818-3dc762093eb5" : rpc error: code = Unavailable desc = the volume is open on another node: cannot read /dev/drbd1000 (in use on another node): Wrong medium type (os error 124)
+-- members with dup3 pending: lima-dv-1=Replica lima-dv-2=Replica lima-dv-3=Replica lima-dv-4=Client
+time: Client entry of dv-4 removed 1 s after dup3 was deleted
+-- members after dup3 was deleted: lima-dv-1=Replica lima-dv-2=Replica lima-dv-3=Replica
+```
+
+Код `Unavailable` вместо `FailedPrecondition` в прогонах 1 и 2. Шаг c2 только печатает наблюдение и код не проверяет, `stand/csi-e2e.sh` не менялся.
+
+### Ручной сценарий: второй под на узле вне тома
+
+Том `pvc-c6e411e2-db8a-4f17-84b8-6e8cf1bfb563` (`ambar-r2`, PVC `m2`). Под `p1` на `lima-dv-1` смонтировал том; состав: `lima-dv-1=Replica lima-dv-2=Replica lima-dv-3=Witness`; на `lima-dv-4` ресурса нет (`No such resource`). Затем под `p2` с тем же PVC на `lima-dv-4`.
+
+Выборки `spec.nodes` каждые ~5 с (14 штук, с 19:48:46 по 19:49:57 UTC), все одинаковы:
+
+```
+19:48:46 spec.nodes: lima-dv-1=Replica lima-dv-2=Replica lima-dv-3=Witness lima-dv-4=Client
+19:48:52 spec.nodes: lima-dv-1=Replica lima-dv-2=Replica lima-dv-3=Witness lima-dv-4=Client
+...
+19:49:57 spec.nodes: lima-dv-1=Replica lima-dv-2=Replica lima-dv-3=Witness lima-dv-4=Client
+```
+
+События `p2` через 77 с после создания:
+
+```
+LAST                   COUNT    TYPE      REASON        MSG
+<nil>                  <none>   Normal    Scheduled     Successfully assigned default/p2 to lima-dv-4
+2026-11-13T19:49:52Z   8        Warning   FailedMount   MountVolume.MountDevice failed for volume "pvc-c6e411e2-db8a-4f17-84b8-6e8cf1bfb563" : rpc error: code = Unavailable desc = the volume is open on another node: cannot read /dev/drbd1000 (in use on another node): Wrong medium type (os error 124)
+NAME   READY   STATUS              RESTARTS   AGE
+p2     0/1     ContainerCreating   0          77s
+```
+
+kubelet повторял `NodeStageVolume` (8 событий за 77 с); запись `lima-dv-4=Client` оставалась между повторами. `drbdsetup status` в это время:
+
+```
+-- dv-1
+pvc-c6e411e2-db8a-4f17-84b8-6e8cf1bfb563 role:Primary
+  disk:UpToDate open:yes
+  lima-dv-2 role:Secondary
+    peer-disk:UpToDate
+  lima-dv-3 role:Secondary
+    peer-disk:Diskless peer-client:yes
+  lima-dv-4 role:Secondary
+    peer-disk:Diskless peer-client:yes
+-- dv-4
+pvc-c6e411e2-db8a-4f17-84b8-6e8cf1bfb563 role:Secondary
+  disk:Diskless client:yes open:no
+  lima-dv-1 role:Primary
+    peer-disk:UpToDate
+  lima-dv-2 role:Secondary
+    peer-disk:UpToDate
+  lima-dv-3 role:Secondary
+    peer-disk:Diskless peer-client:yes
+```
+
+После `kubectl delete pod p2 --wait=true` (19:50:10, под удалён к 19:50:12) запись `lima-dv-4=Client` отсутствовала уже в первой выборке (19:50:12), далее 20 выборок до 19:51:55 без неё; на `dv-4`: `No such resource`; на `dv-1` пира `lima-dv-4` нет. Кто именно снял запись (`NodeUnstageVolume` от kubelet), в выводах агента не видно: агент этот вызов не логирует; запись исчезла за время, которое занял `kubectl delete`, ≤ 2 с `[проверить: вызывает ли kubelet NodeUnstageVolume при каждой такой ошибке, или запись снял другой путь]`.
+
+Условие снятия членства «`drbdadm down` отказывает при открытом устройстве». На `dv-1` при смонтированном томе (под `p1`):
+
+```
+19:52:11 drbdadm down на dv-1 (устройство открыто: p1 смонтировал том)
+rc=11
+pvc-c6e411e2-db8a-4f17-84b8-6e8cf1bfb563: State change failed: (-12) Device is held open by someone
+additional info from kernel:
+failed to demote
+/dev/drbd1000 open_cnt:1, writable:1; list of openers follows
+drbd1000 opened by mount (pid 454007) at 2026-11-13 19:48:37.078
+Command 'drbdsetup down pvc-c6e411e2-db8a-4f17-84b8-6e8cf1bfb563' terminated with exit code 11
+```
+
+После отказа ресурс остался `Primary`, `open:yes`, файл `/data/f` в поде `p1` читается (`hi`). Один прогон.
+
+### Удаление тома под, работавшего до удаления
+
+Том `pvc-c6e411e2-...`, под `p1` удалён (19:52:19, `kubectl delete pod --wait=true`, 2 с), затем `kubectl delete pvc m2` (19:52:21): `ReplicatedVolume` исчез через 2 с (19:52:23). Строки журналов агентов (метки времени контейнера, UTC+8, то есть 03:52 = 19:52 UTC):
+
+```
+lima-dv-1: 03:52:22.222 ... the local copy is kept: peer lima-dv-3 is not connected and has not reported cleanup
+lima-dv-1: 03:52:22.252 ... the local copy is kept: peer lima-dv-2 is not connected and has not reported cleanup; peer lima-dv-3 is not connected and has not reported cleanup
+lima-dv-1: 03:52:22.280 ... the local copy is kept: peer lima-dv-2 is not connected and has not reported cleanup; peer lima-dv-3 is not connected and has not reported cleanup
+lima-dv-1: 03:52:22.415 ... the local copy is kept: peer lima-dv-2 is not connected and has not reported cleanup
+lima-dv-1: 03:52:22.725 ... removed the local copy ["down", "detach-loop", "remove-file", "remove-marker", "remove-synced-marker", "remove-link", "remove-res", "remove-applied"]
+lima-dv-2: 03:52:22.465 ... removed the local copy [...]
+lima-dv-3: 03:52:22.376 ... cleaned leftovers ["down", "remove-res", "remove-applied"]
+```
+
+Строк «kept» на `lima-dv-2`, `lima-dv-3`, `lima-dv-4` нет. Агент пишет «kept» только когда запись в `status.nodes` меняется, поэтому повторные проверки через 5 с в журнале не видны.
+
+Второй случай, где причина — состояние DRBD, меняющееся без события на объекте: том `pvc-7bb1e65b-8a84-4728-a6e4-25e40ffeefbc` (PVC `m3`, под `p3` на `lima-dv-1`), `kubectl delete rv` при работающем поде (19:53:08), объект с двумя финализаторами `replica-lima-dv-1`, `replica-lima-dv-2` через 21 с всё ещё на месте (`this node is Primary` на `lima-dv-1`, `peer lima-dv-1 is Primary` на `lima-dv-2`). Под удалён в 19:53:29 (готов 19:53:30), объект исчез в 19:53:35, то есть через 5 с после удаления пода. Журналы: `lima-dv-1: 03:53:34.874 ... removed the local copy`, `lima-dv-2: 03:53:34.857 ... removed the local copy`. Один прогон; интервал 5 с совпадает с `KEPT_DRBD_DELAY`, но выборка из одного прогона не отделяет его от случайного совпадения.
+
+### Состояние стенда после проверки
+
+Четыре ВМ, драйвер установлен (четыре пода агента `3/3 Running`), объектов `ReplicatedVolume`, PVC, PV и подов в пространстве имён `default` нет, `NODES="dv-1 dv-2 dv-3 dv-4" stand/check.sh` печатает `OK: stand is up`. `stand/install.sh --remove` не запускался.
