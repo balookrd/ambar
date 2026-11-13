@@ -16,6 +16,19 @@ KVER="${KVER:-6.12.116+deb13-arm64}"
 # Interface of the network shared between the VMs.
 NET_IF="${NET_IF:-eth0}"
 
+# k3s_role <index in NODES>: the k3s role of a node. The first node starts the
+# cluster (init), the second and third join as servers (etcd keeps three
+# members), the rest are agents. The role is derived from the index, so no
+# script needs a slice of NODES that can be empty (an empty array under
+# `set -u` is an error in bash 3.2, the /bin/bash of macOS).
+k3s_role() {
+    case "$1" in
+        0) echo init ;;
+        1|2) echo server ;;
+        *) echo agent ;;
+    esac
+}
+
 # vm <node> <command...>: run a command as root inside the VM.
 vm() {
     local node="$1"; shift

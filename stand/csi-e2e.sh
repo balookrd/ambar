@@ -13,7 +13,10 @@
 # The last line of a successful run is `OK: csi e2e`. On a failure the script
 # prints `kc get rv -o yaml`, the events of the namespace default and the tail of
 # every agent log, and exits with 1. A run starts by removing the objects of an
-# earlier one (pods, PVCs and StorageClass named e2e-*, w3, r3, ...).
+# earlier one: pods labelled app=ambar-e2e, PVCs e2e-r3 e2e-r2 e2e-r1 e2e-k, the
+# StorageClass e2e-r1, and the orphan image of an interrupted step k (its volume
+# name is kept in the ConfigMap ambar-e2e-state of the namespace default, see
+# step k; nothing else is removed).
 #
 # Variables:
 #   E2E_IMAGE   image of the test pods, pinned by digest (busybox 1.37.0, index)
@@ -32,7 +35,9 @@ fi
 N1="${NODES[0]}"; N2="${NODES[1]}"
 H1="$(vm_host "$N1")"; H2="$(vm_host "$N2")"
 
-DIAG_DONE=no
+# The diagnostics print once even when `fail` runs inside $( ... ): a flag in
+# the filesystem is seen by the parent shell, a variable is not.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/ambar-e2e.XXXXXX")"
 SKIP_LABEL=ambar-e2e-skip
 DS_PATCHED=no
 LABELED=""
@@ -52,8 +57,8 @@ restore_agent_placement() {
 }
 
 diag() {
-    [[ "$DIAG_DONE" == no ]] || return 0
-    DIAG_DONE=yes
+    [[ ! -e "$WORK/diag-done" ]] || return 0
+    : > "$WORK/diag-done"
     {
         echo "---- diagnostics: kc get rv -o yaml"
         kc get rv -o yaml || true
@@ -77,11 +82,21 @@ fail() {
 }
 
 on_err() {
+    # A `fail` in a command substitution has already printed everything.
+    [[ ! -e "$WORK/diag-done" ]] || exit 1
     echo "FAIL: [step $STEP] command failed at line $1: $BASH_COMMAND" >&2
     diag
     exit 1
 }
 trap 'on_err $LINENO' ERR
+# Whatever ends the script (success, failure, Ctrl-C) puts the agent placement
+# of step k back and removes the work directory.
+cleanup_on_exit() {
+    restore_agent_placement
+    rm -rf "$WORK"
+}
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT TERM
 STEP=init
 
 step() { STEP="$1"; echo; echo "== $2"; }
@@ -100,11 +115,20 @@ wait_until() {
 }
 
 # agent_pod <node>: the live agent pod of a node.
+# A failed kubectl is an error, not "no pod".
 agent_pod() {
-    kc -n "$NS" get pod -l app=ambar \
+    local out
+    out="$(kc -n "$NS" get pod -l app=ambar \
         --field-selector "spec.nodeName=$(vm_host "$1"),status.phase=Running" \
-        -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' \
-        | head -n1
+        -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}')" \
+        || return 1
+    printf '%s\n' "${out%%$'\n'*}"
+}
+# agent_gone <node>: true when the node has no live agent pod (false when kubectl fails).
+agent_gone() {
+    local p
+    p="$(agent_pod "$1")" || return 1
+    [[ -z "$p" ]]
 }
 
 # ag <node> <command...>: run a command in the agent container of a node.
@@ -121,8 +145,30 @@ rvjp() { kc get rv "$1" -o jsonpath="$2"; }
 members() { rvjp "$1" '{range .spec.nodes[*]}{.name}={.kind}{"\n"}{end}'; }
 # disks <rv>: lines `<node>=<disk>` of status.nodes.
 disks() { rvjp "$1" '{range .status.nodes[*]}{.name}={.disk}{"\n"}{end}'; }
-count_kind() { members "$1" | grep -c "=$2\$" || true; }
-has_member() { members "$1" | grep -q "^$2=$3\$"; }
+# The helpers below read the output into a variable first, so that a failed
+# kubectl is an error and never "no members" / "no objects".
+count_kind() { local m; m="$(members "$1")" || return 1; grep -c "=$2\$" <<<"$m" || true; }
+has_member() { local m; m="$(members "$1")" || return 1; grep -q "^$2=$3\$" <<<"$m"; }
+# no_member <rv> <node> <kind>: true only when kubectl worked and the entry is absent.
+no_member() { local m; m="$(members "$1")" || return 1; ! grep -q "^$2=$3\$" <<<"$m"; }
+# no_rvs: true only when `kubectl get rv` worked and printed nothing.
+no_rvs() { local o; o="$(kc get rv -o name)" || return 1; [[ -z "$o" ]]; }
+# files_of <node> <name>...: entries of the volumes and res directories that
+# contain one of the names (a failing ls is an error); loops_of the same for loop devices.
+files_of() {
+    local node="$1"; shift
+    local listing pat=() name
+    listing="$(vm "$node" "ls -A $VOL_DIR $RES_DIR")" || return 1
+    for name in "$@"; do pat+=(-e "$name"); done
+    grep -F "${pat[@]}" <<<"$listing" || true
+}
+loops_of() {
+    local node="$1"; shift
+    local listing pat=() name
+    listing="$(vm "$node" "losetup -a")" || return 1
+    for name in "$@"; do pat+=(-e "$name"); done
+    grep -F "${pat[@]}" <<<"$listing" || true
+}
 rv_of_pvc() {
     local pv
     pv="$(kc get pvc "$1" -o jsonpath='{.spec.volumeName}')"
@@ -199,9 +245,24 @@ for pvc in e2e-r3 e2e-r2 e2e-r1 e2e-k; do
     kc delete pvc "$pvc" --ignore-not-found --wait=true --timeout=120s >/dev/null
 done
 kc delete sc e2e-r1 --ignore-not-found >/dev/null
-wait_until 300 "ReplicatedVolume objects of an earlier run are still there" \
-    '[[ -z "$(kc get rv -o name)" ]]'
-kc -n "$NS" rollout status ds/ambar --timeout=180s >/dev/null
+wait_until 300 "ReplicatedVolume objects of an earlier run are still there" no_rvs
+kc -n "$NS" rollout status ds/ambar --timeout=240s >/dev/null
+# An interrupted step k leaves the backing file of its volume on one node (the
+# agent refuses to delete it, R10). Step k records the volume name in the
+# ConfigMap ambar-e2e-state before it removes the object; only that name is
+# removed here, with `ambar remove --name`, and only if it has the form of a
+# volume name generated for a PVC.
+orphan="$(kc -n default get cm ambar-e2e-state --ignore-not-found -o jsonpath='{.data.orphan}')"
+if [[ -n "$orphan" ]]; then
+    [[ "$orphan" =~ ^pvc-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] \
+        || fail "the ConfigMap ambar-e2e-state holds '$orphan', not a volume name; delete the ConfigMap by hand"
+    for n in "${NODES[@]}"; do
+        if [[ -n "$(files_of "$n" "$orphan")" ]]; then
+            echo "orphan of an interrupted step k on $n: $(ag "$n" "ambar remove --name $orphan" 2>&1)"
+        fi
+    done
+    kc -n default delete cm ambar-e2e-state >/dev/null
+fi
 echo "images are pulled on every node first, so the timings below do not include the pull"
 for n in "${NODES[@]}"; do
     vm "$n" "k3s crictl pull $E2E_IMAGE >/dev/null"
@@ -283,7 +344,7 @@ echo "-- members with dup3 pending: $(members "$RV3" | tr '\n' ' ')"
 pod_gone dup3
 if [[ "$OTHER_MEMBER" == no ]]; then
     wait_until 120 "the Client entry of $OTHER is still in spec.nodes after dup3 was deleted" \
-        '! has_member "$RV3" "$(vm_host "$OTHER")" Client'
+        'no_member "$RV3" "$(vm_host "$OTHER")" Client'
     echo "time: Client entry of $OTHER removed $WAITED s after dup3 was deleted"
 fi
 echo "-- members after dup3 was deleted: $(members "$RV3" | tr '\n' ' ')"
@@ -342,7 +403,7 @@ step f "f. the pod leaves $ABSENT, the Client entry goes away"
 T_DEL=$SECONDS
 pod_gone c2
 echo "time: pod c2 deleted in $(( SECONDS - T_DEL )) s (kubectl delete --wait)"
-wait_until 60 "the Client entry of $HA is still in spec.nodes" '! has_member "$RV2" "$HA" Client'
+wait_until 60 "the Client entry of $HA is still in spec.nodes" 'no_member "$RV2" "$HA" Client'
 echo "time: Client entry removed $WAITED s after the pod was deleted"
 members "$RV2"
 wait_until 60 "$ABSENT still has the DRBD resource $RV2" \
@@ -354,7 +415,7 @@ for n in "${NODES[@]}"; do
     h="$(vm_host "$n")"
     members "$RV2" | grep -q "^$h=" || continue
     wait_until 60 "$n still shows a connection to $ABSENT" \
-        '! drbd_status "$n" "$RV2" | grep -q "^ *$HA "'
+        'st="$(drbd_status "$n" "$RV2")" && ! grep -q "^ *$HA " <<<"$st"'
     echo "-- drbdsetup status $RV2 on $n (took $WAITED s):"; drbd_status "$n" "$RV2"
 done
 
@@ -454,7 +515,9 @@ wait_until 90 "no provisioning failure event for e2e-r1" \
 echo "time: ProvisioningFailed event with the error after $WAITED s"
 kc get events --field-selector involvedObject.uid=$R1_UID,reason=ProvisioningFailed -o jsonpath='{.items[0].message}'; echo
 [[ "$(kc get pvc e2e-r1 -o jsonpath='{.status.phase}')" == Pending ]] || fail "PVC e2e-r1 is not Pending"
-[[ -z "$(kc get rv -o name | grep -v -e "$RV3" -e "$RV2" || true)" ]] || fail "a ReplicatedVolume was created for replicas: 1"
+rv_list="$(kc get rv -o name)"
+extra="$(grep -v -e "$RV3" -e "$RV2" <<<"$rv_list" || true)"
+[[ -z "$extra" ]] || fail "a ReplicatedVolume was created for replicas: 1: $extra"
 kc delete pod p1 --wait=true --timeout=60s >/dev/null
 kc delete pvc e2e-r1 --wait=true --timeout=60s >/dev/null
 kc delete sc e2e-r1 >/dev/null
@@ -464,14 +527,14 @@ kc delete sc e2e-r1 >/dev/null
 step j "j. delete pods and PVCs"
 kc delete pod r3 --ignore-not-found --wait=true --timeout=120s >/dev/null
 J_START=$SECONDS
-kc delete pvc e2e-r3 e2e-r2 --wait=true --timeout=300s >/dev/null
+kc delete pvc e2e-r3 e2e-r2 --wait=true --timeout=120s >/dev/null
 echo "time: PVCs gone $(( SECONDS - J_START )) s after the delete"
-wait_until 300 "ReplicatedVolume objects are still there" '[[ -z "$(kc get rv -o name)" ]]'
+wait_until 120 "ReplicatedVolume objects are still there" no_rvs
 echo "time: ReplicatedVolume objects gone $(( SECONDS - J_START )) s after the PVC delete"
 for n in "${NODES[@]}"; do
-    left="$(vm "$n" "ls -A $VOL_DIR $RES_DIR | grep -e '$RV3' -e '$RV2' || true")"
+    left="$(files_of "$n" "$RV3" "$RV2")"
     [[ -z "$left" ]] || fail "$n: files of the volumes are left: $left"
-    loops="$(vm "$n" "losetup -a | grep -e '$RV3' -e '$RV2' || true")"
+    loops="$(loops_of "$n" "$RV3" "$RV2")"
     [[ -z "$loops" ]] || fail "$n: loop devices of the volumes are left: $loops"
     st="$(ag "$n" "drbdsetup status 2>&1 || true")"
     [[ "$st" != *"$RV3"* && "$st" != *"$RV2"* ]] || fail "$n: drbdsetup status shows the volumes: $st"
@@ -488,6 +551,9 @@ RVK="$(rv_of_pvc e2e-k)"
 echo "volume: $RVK"
 [[ "$(pod_cat pk /data/f)" == e2e-k-data ]] || fail "pk does not read back /data/f"
 pod_gone pk
+# The name goes to the cluster before anything is removed: a later run cleans
+# up the orphan file of this volume if this one is interrupted (see "leftovers").
+kc -n default create cm ambar-e2e-state --from-literal=orphan="$RVK" --dry-run=client -o yaml | kc apply -f - >/dev/null
 members "$RVK"
 # The copy that loses its agent: a Replica other than $N1.
 KNODE=""
@@ -500,53 +566,65 @@ HK="$(vm_host "$KNODE")"
 echo "the agent leaves $KNODE"
 # Method: a nodeAffinity term `$SKIP_LABEL DoesNotExist` in the DaemonSet and the
 # label on the node. The template change rolls all agents once; the label then
-# removes the pod of one node. Both are undone at the end of the step.
+# removes the pod of one node. Both are undone at the end of the step, and by the
+# EXIT trap if the script stops earlier.
 kc -n "$NS" patch ds/ambar --type=merge -p "{\"spec\":{\"template\":{\"spec\":{\"affinity\":{\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"$SKIP_LABEL\",\"operator\":\"DoesNotExist\"}]}]}}}}}}}" >/dev/null
 DS_PATCHED=yes
 kc -n "$NS" rollout status ds/ambar --timeout=240s >/dev/null
 kc label node "$HK" "$SKIP_LABEL=true" >/dev/null
 LABELED="$HK"
-wait_until 120 "the agent pod on $KNODE is still there" '[[ -z "$(agent_pod "$KNODE")" ]]'
+wait_until 120 "the agent pod on $KNODE is still there" 'agent_gone "$KNODE"'
 echo "time: agent pod on $KNODE gone after $WAITED s"
 kc delete rv "$RVK" --wait=false >/dev/null
-# The agents of the other nodes remove their copies and finalizers; the
-# finalizer of $KNODE stays. Wait for them, then drop what is left by hand.
-for _ in $(seq 60); do
-    [[ "$(rvjp "$RVK" '{.metadata.finalizers[*]}' 2>/dev/null || true)" == "ambar.balookrd.github.io/replica-$HK" ]] && break
-    sleep 2
+# The agents of the other nodes remove their copies and finalizers; only the
+# finalizer of $KNODE stays. Assert that, then drop it by hand.
+wait_until 120 "finalizers other than the one of $KNODE are still on $RVK" \
+    '[[ "$(rvjp "$RVK" "{.metadata.finalizers[*]}")" == "ambar.balookrd.github.io/replica-$HK" ]]'
+echo "time: only the finalizer of $KNODE left after $WAITED s"
+echo "finalizers before the manual removal: $(rvjp "$RVK" '{.metadata.finalizers[*]}')"
+for n in "${NODES[@]}"; do
+    [[ "$n" == "$KNODE" ]] && continue
+    left="$(files_of "$n" "$RVK")"
+    [[ -z "$left" ]] || fail "$n still has files of $RVK although its finalizer is gone: $left"
 done
-echo "finalizers left before the manual removal: $(rvjp "$RVK" '{.metadata.finalizers[*]}' 2>/dev/null || echo '<object gone>')"
-kc patch rv "$RVK" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
-wait_until 30 "$RVK is not deleted" '[[ -z "$(kc get rv -o name)" ]]'
+echo "the other nodes have no files of $RVK"
+kc patch rv "$RVK" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null
+wait_until 30 "$RVK is not deleted" no_rvs
 kc delete pvc e2e-k --wait=true --timeout=120s >/dev/null
 echo "-- on $KNODE with no agent:"
-vm "$KNODE" "ls -l $VOL_DIR $RES_DIR | grep -F '$RVK'" || true
+files_of "$KNODE" "$RVK"
+[[ -n "$(files_of "$KNODE" "$RVK")" ]] || fail "$KNODE: the files of $RVK are gone before the agent returned"
 vm "$KNODE" "test -f $VOL_DIR/$RVK.img" || fail "$KNODE: $VOL_DIR/$RVK.img is gone before the agent returned"
 restore_agent_placement
 wait_until 180 "the agent pod on $KNODE is not back" '[[ -n "$(agent_pod "$KNODE")" ]]'
 kc -n "$NS" rollout status ds/ambar --timeout=240s >/dev/null
 echo "time: agent pod on $KNODE back after $WAITED s"
 back_pod="$(agent_pod "$KNODE")"
-wait_until 90 "no error line with $RVK in the agent log of $KNODE" \
-    'kc -n "$NS" logs "$back_pod" -c ambar | grep -i error | grep -qF "$RVK"'
+# The refusal is logged on every pass over the volume: wait for two lines, so
+# that the file is checked after the agent has had a second look at it.
+orphan_lines() { kc -n "$NS" logs "$back_pod" -c ambar | grep -i error | grep -cF "$RVK" || true; }
+wait_until 150 "fewer than two error lines with $RVK in the agent log of $KNODE" \
+    '(( $(orphan_lines) >= 2 ))'
+echo "time: two error lines after $WAITED s"
 echo "-- agent log of $KNODE, lines with the volume:"
 kc -n "$NS" logs "$back_pod" -c ambar | grep -F "$RVK"
-sleep 10
 vm "$KNODE" "test -f $VOL_DIR/$RVK.img" || fail "$KNODE: $VOL_DIR/$RVK.img was removed by the agent without an object"
 echo "$KNODE keeps $VOL_DIR/$RVK.img"
 echo "-- leftovers of $RVK on all nodes:"
 for n in "${NODES[@]}"; do
-    echo "$n: $(vm "$n" "ls -A $VOL_DIR $RES_DIR | grep -F '$RVK' | tr '\n' ' '")"
-done
-for n in "${NODES[@]}"; do
-    if [[ -n "$(vm "$n" "ls -A $VOL_DIR $RES_DIR | grep -F '$RVK' || true")" ]]; then
-        echo "cleanup on $n: $(ag "$n" "ambar remove --name $RVK" 2>&1)"
+    left="$(files_of "$n" "$RVK")"
+    echo "$n: $(tr '\n' ' ' <<<"$left")"
+    if [[ "$n" != "$KNODE" ]]; then
+        [[ -z "$left" ]] || fail "$n has files of $RVK: $left"
     fi
 done
+echo "cleanup on $KNODE: $(ag "$KNODE" "ambar remove --name $RVK" 2>&1)"
 for n in "${NODES[@]}"; do
-    left="$(vm "$n" "ls -A $VOL_DIR $RES_DIR | grep -F '$RVK' || true"; vm "$n" "losetup -a | grep -F '$RVK' || true")"
+    left="$(files_of "$n" "$RVK")"
     [[ -z "$left" ]] || fail "$n: files of $RVK are left after ambar remove: $left"
+    loops="$(loops_of "$n" "$RVK")"
+    [[ -z "$loops" ]] || fail "$n: loop devices of $RVK are left after ambar remove: $loops"
 done
-
+kc -n default delete cm ambar-e2e-state >/dev/null
 echo
 echo "OK: csi e2e"

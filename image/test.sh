@@ -24,7 +24,10 @@ admver="$(run "drbdadm --version | sed -n 's/^DRBDADM_VERSION=//p'")"
 run "grep -q 'usage-count no' /etc/drbd.conf" || fail "usage-count is not disabled"
 run "command -v losetup mkfs.ext4 blkid mount umount modprobe insmod drbdadm drbdsetup drbdmeta >/dev/null" \
   || fail "host tools are missing"
-# The agent formats a new volume with this exact option set.
+# The agent formats a volume with `mkfs.ext4 -q -E nodiscard <device>` (options
+# of the code: -q, -E nodiscard); the type is read with `blkid -p -o value -s
+# TYPE`. -F is used here only because the target is a plain scratch file, not a
+# block device.
 run "f=\$(mktemp) && truncate -s 16M \$f && mkfs.ext4 -q -F -E nodiscard \$f && blkid -p -o value -s TYPE \$f | grep -qx ext4" \
   || fail "mkfs.ext4 -E nodiscard does not work"
 run "test -x /opt/ambar/load-module.sh" || fail "load-module.sh is missing"
