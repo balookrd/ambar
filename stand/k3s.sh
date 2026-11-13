@@ -9,9 +9,7 @@ IMAGE="${IMAGE:-ambar-drbd:dev}"
 K3S_VERSION="${K3S_VERSION:-v1.37.2+k3s1}"
 HERE="$(dirname "$0")"
 
-servers=("${NODES[@]:0:3}")
-agents=("${NODES[@]:3}")
-first="${servers[0]}"
+first="${NODES[0]}"
 first_ip="$(vm_ip "$first")"
 
 for n in "${NODES[@]}"; do
@@ -20,24 +18,29 @@ for n in "${NODES[@]}"; do
     vm "$n" "command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl >/dev/null; }"
 done
 
+# The first node is installed before the loop: the others need its token.
 if ! vm "$first" "test -x /usr/local/bin/k3s"; then
     vm "$first" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - server --cluster-init \
         --node-ip $first_ip --disable=traefik --disable=servicelb"
 fi
 token="$(vm "$first" "cat /var/lib/rancher/k3s/server/node-token")"
 
-for n in "${servers[@]:1}"; do
+# A node that already has /usr/local/bin/k3s is skipped, so a repeated run on a
+# running stand installs nothing.
+index=0
+for n in "${NODES[@]}"; do
+    role="$(k3s_role "$index")"
+    index=$((index + 1))
+    [[ "$role" != init ]] || continue
     if ! vm "$n" "test -x /usr/local/bin/k3s"; then
-        vm "$n" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN='$token' sh -s - server \
-            --server https://$first_ip:6443 --node-ip $(vm_ip "$n") \
-            --disable=traefik --disable=servicelb"
-    fi
-done
-
-for n in "${agents[@]}"; do
-    if ! vm "$n" "test -x /usr/local/bin/k3s"; then
-        vm "$n" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_URL=https://$first_ip:6443 \
-            K3S_TOKEN='$token' sh -s - agent --node-ip $(vm_ip "$n")"
+        if [[ "$role" == server ]]; then
+            vm "$n" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN='$token' sh -s - server \
+                --server https://$first_ip:6443 --node-ip $(vm_ip "$n") \
+                --disable=traefik --disable=servicelb"
+        else
+            vm "$n" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_URL=https://$first_ip:6443 \
+                K3S_TOKEN='$token' sh -s - agent --node-ip $(vm_ip "$n")"
+        fi
     fi
 done
 

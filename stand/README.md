@@ -66,8 +66,8 @@ stand/up.sh && stand/k3s.sh && stand/check.sh
 строки: `OK: stand is up` у `up.sh` и `check.sh`, `kc get nodes` показывает
 четыре узла `Ready` (`dv-4` без роли `control-plane`). Если драйвер уже
 установлен, повторите `stand/install.sh` с четырьмя узлами: он обновляет
-`ConfigMap ambar-nodes` (четыре записи, `nodeId` 3 у `dv-4`) и перезапускает
-DaemonSet `ambar`, чтобы на `dv-4` появился под агента.
+`ConfigMap ambar-nodes` (четыре записи, `nodeId` 3 у `dv-4`, остальные
+`nodeId` не меняются) и DaemonSet `ambar`: на `dv-4` появляется под агента.
 
 ## Работа со стендом
 
@@ -155,15 +155,30 @@ stand/install.sh
    тянут сами с `registry.k8s.io`.
 4. Применяет `deploy/namespace.yaml`, `deploy/crd.json`, `deploy/csidriver.yaml`,
    `deploy/rbac.yaml`.
-5. Создаёт `ConfigMap ambar-nodes` из `NODES`: имя `vm_host`, адрес `vm_ip`,
-   `nodeId` по порядку в `NODES`, `capacityBytes` 8 ГиБ.
+5. Создаёт или дополняет `ConfigMap ambar-nodes` (на хосте нужен `python3`).
+   Имя узла — `vm_host`, адрес — `vm_ip`, `capacityBytes` 8 ГиБ. `nodeId`
+   узла никогда не меняется: существующая запись (имя, адрес, `nodeId`,
+   `capacityBytes`) переносится как есть, новому узлу достаётся наименьший
+   свободный `nodeId`. Если узел из ConfigMap отсутствует в `NODES` или его
+   адрес изменился, скрипт завершается с кодом 1 и сообщением
+   `FAIL: node <имя> …`, ConfigMap остаётся прежним.
 6. Применяет `deploy/daemonset.yaml` и `deploy/storageclass.yaml` и ждёт
-   `rollout status ds/ambar`. Если DaemonSet уже был, перезапускает его, чтобы
-   поды взяли пересобранный образ с тем же тегом.
+   `rollout status ds/ambar` до 300 с. В шаблон пода добавляется аннотация
+   `ambar.balookrd.github.io/image-id` с ID образа `IMAGE` из `docker image
+   inspect`: пересобранный образ с тем же тегом меняет шаблон, и DaemonSet
+   заменяет поды по одному.
 7. Проверяет, что `CSINode` каждого узла содержит драйвер
    `ambar.balookrd.github.io`.
+8. Считает на каждом узле монтирования `/var/lib/kubelet/plugins/ambar` в
+   `/proc/self/mountinfo`; если их больше одного, печатает в stderr
+   `WARN: …` с командой `limactl shell <узел> sudo umount -R -l
+   /var/lib/kubelet/plugins/ambar`. Скрипт эту команду не выполняет.
 
-Повторный запуск безопасен. Переменные:
+Повторный запуск с теми же узлами: `kubectl apply` печатает `unchanged` для
+всех объектов, `ConfigMap ambar-nodes` остаётся побайтно прежним (та же
+`resourceVersion`), `metadata.generation` DaemonSet и поды не меняются; порядок
+узлов в `NODES` на `nodeId` не влияет. Поды заменяются, только если изменился
+шаблон DaemonSet (манифест или ID образа). Переменные:
 
 | Переменная | По умолчанию | Что задаёт |
 |---|---|---|
@@ -232,13 +247,17 @@ stand/install.sh && stand/csi-e2e.sh
 | g | Под на узле `Witness`: `spec.nodes` не меняется, данные читаются |
 | h | `rollout restart` DaemonSet `ambar` под писателем со счётчиком (`dd conv=fsync`): счётчик не уменьшается и растёт после перезапуска; испорченная запись `status.nodes` возвращается агентом |
 | i | StorageClass с `replicas: "1"`: PVC `Pending`, в событии `InvalidArgument` |
-| j | После удаления подов и PVC объектов `ReplicatedVolume` нет за ≤ 300 с, на узлах нет файлов, loop-устройств и ресурсов DRBD |
-| k | Объект удалён в обход финализатора, пока агент узла с копией не работал: файл `<том>.img` остался, в журнале агента строка уровня error с именем тома; остатки убирает `ambar remove --name <том>` |
+| j | После удаления подов и PVC объектов `ReplicatedVolume` нет за ≤ 120 с, на узлах нет файлов, loop-устройств и ресурсов DRBD |
+| k | Объект удалён, пока агент узла с копией не работал: у остальных узлов финализаторов и файлов тома нет, остался финализатор узла без агента (его снимает `kubectl patch`); после возврата агента в журнале две строки уровня error с именем тома, файл `<том>.img` остался; остатки убирает `ambar remove --name <том>` |
 
 Образ тестовых подов: `busybox` 1.37.0, закреплён по digest в переменной
 `E2E_IMAGE` скрипта. Шаг k временно убирает агент с узла: в `DaemonSet ambar`
 добавляется `nodeAffinity` с условием `ambar-e2e-skip DoesNotExist` (шаблон
 меняется, агенты перезапускаются один раз), узел получает метку
-`ambar-e2e-skip=true`; в конце шага (и при ошибке) метка и `nodeAffinity`
-снимаются. Наблюдавшиеся времена и разбор запусков: раздел «Проверки CSI на
+`ambar-e2e-skip=true`; в конце шага (при ошибке и по Ctrl-C — через trap на
+`EXIT`) метка и `nodeAffinity` снимаются. Имя тома шага k записывается в
+`ConfigMap ambar-e2e-state` пространства имён `default` до удаления объекта;
+если шаг прерван, следующий запуск выполняет `ambar remove --name <имя>` для
+этого имени (имя должно иметь вид `pvc-<uuid>`) и удаляет ConfigMap. Других
+остатков скрипт не убирает. Наблюдавшиеся времена и разбор запусков: раздел «Проверки CSI на
 стенде» в `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md`.
