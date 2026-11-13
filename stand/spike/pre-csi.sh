@@ -2,16 +2,17 @@
 # Pre-CSI checks on the stand. Each check cleans up before it starts and again on exit
 # (EXIT trap, so also after a failed step). A resource that is still in `drbdsetup status`
 # after `drbdsetup down` keeps its backing file and loop device; a message names the node.
-# usage: pre-csi.sh <p7|p8|p9|clean>
+# usage: pre-csi.sh <p7|p8|p9|p10|clean>
 #   p7  drbdadm dump-md on a file without metadata, with metadata, and on a resource that is up
 #   p8  removing a node without a disk from a running resource with a writer
 #   p9  blkid -p and a 2-byte read at offset 1080 on a DRBD device in four states
+#   p10 full drbdadm dump-md of dv-1's metadata in six states, from just created to a full resync
 set -euo pipefail
 source "$(dirname "$0")/../lib.sh"
 
 vol=/var/lib/rancher/ambar/volumes
 res=/var/lib/rancher/ambar/res
-names=(p7 p8 p9)
+names=(p7 p8 p9 p10)
 
 say() { printf '\n### %s\n' "$*"; }
 
@@ -264,8 +265,116 @@ p9() {
     run_split dv-2 "dd if=/dev/drbd1999 bs=1 skip=1080 count=2 status=none | od -An -tx1"
 }
 
+# run_dump <node> <command>: like run_split, but the whole stdout (a dump-md is longer than 20 lines).
+run_dump() {
+    local node="$1" out cmd_desc; shift
+    cmd_desc="[$node] $*"
+    echo "\$ $cmd_desc"
+    out="$(tb "$node" "t=\$(mktemp -d); { $*; } >\$t/out 2>\$t/err </dev/null; rc=\$?
+        echo rc=\$rc
+        echo '--- stdout'; cat \$t/out
+        echo '--- stderr'; cat \$t/err; rm -rf \$t" || true)"
+    printf '%s\n' "$out"
+    parse_rc first "$out"
+}
+
+# wait_status <node> <name> <description> <command>: poll the toolbox command until it succeeds (120 s).
+wait_status() {
+    local i
+    for i in $(seq 60); do
+        if tb "$1" "$4" >/dev/null 2>&1; then echo "wait: $3 after $((i * 2)) s at most"; return 0; fi
+        sleep 2
+    done
+    echo "pre-csi: timeout waiting for $3" >&2
+    tb "$1" "drbdsetup status p10 --verbose" >&2 || true
+    exit 1
+}
+
+# p10_synced: all three nodes UpToDate and connected to each other.
+p10_synced() {
+    local n
+    for n in "${NODES[@]}"; do
+        wait_status "$n" p10 "$n: own disk UpToDate, two peers UpToDate" \
+            "o=\$(drbdsetup status p10 --verbose); grep -q '^  volume:0 .*disk:UpToDate' <<<\"\$o\" && [ \$(grep -c 'peer-disk:UpToDate' <<<\"\$o\") = 2 ]"
+    done
+}
+
+# dump_after_down: dump-md right after `down`; a non-zero rc (the AL is "unclean" after up) is followed by
+# a second dump after 5 s and, if that also fails, by `drbdadm apply-al` and a third dump.
+dump_after_down() {
+    run_dump dv-1 "drbdadm dump-md p10"
+    if [[ "$RC" != 0 ]]; then
+        sleep 5
+        echo "--- again after 5 s"; run_dump dv-1 "drbdadm dump-md p10"
+    fi
+    if [[ "$RC" != 0 ]]; then
+        must dv-1 "drbdadm apply-al p10"
+        echo "--- again after apply-al"; run_dump dv-1 "drbdadm dump-md p10"
+    fi
+}
+
+p10() {
+    say "P10: full drbdadm dump-md of dv-1 in six states, resource p10 on dv-1, dv-2, dv-3"
+    write_res p10 1010 7010 dv-1,dv-2,dv-3 dv-1:0:disk dv-2:1:disk dv-3:2:disk
+    local n
+    for n in "${NODES[@]}"; do
+        backing "$n" p10
+        must "$n" "drbdadm create-md --force --max-peers=7 p10"
+    done
+    say "P10 (1): right after create-md --force --max-peers=7, never up"
+    run_dump dv-1 "drbdadm dump-md p10"
+
+    say "P10 (2): after up and down on dv-1 alone, dv-2 and dv-3 never configured"
+    must dv-1 "drbdadm up p10"
+    sleep 3
+    run_rc dv-1 "drbdsetup status p10 --verbose"
+    must dv-1 "drbdadm down p10"
+    dump_after_down
+
+    say "P10 (3): all three up and connected, disks Inconsistent, no initial-sync skip; then down on dv-1"
+    for n in "${NODES[@]}"; do must "$n" "drbdadm up p10"; done
+    for n in "${NODES[@]}"; do
+        wait_status "$n" p10 "$n: two connections Connected" \
+            "[ \$(drbdsetup status p10 --verbose | grep -c 'connection:Connected') = 2 ]"
+    done
+    sleep 3
+    for n in "${NODES[@]}"; do run_rc "$n" "drbdsetup status p10 --verbose"; done
+    must dv-1 "drbdadm down p10"
+    dump_after_down
+
+    say "P10 (4): dv-1 up again, new-current-uuid --clear-bitmap on dv-1, all UpToDate; then down on dv-1"
+    must dv-1 "drbdadm up p10"
+    wait_status dv-1 p10 "dv-1: two connections Connected" \
+        "[ \$(drbdsetup status p10 --verbose | grep -c 'connection:Connected') = 2 ]"
+    sleep 3
+    must dv-1 "drbdadm new-current-uuid --clear-bitmap p10/0"
+    p10_synced
+    for n in "${NODES[@]}"; do run_rc "$n" "drbdsetup status p10 --verbose"; done
+    must dv-1 "drbdadm down p10"
+    dump_after_down
+
+    say "P10 (5): dv-1 up again, mkfs.ext4 and a file on dv-2, all UpToDate; then down on dv-1"
+    must dv-1 "drbdadm up p10"
+    p10_synced
+    must dv-2 "mkfs.ext4 -q /dev/drbd1010"
+    vm dv-2 "set -e; mkdir -p /mnt/pa; mount /dev/drbd1010 /mnt/pa; echo p10-data >/mnt/pa/file; sync; umount /mnt/pa"
+    sleep 3
+    p10_synced
+    for n in "${NODES[@]}"; do run_rc "$n" "drbdsetup status p10 --verbose"; done
+    must dv-1 "drbdadm down p10"
+    dump_after_down
+
+    say "P10 (6): full resync onto dv-1: down, create-md --force, up while dv-2 and dv-3 are UpToDate; then down"
+    must dv-1 "drbdadm create-md --force --max-peers=7 p10"
+    must dv-1 "drbdadm up p10"
+    p10_synced
+    for n in "${NODES[@]}"; do run_rc "$n" "drbdsetup status p10 --verbose"; done
+    must dv-1 "drbdadm down p10"
+    dump_after_down
+}
+
 case "${1:-}" in
-    p7|p8|p9)
+    p7|p8|p9|p10)
         trap 'exit 130' INT
         trap 'exit 143' TERM
         trap cleanup EXIT
@@ -273,5 +382,5 @@ case "${1:-}" in
         "$1"
         ;;
     clean) cleanup ;;
-    *) echo "usage: $0 <p7|p8|p9|clean>" >&2; exit 2 ;;
+    *) echo "usage: $0 <p7|p8|p9|p10|clean>" >&2; exit 2 ;;
 esac
