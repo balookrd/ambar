@@ -3,29 +3,29 @@
 [Русская версия](README.ru.md)
 
 `ambar` is a Kubernetes CSI driver for replicated persistent volumes on small
-k3s clusters. Replication is done by the DRBD 9 kernel module; the driver
-itself is planned as a single Rust binary running as a DaemonSet.
+k3s clusters. Replication is done by the DRBD 9 kernel module; the driver is a
+single Rust binary running as a DaemonSet.
 
 ## Status
 
-The Kubernetes integration is not written yet. The repository contains the
-design, the groundwork it rests on and the node agent:
-
 | Part | State |
 |---|---|
-| Design spec | written, six open questions listed at its end |
+| Design spec | brought in line with the code of phase 2a; open questions listed at its end |
 | Image with a prebuilt DRBD 9.3.4 module and drbd-utils 9.35.0 | builds, has tests |
-| Test stand: three Lima VMs with k3s | scripts in `stand/` |
+| Test stand: four Lima VMs with k3s | scripts in `stand/` |
 | DRBD 9 failure experiments on the stand | recorded with raw outputs |
-| CSI driver (Rust agent) | core without Kubernetes: volume model, resource file, status parsing, module loader, local reconcile CLI; checked on the stand |
+| CSI driver | creates, mounts and deletes volumes through PVCs on the stand (`stand/csi-e2e.sh`); node failures are not handled |
+| Node failure handling (phase 3): releasing a volume on quorum loss, the `no-quorum` taint, `adjust` on `StandAlone`, metrics | not implemented |
+| Changing the replica set of an existing volume (phase 2b) | not implemented; the CRD rejects the change |
+| Production run | not done: nothing here has run on a production cluster |
 | Measurements on the target hardware (NanoPi R5C) | not done |
 
-Nothing here has been run on a production cluster.
+## What it does
 
-## What it is designed to do
-
-- A volume has `replicas: N` copies on N nodes (N is at least 2). The other
-  nodes attach to the volume without a disk, so a pod can start on any node.
+- A volume has `replicas: N` copies on N nodes (N is at least 2). With an even
+  N one more node joins as a diskless witness. Any other node attaches to the
+  volume without a disk when a pod with the volume is scheduled there, and
+  detaches when the pod is gone.
 - With `protocol: C` a write is acknowledged after it is on the disks of all
   nodes that hold a copy.
 - One node mounts a volume at a time (`ReadWriteOnce`, `ReadWriteOncePod`).
@@ -39,12 +39,13 @@ Nothing here has been run on a production cluster.
 | Path | Contents |
 |---|---|
 | `docs/superpowers/specs/2026-11-12-ambar-design.md` | design spec (Russian) |
-| `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | record of the DRBD 9 experiments (Russian) |
-| `docs/superpowers/plans/` | executed plans of phases 0 and 1 (Russian, historical) |
-| `src/` | the `ambar` agent (Rust) |
-| `deploy/` | Kubernetes manifests: CRD, CSIDriver, RBAC, DaemonSet, StorageClasses |
+| `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | record of the DRBD 9 experiments and the stand checks (Russian) |
+| `docs/superpowers/plans/` | executed plans of phases 0, 1 and 2a (Russian, historical) |
+| `src/` | the `ambar` binary (Rust): node agent, reconcile loop, CSI services |
+| `proto/csi.proto`, `build.rs` | CSI v1 protocol definition and its code generation |
+| `deploy/` | Kubernetes manifests: CRD, CSIDriver, RBAC, DaemonSet, StorageClasses, example of the `ambar-nodes` ConfigMap |
 | `image/` | Dockerfile, module loader, image tests |
-| `stand/` | test stand scripts; see `stand/README.md` (Russian) |
+| `stand/` | test stand scripts, driver install and end-to-end check; see `stand/README.md` (Russian) |
 | `stand/spike/` | experiment scripts and `drbdsetup status --json` samples |
 
 ## Requirements for the image and the stand
@@ -55,7 +56,8 @@ Nothing here has been run on a production cluster.
 | Lima | 2.3.0, `vmType: vz` |
 | Docker | `docker buildx`, `linux/arm64` |
 | Kernel the module is built for | `6.12.116+deb13-arm64` (Debian 13 stock kernel) |
-| For `image/build.sh` on the host | Rust stable 1.95 or newer (the `rust-version` of the crate), `cargo-zigbuild`, `zig`, and the target added with `rustup target add aarch64-unknown-linux-musl` (checked with zig 0.17.1 and rustc 1.99.1) |
+| Rust | stable 1.95 or newer (the `rust-version` in `Cargo.toml`) |
+| For `image/build.sh` on the host | `cargo-zigbuild`, `zig`, and the target added with `rustup target add aarch64-unknown-linux-musl` (checked with zig 0.17.1 and rustc 1.99.1) |
 
 ## Build and test the image
 
@@ -79,16 +81,24 @@ image/test-loader.sh
 Expected last line: `OK: 6 loader cases`. This test needs neither Docker nor a
 Linux kernel.
 
-## Test the agent
+## Test the code
 
 ```bash
 cargo test
 ```
 
-Expected line: `test result: ok. 744 passed`. The agent is checked on the stand
-with `stand/agent-smoke.sh`, see `stand/README.md`.
+Expected line: `test result: ok. 744 passed`. The mount code has tests that run
+only on Linux; on macOS run the suite in a container as well:
+`docker run --rm -v "$PWD":/src -w /src rust:1-slim cargo test --locked`.
 
-Bringing up the stand is described in `stand/README.md`.
+## Install on the stand
+
+`stand/README.md` describes how to bring up the stand, install the driver from
+`deploy/` with `stand/install.sh` and run the end-to-end check
+`stand/csi-e2e.sh`. The manifests have not been applied outside the stand; on
+another cluster the image and the `ambar-nodes` ConfigMap must be set for that
+cluster (see the comments in `deploy/daemonset.yaml` and
+`deploy/nodes-configmap.example.yaml`).
 
 ## License
 
