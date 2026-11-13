@@ -7,6 +7,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::backing::backing_file_bytes;
 use crate::drbd::status::{self, ConnectionState, DiskState};
+use crate::exec::Output;
 use crate::tests::{FakeRunner, out};
 
 const SPEC: &str = r#"{
@@ -16,6 +17,7 @@ const SPEC: &str = r#"{
   "minor": 1000,
   "port": 7000,
   "maxPeers": 7,
+  "initialSync": "Skip",
   "nodes": [
     {"name": "lima-dv-1", "address": "192.168.104.1", "nodeId": 0, "diskful": true},
     {"name": "lima-dv-2", "address": "192.168.104.3", "nodeId": 1, "diskful": true},
@@ -26,6 +28,9 @@ const SPEC: &str = r#"{
 /// Captured on lima-dv-1 (node id 0) of a volume with three copies.
 const THREE_INCONSISTENT: &str = include_str!("../../stand/spike/samples/three-inconsistent.json");
 const THREE_UPTODATE: &str = include_str!("../../stand/spike/samples/three-uptodate.json");
+
+/// Stderr recorded in experiment P7 (1) for a backing file without metadata.
+const P7_NO_METADATA_STDERR: &str = "No valid meta data found\nCommand 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 255\n";
 
 fn spec() -> VolumeSpec {
     VolumeSpec::from_json(SPEC).unwrap()
@@ -323,6 +328,19 @@ fn only_the_lowest_diskful_node_skips_the_initial_sync() {
 }
 
 #[test]
+fn skip_is_never_planned_when_initial_sync_is_done() {
+    let obs = fresh_on("lima-dv-1");
+    assert!(obs.status.as_ref().unwrap().ready_to_skip_initial_sync());
+    // The same input with `Skip` plans the skip.
+    assert_eq!(plan(&spec(), "lima-dv-1", &obs).unwrap(), [Action::SkipInitialSync]);
+    let mut done = spec();
+    done.initial_sync = InitialSync::Done;
+    // With `Done` nothing is planned, and no synced marker either: the
+    // disks are still `Inconsistent`.
+    assert_eq!(plan(&done, "lima-dv-1", &obs).unwrap(), []);
+}
+
+#[test]
 fn a_foreign_node_is_rejected() {
     assert_eq!(
         plan(&spec(), "elsewhere", &steady()),
@@ -593,61 +611,65 @@ fn statuses_on(node: &str) -> [Option<ResourceStatus>; 4] {
 /// protect data, whatever the other inputs are.
 #[test]
 fn the_data_safety_rules_hold_for_every_combination_of_inputs() {
-    let spec = spec();
     let mut inputs = 0;
     let mut create_md_seen = 0;
     let mut skip_seen = 0;
     let mut lost_seen = 0;
-    for node in spec.nodes.iter().map(|n| n.name.as_str()) {
-        let diskful = spec.node(node).unwrap().diskful;
-        let leader = spec.initial_sync_leader().is_some_and(|l| l.name == node);
-        for file in [FileState::Absent, FileState::Pending, FileState::Ready] {
-            for status in statuses_on(node) {
-                for (synced, stale_markers, res_matches, res_applied) in
-                    (0..16).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0))
-                {
-                    inputs += 1;
-                    let obs = Observed {
-                        file,
-                        loop_device: Some("/dev/loop3".into()),
-                        link_target: Some("/dev/loop3".into()),
-                        res_matches,
-                        res_applied,
-                        synced,
-                        stale_markers,
-                        status: status.clone(),
-                    };
-                    let result = plan(&spec, node, &obs);
-                    let what = format!("{node} {obs:?}");
+    for initial_sync in [InitialSync::Skip, InitialSync::Done] {
+        let mut spec = spec();
+        spec.initial_sync = initial_sync;
+        for node in spec.nodes.iter().map(|n| n.name.as_str()) {
+            let diskful = spec.node(node).unwrap().diskful;
+            let leader = spec.initial_sync_leader().is_some_and(|l| l.name == node);
+            for file in [FileState::Absent, FileState::Pending, FileState::Ready] {
+                for status in statuses_on(node) {
+                    for (synced, stale_markers, res_matches, res_applied) in
+                        (0..16).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0))
+                    {
+                        inputs += 1;
+                        let obs = Observed {
+                            file,
+                            loop_device: Some("/dev/loop3".into()),
+                            link_target: Some("/dev/loop3".into()),
+                            res_matches,
+                            res_applied,
+                            synced,
+                            stale_markers,
+                            status: status.clone(),
+                        };
+                        let result = plan(&spec, node, &obs);
+                        let what = format!("{node} {obs:?}");
 
-                    if diskful && file == FileState::Pending && synced {
-                        lost_seen += 1;
-                        assert_eq!(
-                            result,
-                            Err(PlanError::ReadyMarkerLost { volume: "spike".into() }),
-                            "{what}"
-                        );
-                    }
-                    let Ok(actions) = result else { continue };
+                        if diskful && file == FileState::Pending && synced {
+                            lost_seen += 1;
+                            assert_eq!(
+                                result,
+                                Err(PlanError::ReadyMarkerLost { volume: "spike".into() }),
+                                "{what}"
+                            );
+                        }
+                        let Ok(actions) = result else { continue };
 
-                    if actions.contains(&Action::CreateMd) {
-                        create_md_seen += 1;
-                        assert!(diskful, "{what}");
-                        assert_ne!(file, FileState::Ready, "{what}");
-                        assert!(obs.status.is_none(), "{what}");
-                    }
-                    if actions.contains(&Action::SkipInitialSync) {
-                        skip_seen += 1;
-                        assert!(leader && diskful, "{what}");
-                        assert!(!synced, "{what}");
-                        assert!(obs.status.as_ref().unwrap().ready_to_skip_initial_sync(), "{what}");
-                        assert_eq!(actions, [Action::SkipInitialSync], "{what}");
+                        if actions.contains(&Action::CreateMd) {
+                            create_md_seen += 1;
+                            assert!(diskful, "{what}");
+                            assert_ne!(file, FileState::Ready, "{what}");
+                            assert!(obs.status.is_none(), "{what}");
+                        }
+                        if actions.contains(&Action::SkipInitialSync) {
+                            skip_seen += 1;
+                            assert_eq!(initial_sync, InitialSync::Skip, "{what}");
+                            assert!(leader && diskful, "{what}");
+                            assert!(!synced, "{what}");
+                            assert!(obs.status.as_ref().unwrap().ready_to_skip_initial_sync(), "{what}");
+                            assert_eq!(actions, [Action::SkipInitialSync], "{what}");
+                        }
                     }
                 }
             }
         }
     }
-    assert_eq!(inputs, 3 * 3 * 4 * 16);
+    assert_eq!(inputs, 2 * 3 * 3 * 4 * 16);
     // The loop above must reach the branches the rules talk about.
     assert!(create_md_seen > 0 && skip_seen > 0 && lost_seen > 0);
 }
@@ -686,6 +708,11 @@ fn apply_rejects_an_invalid_spec_before_touching_anything() {
 /// resource appear in `drbdsetup status`, and the skip of the initial sync
 /// turns the disks `UpToDate`.
 fn fake_node() -> FakeRunner {
+    fake_node_with(out(255, "", P7_NO_METADATA_STDERR))
+}
+
+/// `fake_node` whose `drbdadm dump-md` answers with `dump_md`.
+fn fake_node_with(dump_md: Output) -> FakeRunner {
     let attached = Arc::new(AtomicBool::new(false));
     let up = Arc::new(AtomicBool::new(false));
     let skipped = Arc::new(AtomicBool::new(false));
@@ -699,6 +726,7 @@ fn fake_node() -> FakeRunner {
             attached.store(false, Ordering::SeqCst);
             out(0, "", "")
         }
+        ("drbdadm", ["dump-md", _]) => dump_md.clone(),
         ("drbdadm", ["up", _]) => {
             up.store(true, Ordering::SeqCst);
             out(0, "", "")
@@ -722,6 +750,7 @@ fn fake_node() -> FakeRunner {
 fn apply_creates_a_copy_then_skips_the_initial_sync_and_remove_undoes_it() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
     let runner = fake_node();
     let reconciler = Reconciler {
         paths: &paths,
@@ -773,6 +802,7 @@ fn apply_creates_a_copy_then_skips_the_initial_sync_and_remove_undoes_it() {
         commands,
         [
             "losetup --find --show --direct-io=on <image>",
+            "drbdadm dump-md spike",
             "drbdadm create-md --force --max-peers=7 spike",
             "drbdadm up spike",
             "drbdadm new-current-uuid --clear-bitmap spike/0",
@@ -975,6 +1005,7 @@ fn a_rejected_adjust_is_not_recorded_even_when_the_status_matches() {
 fn an_up_without_effect_is_an_error() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
     let runner = configured_node(Arc::new(Mutex::new("[\n]\n".to_string())));
     let reconciler = Reconciler {
         paths: &paths,
@@ -1312,6 +1343,7 @@ fn remove_stops_when_the_image_cannot_be_inspected() {
 fn a_held_volume_lock_makes_apply_and_remove_busy() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
     let runner = fake_node();
     let reconciler = Reconciler {
         paths: &paths,
@@ -1365,4 +1397,98 @@ fn a_replaced_lock_file_is_not_linked() {
     // never share an inode.
     File::create(&path).unwrap();
     assert!(!still_linked(&file, &path).unwrap());
+}
+
+// ---- metadata check before create-md ----
+
+fn node_with_dump_md(dump_md: Output) -> FakeRunner {
+    fake_node_with(dump_md)
+}
+
+#[test]
+fn create_md_runs_only_after_dump_md_reports_no_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    let runner = node_with_dump_md(out(255, "", P7_NO_METADATA_STDERR));
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    reconciler.apply(&spec(), "lima-dv-1").unwrap();
+    let md: Vec<String> = runner.calls().into_iter().filter(|c| c.contains("-md")).collect();
+    assert_eq!(
+        md,
+        ["drbdadm dump-md spike", "drbdadm create-md --force --max-peers=7 spike"]
+    );
+    assert!(paths.ready_marker("spike").exists());
+}
+
+#[test]
+fn existing_metadata_stops_create_md_and_leaves_no_ready_marker() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    let runner = node_with_dump_md(out(0, "# DRBD meta data dump\n", ""));
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+    assert!(
+        matches!(&err, ReconcileError::MetadataPresent { volume } if volume == "spike"),
+        "{err}"
+    );
+    assert!(
+        !runner.calls().iter().any(|c| c.contains("create-md")),
+        "{:?}",
+        runner.calls()
+    );
+    assert!(!paths.ready_marker("spike").exists());
+    assert!(paths.image("spike").exists());
+    assert_eq!(
+        err.to_string(),
+        "volume \"spike\": the backing file already holds DRBD metadata but has no ready marker; nothing was changed. \
+         Check the file by hand before restoring the marker"
+    );
+}
+
+#[test]
+fn a_failed_metadata_check_stops_create_md() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    let runner = node_with_dump_md(out(20, "", "Device is configured"));
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+    assert!(
+        matches!(err, ReconcileError::Drbd(DrbdError::MetadataCheck { .. })),
+        "{err}"
+    );
+    assert!(
+        !runner.calls().iter().any(|c| c.contains("create-md")),
+        "{:?}",
+        runner.calls()
+    );
+    assert!(!paths.ready_marker("spike").exists());
+}
+
+// ---- the volumes directory ----
+
+#[test]
+fn apply_does_not_create_the_volumes_directory() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    let runner = fake_node();
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+    assert!(matches!(&err, ReconcileError::Io { action: "open", .. }), "{err}");
+    assert!(!paths.volumes_dir.exists());
+    assert!(runner.calls().is_empty(), "{:?}", runner.calls());
 }

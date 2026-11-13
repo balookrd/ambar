@@ -63,7 +63,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let runner = SystemRunner;
+    let runner = SystemRunner::default();
     let paths = Paths::default();
     match cli.command {
         Command::LoadModule { modules_dir } => {

@@ -6,15 +6,24 @@
 //! Data-safety rules this module enforces:
 //!
 //! 1. `drbdadm create-md --force` destroys existing metadata: it runs only on
-//!    a backing file without the ready marker `<volume>.img.ready`.
+//!    a backing file without the ready marker `<volume>.img.ready`, and only
+//!    after `drbdadm dump-md` reported that the file holds no metadata
+//!    (`Metadata::Absent`, see `Drbd::metadata`). Existing metadata stops the
+//!    pass with `MetadataPresent`; a failed check stops it with
+//!    `DrbdError::MetadataCheck`. The check runs in `execute`, right before
+//!    `create-md`; `plan` does not depend on it.
 //! 2. `drbdadm new-current-uuid --clear-bitmap <volume>/0` declares all copies
 //!    identical without copying data: only the leader (lowest `nodeId` among
-//!    nodes with a copy) runs it, only while the synced marker is absent and
-//!    the status gate holds.
+//!    nodes with a copy) runs it, only when the description says
+//!    `initialSync: Skip` (the default is `Done`), only while the synced
+//!    marker is absent and the status gate holds.
 //! 3. `drbdadm primary --force` is never run.
 //! 4. The outcome of a state-changing `drbdadm` command is established by
 //!    re-reading `drbdsetup status --json`, not by its return code (for
 //!    `adjust` a non-zero code is a failure, a zero code is not proof).
+//! 5. The volumes directory is never created by `apply` or `remove`: when it
+//!    is missing they fail with `Io` ("open" of the lock file). The node
+//!    setup creates it.
 //!
 //! Decision table of `plan`. "Copy" means the node holds a copy (`diskful`).
 //! `matches` is `status_matches_spec`; `applied` is `Observed::res_applied`.
@@ -46,7 +55,7 @@
 //!
 //! | Input | Actions |
 //! |---|---|
-//! | leader, no synced marker, `ready_to_skip_initial_sync` | `SkipInitialSync` |
+//! | leader, `initialSync: Skip`, no synced marker, `ready_to_skip_initial_sync` | `SkipInitialSync` |
 //! | no synced marker, local volume-0 disk `UpToDate`, or a peer's volume-0 disk `UpToDate`, `Consistent` or `Outdated` | `MarkSynced` |
 //! | anything else | nothing |
 //!
@@ -61,17 +70,17 @@
 //! holds data. When the skip gate holds, every peer disk is `Inconsistent` or
 //! the peer has no disk, so the two rules never both apply.
 
-use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::backing::{self, BackingError};
-use crate::drbd::adm::{Drbd, DrbdError};
+use crate::drbd::adm::{Drbd, DrbdError, Metadata};
 use crate::drbd::resource;
 use crate::drbd::status::{DiskState, ResourceStatus};
 use crate::exec::{Runner, command_line};
-use crate::model::{SpecError, VolumeSpec, valid_volume_name};
+use crate::model::{InitialSync, SpecError, VolumeSpec, valid_volume_name};
 use crate::paths::Paths;
 
 /// Pass 1 creates, configures or repairs; pass 2 observes the result and,
@@ -244,7 +253,7 @@ pub fn plan(spec: &VolumeSpec, node_name: &str, obs: &Observed) -> Result<Vec<Ac
                     )
                 })
             });
-            if !obs.synced && leader && status.ready_to_skip_initial_sync() {
+            if !obs.synced && leader && spec.initial_sync == InitialSync::Skip && status.ready_to_skip_initial_sync() {
                 actions.push(Action::SkipInitialSync);
             } else if !obs.synced && (disk == Some(DiskState::UpToDate) || peer_has_data) {
                 // The volume has a data source: this copy is the one that
@@ -279,6 +288,11 @@ pub enum ReconcileError {
          expected state"
     )]
     NotApplied { command: &'static str, volume: String },
+    #[error(
+        "volume {volume:?}: the backing file already holds DRBD metadata but has no ready marker; nothing was \
+         changed. Check the file by hand before restoring the marker"
+    )]
+    MetadataPresent { volume: String },
     #[error("volume {volume:?} is locked by another ambar process; try again later")]
     Busy { volume: String },
     #[error("volume {volume:?}: no loop device is known to point the device link at")]
@@ -385,6 +399,14 @@ impl Reconciler<'_> {
             }
             Action::WriteRes => write_atomically(&self.paths.res_file(volume), &self.rendered(spec))?,
             Action::CreateMd => {
+                // The file has no ready marker, but it may still hold
+                // metadata (a marker lost, or metadata written by something
+                // else): `create-md --force` would destroy it.
+                if drbd.metadata(volume)? == Metadata::Present {
+                    return Err(ReconcileError::MetadataPresent {
+                        volume: volume.to_string(),
+                    });
+                }
                 drbd.create_md(volume, spec.max_peers)?;
                 // `create-md` writes through the loop device; flush the
                 // backing file itself before `MarkReady` records the result.
@@ -518,11 +540,10 @@ impl Reconciler<'_> {
             path: path.display().to_string(),
             source,
         };
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.paths.volumes_dir)
-            .map_err(|e| io_err("create directory for", e))?;
+        // The directory is never created here: a missing one means the
+        // volume storage is not mounted (or the node is set up wrong), and a
+        // fresh empty directory on the root disk would hide that and start
+        // the volumes from scratch.
         let file = OpenOptions::new()
             .read(true)
             .write(true)
