@@ -6754,3 +6754,16 @@ OK: stand is up
 `/sys/block/loop0/loop/backing_file` на `dv-1` вернул `/<vol>.img`; `losetup -j /var/lib/rancher/ambar/volumes/<vol>.img` вернул `/dev/loop0: [65025]:266000 (/<vol>.img)`. Второе устройство для файла после замены пода не создавалось. Объяснение `[проверить: не перепроверялось]`: ядро строит путь от монтирования, через которое файл был открыт; это приватное bind-монтирование каталога томов в старом поде, после выхода пода оно отсоединено, и путь отсчитывается от корня этого монтирования.
 
 Следствие для `backing::loop_holders`: строка вида `/<vol>.img` (в том числе `/<vol>.img (deleted)`) считается строкой этого образа; без `(deleted)` и при существующем файле устройство подтверждается по inode через `losetup -j`.
+
+### Удаление тома после замены подов агента (2026-11-14)
+
+Образ собран из дерева с коммитами `4d11f79` и `04f44f6` (`image/build.sh`, 19 с), установлен `stand/install.sh` (16 с, последняя строка `OK: ambar installed on 3 nodes`). Остатки прерванного прогона: PVC и под `smoke13`, том `pvc-6cc25132-…` на трёх узлах. Один прогон.
+
+| Шаг | Что наблюдалось |
+|---|---|
+| `losetup --list --noheadings --output NAME,BACK-FILE` в поде агента и на хосте, после замены подов | На `dv-1`, `dv-2`, `dv-3`: `/dev/loop0 /pvc-6cc25132-….img` |
+| Чтение из пода `smoke13` после замены подов | `hello-ambar`, `restartCount` 0 |
+| Удаление пода и PVC `smoke13` | Объект `ReplicatedVolume` пропал через ~2 мин 17 с после удаления PVC. Журнал агента на каждом узле: `removed the local copy ["down", "detach-loop", "remove-file", "remove-marker", "remove-synced-marker", "remove-link", "remove-res", "remove-applied"]`. На всех узлах после этого `losetup --list` пуст, `volumes/` и `res/` пусты, `drbdsetup status`: `# No currently configured DRBD found.` |
+| Дополнительно: PVC и под `smoke14` на том же драйвере, под агента `dv-3` заменён при живом томе | На `dv-3` устройство показано как `/dev/loop0 /pvc-3471a8ab-….img`, на `dv-2` как `/dev/loop0 /var/lib/rancher/ambar/volumes/pvc-3471a8ab-….img`; чтение `hello-ambar` после замены; после удаления пода и PVC: `detach-loop` в журнале каждого узла, `losetup --list` пуст, файлов нет, `ReplicatedVolume` исчез за ~2 мин 16 с |
+
+Задержка между удалением PVC и исчезновением `ReplicatedVolume` не исследовалась. Шаги 4 (`stand/install.sh --remove`, `stand/check.sh`, повторная установка) и 5 (повторная проверка на переустановленном драйвере) не выполнены: запуск `--remove` отклонён системой разрешений. После прогона драйвер установлен, томов нет, `stand/check.sh` печатает `OK: stand is up`.
