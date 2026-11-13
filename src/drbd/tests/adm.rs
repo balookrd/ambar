@@ -1,4 +1,8 @@
+use std::sync::Mutex;
+use std::time::Duration;
+
 use super::*;
+use crate::exec::DEFAULT_COMMAND_TIMEOUT;
 use crate::tests::{FakeRunner, out};
 
 const THREE_UPTODATE: &str = include_str!("../../../stand/spike/samples/three-uptodate.json");
@@ -7,7 +11,7 @@ const THREE_UPTODATE: &str = include_str!("../../../stand/spike/samples/three-up
 fn commands_are_built_as_recorded_on_the_stand() {
     let runner = FakeRunner::new(|_, _| out(0, "", ""));
     let drbd = Drbd { runner: &runner };
-    drbd.create_md("spike", 7).unwrap();
+    drbd.create_md("spike", 7, 1 << 30).unwrap();
     drbd.up("spike").unwrap();
     drbd.adjust("spike").unwrap();
     drbd.skip_initial_sync("spike").unwrap();
@@ -158,4 +162,70 @@ fn a_dump_md_that_cannot_start_is_a_failed_check() {
     }
     let drbd = Drbd { runner: &Broken };
     assert!(matches!(drbd.metadata("p7"), Err(DrbdError::Spawn { .. })));
+}
+
+#[test]
+fn the_create_md_limit_is_120_seconds_plus_one_second_per_gib() {
+    let gib = 1u64 << 30;
+    assert_eq!(create_md_timeout(0), DEFAULT_COMMAND_TIMEOUT);
+    assert_eq!(create_md_timeout(1), Duration::from_secs(121));
+    assert_eq!(create_md_timeout(gib), Duration::from_secs(121));
+    assert_eq!(create_md_timeout(gib + 1), Duration::from_secs(122));
+    assert_eq!(create_md_timeout(1 << 40), Duration::from_secs(1144));
+    assert_eq!(create_md_timeout(1 << 50), Duration::from_secs(120 + (1 << 20)));
+}
+
+/// Records the limit each command was started with.
+struct LimitRecorder {
+    calls: Mutex<Vec<(String, Option<Duration>)>>,
+}
+
+impl Runner for LimitRecorder {
+    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<Output> {
+        self.calls.lock().unwrap().push((command_line(program, args), None));
+        Ok(out(0, "[\n]\n", ""))
+    }
+
+    fn run_with_timeout(&self, program: &str, args: &[&str], timeout: Duration) -> std::io::Result<Output> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((command_line(program, args), Some(timeout)));
+        Ok(out(0, "", ""))
+    }
+}
+
+#[test]
+fn create_md_runs_with_a_limit_that_grows_with_the_volume() {
+    let runner = LimitRecorder {
+        calls: Mutex::new(Vec::new()),
+    };
+    let drbd = Drbd { runner: &runner };
+    drbd.create_md("spike", 7, 1 << 40).unwrap();
+    drbd.up("spike").unwrap();
+    assert_eq!(
+        *runner.calls.lock().unwrap(),
+        [
+            (
+                "drbdadm create-md --force --max-peers=7 spike".to_string(),
+                Some(Duration::from_secs(1144))
+            ),
+            ("drbdadm up spike".to_string(), None),
+        ]
+    );
+}
+
+#[test]
+fn a_timeout_and_a_failed_start_both_read_as_a_command_that_did_not_complete() {
+    struct TimesOut;
+    impl Runner for TimesOut {
+        fn run(&self, _: &str, _: &[&str]) -> std::io::Result<Output> {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "killed after 120s"))
+        }
+    }
+    let err = Drbd { runner: &TimesOut }.up("spike").unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "`drbdadm up spike` did not run to completion: killed after 120s"
+    );
 }

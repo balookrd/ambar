@@ -5,13 +5,15 @@
 //! after a state-changing command instead of trusting the code. These
 //! wrappers therefore fail only when a command clearly did not run.
 
-use crate::exec::{Output, Runner, command_line};
+use std::time::Duration;
+
+use crate::exec::{DEFAULT_COMMAND_TIMEOUT, Output, Runner, command_line};
 
 use super::status::{self, ResourceStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DrbdError {
-    #[error("cannot start {command}: {message}")]
+    #[error("`{command}` did not run to completion: {message}")]
     Spawn { command: String, message: String },
     #[error("{command} failed with code {code}: {stderr}")]
     Command { command: String, code: i32, stderr: String },
@@ -33,17 +35,36 @@ pub enum Metadata {
     Absent,
 }
 
+/// Time limit of `drbdadm create-md` for a volume of `size_bytes`: the
+/// default limit at least, otherwise 120 s plus one second per started GiB
+/// (1 GiB: 121 s, 1 TiB: 1144 s). The duration of `create-md` on large
+/// volumes was not measured; the formula leaves room for the bitmap, which
+/// grows with the volume, and is not derived from data.
+pub fn create_md_timeout(size_bytes: u64) -> Duration {
+    let seconds = 120u64.saturating_add(size_bytes.div_ceil(1 << 30));
+    DEFAULT_COMMAND_TIMEOUT.max(Duration::from_secs(seconds))
+}
+
 pub struct Drbd<'a> {
     pub runner: &'a dyn Runner,
 }
 
 impl Drbd<'_> {
-    /// Writes fresh metadata onto the backing device of `volume`.
+    /// Writes fresh metadata onto the backing device of `volume`, a volume
+    /// of `size_bytes`; the size only sets the time limit (`create_md_timeout`).
     /// Destroys existing metadata: call only for a backing file without the
     /// readiness marker `<volume>.img.ready`; the reconcile logic enforces it.
-    pub fn create_md(&self, volume: &str, max_peers: u32) -> Result<(), DrbdError> {
+    pub fn create_md(&self, volume: &str, max_peers: u32, size_bytes: u64) -> Result<(), DrbdError> {
         let peers = format!("--max-peers={max_peers}");
-        self.checked("drbdadm", &["create-md", "--force", &peers, volume])
+        let args = ["create-md", "--force", &peers, volume];
+        let out = self
+            .runner
+            .run_with_timeout("drbdadm", &args, create_md_timeout(size_bytes))
+            .map_err(|e| DrbdError::Spawn {
+                command: command_line("drbdadm", &args),
+                message: e.to_string(),
+            })?;
+        Self::judge("drbdadm", &args, out)
     }
 
     /// Reads the metadata of the resource that is not configured in the
@@ -124,6 +145,10 @@ impl Drbd<'_> {
 
     fn checked(&self, program: &str, args: &[&str]) -> Result<(), DrbdError> {
         let out = self.run(program, args)?;
+        Self::judge(program, args, out)
+    }
+
+    fn judge(program: &str, args: &[&str], out: Output) -> Result<(), DrbdError> {
         if out.success() {
             return Ok(());
         }
