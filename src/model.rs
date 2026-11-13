@@ -20,6 +20,17 @@ pub enum Protocol {
     C,
 }
 
+/// Whether the leader may declare the copies identical without copying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum InitialSync {
+    /// The volume was just created and holds no data: the leader may declare
+    /// the copies identical without copying.
+    Skip,
+    /// The copies must never be declared identical without copying.
+    #[default]
+    Done,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VolumeNode {
@@ -42,6 +53,10 @@ pub struct VolumeSpec {
     pub port: u16,
     /// Number of peers the DRBD metadata is sized for (`create-md --max-peers`).
     pub max_peers: u32,
+    /// Absent in the description means `Done`: nothing is ever skipped by
+    /// default.
+    #[serde(default)]
+    pub initial_sync: InitialSync,
     pub nodes: Vec<VolumeNode>,
 }
 

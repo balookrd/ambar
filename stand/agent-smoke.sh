@@ -31,6 +31,7 @@ json="$(cat <<EOF
   "minor": $minor,
   "port": 7010,
   "maxPeers": 7,
+  "initialSync": "Skip",
   "nodes": [
     {"name": "$(vm_host dv-1)", "address": "$(vm_ip dv-1)", "nodeId": 0, "diskful": true},
     {"name": "$(vm_host dv-2)", "address": "$(vm_ip dv-2)", "nodeId": 1, "diskful": true},

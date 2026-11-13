@@ -17,6 +17,20 @@ pub enum DrbdError {
     Command { command: String, code: i32, stderr: String },
     #[error("cannot parse drbdsetup status: {0}")]
     Status(String),
+    #[error("volume {volume:?}: cannot tell whether the backing file holds DRBD metadata: {detail}")]
+    MetadataCheck { volume: String, detail: String },
+}
+
+/// Text `drbdadm dump-md` prints on stderr for a backing file without DRBD
+/// metadata (exit code 255). Recorded in experiment P7 (1), section "Опыты
+/// перед CSI (P7-P9)" of docs/superpowers/specs/2026-11-12-drbd9-spike-results.md.
+pub const NO_METADATA_MARKER: &str = "No valid meta data found";
+
+/// What `drbdadm dump-md` found on the backing device of a resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Metadata {
+    Present,
+    Absent,
 }
 
 pub struct Drbd<'a> {
@@ -30,6 +44,25 @@ impl Drbd<'_> {
     pub fn create_md(&self, volume: &str, max_peers: u32) -> Result<(), DrbdError> {
         let peers = format!("--max-peers={max_peers}");
         self.checked("drbdadm", &["create-md", "--force", &peers, volume])
+    }
+
+    /// Reads the metadata of the resource that is not configured in the
+    /// kernel. `Absent` only for a non-zero exit code together with
+    /// `NO_METADATA_MARKER` on stderr (P7 (1)); `Present` for exit code 0
+    /// (P7 (2)); any other result, such as a busy device with the resource up
+    /// (P7 (3), code 20), is an error: it proves nothing about the file.
+    pub fn metadata(&self, volume: &str) -> Result<Metadata, DrbdError> {
+        let out = self.run("drbdadm", &["dump-md", volume])?;
+        if out.success() {
+            return Ok(Metadata::Present);
+        }
+        if out.stderr.contains(NO_METADATA_MARKER) {
+            return Ok(Metadata::Absent);
+        }
+        Err(DrbdError::MetadataCheck {
+            volume: volume.to_string(),
+            detail: format!("drbdadm dump-md failed with code {}: {}", out.code, out.stderr.trim()),
+        })
     }
 
     /// Configures a resource that is not configured in the kernel yet.

@@ -36,6 +36,13 @@ for n in "${NODES[@]}"; do
     docker save "$IMAGE" | limactl shell --workdir / "$n" sudo k3s ctr images import -
 done
 
+# The agent never creates the volumes directory: set it up on every node,
+# before the toolbox pods start (a hostPath mount would create it with the
+# wrong mode).
+for n in "${NODES[@]}"; do
+    vm "$n" "install -d -m 0700 /var/lib/rancher/ambar/volumes && install -d -m 0755 /var/lib/rancher/ambar/res"
+done
+
 kc apply -f - < "$HERE/toolbox.yaml"
 # The image is imported under the same tag after a rebuild: restart the pods so
 # they run the new image.

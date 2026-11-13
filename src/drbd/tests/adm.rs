@@ -100,3 +100,62 @@ fn status_reports_malformed_json_after_a_successful_exit() {
     let drbd = Drbd { runner: &runner };
     assert!(matches!(drbd.status("spike"), Err(DrbdError::Status(_))));
 }
+
+/// Stderr recorded in experiment P7 (1) for a file without metadata.
+const P7_NO_METADATA_STDERR: &str = "No valid meta data found\nCommand 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 255\n";
+
+#[test]
+fn metadata_is_present_when_dump_md_succeeds() {
+    let runner = FakeRunner::new(|_, _| out(0, "# DRBD meta data dump\n", ""));
+    let drbd = Drbd { runner: &runner };
+    assert_eq!(drbd.metadata("p7"), Ok(Metadata::Present));
+    assert_eq!(runner.calls(), ["drbdadm dump-md p7"]);
+}
+
+#[test]
+fn metadata_is_absent_on_the_code_and_message_recorded_for_an_empty_file() {
+    let runner = FakeRunner::new(|_, _| out(255, "", P7_NO_METADATA_STDERR));
+    let drbd = Drbd { runner: &runner };
+    assert_eq!(drbd.metadata("p7"), Ok(Metadata::Absent));
+}
+
+#[test]
+fn the_marker_alone_is_not_enough_when_the_command_succeeded() {
+    let runner = FakeRunner::new(|_, _| out(0, "", P7_NO_METADATA_STDERR));
+    let drbd = Drbd { runner: &runner };
+    assert_eq!(drbd.metadata("p7"), Ok(Metadata::Present));
+}
+
+#[test]
+fn any_other_failure_of_dump_md_is_a_failed_check() {
+    // Recorded in P7 (3): the resource is up, the device is busy.
+    let busy = "open(/dev/ambar/p7) failed: Device or resource busy\nExclusive open failed. Do it anyways?\n";
+    for (code, stderr) in [
+        (20, busy),
+        (20, "Device is configured"),
+        (255, ""),
+        (1, "boom"),
+        (-1, ""),
+    ] {
+        let runner = FakeRunner::new(move |_, _| out(code, "", stderr));
+        let drbd = Drbd { runner: &runner };
+        let err = drbd.metadata("p7").unwrap_err();
+        assert!(
+            matches!(&err, DrbdError::MetadataCheck { volume, detail }
+                if volume == "p7" && detail.contains(&format!("code {code}"))),
+            "{err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_dump_md_that_cannot_start_is_a_failed_check() {
+    struct Broken;
+    impl Runner for Broken {
+        fn run(&self, _: &str, _: &[&str]) -> std::io::Result<Output> {
+            Err(std::io::Error::other("no such program"))
+        }
+    }
+    let drbd = Drbd { runner: &Broken };
+    assert!(matches!(drbd.metadata("p7"), Err(DrbdError::Spawn { .. })));
+}

@@ -273,3 +273,23 @@ fn error_messages_are_stable() {
         assert_eq!(err.to_string(), text);
     }
 }
+
+#[test]
+fn a_description_without_initial_sync_reads_as_done() {
+    assert_eq!(sample().initial_sync, InitialSync::Done);
+    assert_eq!(InitialSync::default(), InitialSync::Done);
+}
+
+#[test]
+fn initial_sync_skip_is_read_from_json() {
+    let json = SAMPLE.replace("\"minor\": 1000,", "\"minor\": 1000, \"initialSync\": \"Skip\",");
+    assert_eq!(VolumeSpec::from_json(&json).unwrap().initial_sync, InitialSync::Skip);
+    let json = SAMPLE.replace("\"minor\": 1000,", "\"minor\": 1000, \"initialSync\": \"Done\",");
+    assert_eq!(VolumeSpec::from_json(&json).unwrap().initial_sync, InitialSync::Done);
+}
+
+#[test]
+fn initial_sync_is_case_sensitive() {
+    let json = SAMPLE.replace("\"minor\": 1000,", "\"minor\": 1000, \"initialSync\": \"skip\",");
+    assert!(matches!(VolumeSpec::from_json(&json), Err(SpecError::Json(_))));
+}
