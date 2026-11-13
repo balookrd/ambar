@@ -10,6 +10,7 @@ pub mod exec;
 pub mod membership;
 pub mod model;
 pub mod module_loader;
+pub mod mount;
 pub mod paths;
 pub mod placement;
 pub mod reconcile;
