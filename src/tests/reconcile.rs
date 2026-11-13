@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::backing::backing_file_bytes;
-use crate::drbd::status::{self, DiskState};
+use crate::drbd::status::{self, ConnectionState, DiskState};
 use crate::tests::{FakeRunner, out};
 
 const SPEC: &str = r#"{
@@ -374,6 +374,97 @@ fn a_node_without_a_disk_never_gets_the_synced_marker() {
         ..steady_on("lima-dv-3")
     };
     assert_eq!(plan(&spec(), "lima-dv-3", &claims_disk).unwrap(), []);
+}
+
+/// `node` as seen while its own volume-0 disk is `local` and the other copy
+/// (`lima-dv-2` seen from `lima-dv-1`, `lima-dv-1` otherwise) reports `peer`.
+fn with_disks(node: &str, local: DiskState, peer: DiskState) -> Option<ResourceStatus> {
+    let mut status = with_local_disk(node, local).unwrap();
+    let other = if node == "lima-dv-1" { "lima-dv-2" } else { "lima-dv-1" };
+    let conn = status.connections.iter_mut().find(|c| c.name == other).unwrap();
+    conn.peer_devices
+        .iter_mut()
+        .find(|p| p.volume == 0)
+        .unwrap()
+        .peer_disk_state = peer;
+    Some(status)
+}
+
+#[test]
+fn a_copy_that_resyncs_from_an_up_to_date_peer_gets_the_synced_marker() {
+    let mut status = status_of(include_str!("../../stand/spike/samples/resync-target.json"));
+    // The sample was captured on the second copy; rename its peer to fit `SPEC`.
+    status.node_id = 1;
+    status.connections[0].name = "lima-dv-1".into();
+    status.connections[0].peer_node_id = 0;
+    status.connections[1].name = "lima-dv-3".into();
+    status.connections[1].peer_node_id = 2;
+    status.name = "spike".into();
+    status.devices[0].minor = 1000;
+    let obs = Observed {
+        synced: false,
+        status: Some(status),
+        ..steady_on("lima-dv-2")
+    };
+    assert_eq!(plan(&spec(), "lima-dv-2", &obs).unwrap(), [Action::MarkSynced]);
+}
+
+#[test]
+fn a_peer_that_holds_data_in_any_readable_state_marks_the_copy_synced() {
+    for node in ["lima-dv-1", "lima-dv-2"] {
+        for peer in [DiskState::UpToDate, DiskState::Consistent, DiskState::Outdated] {
+            let obs = Observed {
+                synced: false,
+                status: with_disks(node, DiskState::Inconsistent, peer),
+                ..steady_on(node)
+            };
+            assert_eq!(
+                plan(&spec(), node, &obs).unwrap(),
+                [Action::MarkSynced],
+                "{node} {peer:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn without_a_peer_that_holds_data_the_copy_is_not_marked_synced() {
+    // The gate fails because a peer is not connected, and no disk shows data.
+    let mut status = with_disks("lima-dv-2", DiskState::Inconsistent, DiskState::Inconsistent).unwrap();
+    status.connections[0].connection_state = ConnectionState::Connecting;
+    assert!(!status.ready_to_skip_initial_sync());
+    let obs = Observed {
+        synced: false,
+        status: Some(status),
+        ..steady_on("lima-dv-2")
+    };
+    assert_eq!(plan(&spec(), "lima-dv-2", &obs).unwrap(), []);
+
+    for peer in [
+        DiskState::Inconsistent,
+        DiskState::DUnknown,
+        DiskState::Diskless,
+        DiskState::Failed,
+    ] {
+        let obs = Observed {
+            synced: false,
+            status: with_disks("lima-dv-2", DiskState::Inconsistent, peer),
+            ..steady_on("lima-dv-2")
+        };
+        assert_eq!(plan(&spec(), "lima-dv-2", &obs).unwrap(), [], "{peer:?}");
+    }
+}
+
+#[test]
+fn a_node_without_a_disk_is_not_marked_synced_by_a_peer_that_holds_data() {
+    let mut status = seen_from("lima-dv-3", THREE_UPTODATE);
+    status.connections[0].peer_devices[0].peer_disk_state = DiskState::UpToDate;
+    let obs = Observed {
+        synced: false,
+        status: Some(status),
+        ..steady_on("lima-dv-3")
+    };
+    assert_eq!(plan(&spec(), "lima-dv-3", &obs).unwrap(), []);
 }
 
 #[test]
@@ -763,6 +854,43 @@ fn an_adjust_without_effect_is_an_error_and_is_repeated_next_time() {
     assert_eq!(count(&runner, "drbdadm adjust spike"), 2);
 }
 
+/// A node where `drbdadm adjust` fails with code 1 and `drbdsetup status`
+/// shows a resource that already matches the description.
+fn node_that_rejects_adjust() -> FakeRunner {
+    FakeRunner::new(|program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+        ("drbdadm", ["adjust", _]) => out(1, "", "Failure: (162) Invalid configuration request"),
+        ("drbdsetup", _) => out(0, THREE_UPTODATE, ""),
+        _ => out(0, "", ""),
+    })
+}
+
+#[test]
+fn a_rejected_adjust_is_not_recorded_even_when_the_status_matches() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_copy(&paths, false, true);
+    let runner = node_that_rejects_adjust();
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
+    assert!(
+        matches!(&err, ReconcileError::NotApplied { command: "adjust", volume } if volume == "spike"),
+        "{err}"
+    );
+    assert!(!paths.applied_res("spike").exists());
+
+    let obs = reconciler.observe(&spec(), "lima-dv-1").unwrap();
+    assert_eq!(
+        plan(&spec(), "lima-dv-1", &obs).unwrap(),
+        [Action::Adjust, Action::MarkApplied]
+    );
+    assert!(reconciler.apply(&spec(), "lima-dv-1").is_err());
+    assert_eq!(count(&runner, "drbdadm adjust spike"), 2);
+}
+
 #[test]
 fn an_up_without_effect_is_an_error() {
     let tmp = TempDir::new().unwrap();
@@ -811,6 +939,36 @@ fn the_synced_marker_is_written_only_after_the_status_shows_the_skip() {
     *status.borrow_mut() = THREE_INCONSISTENT.to_string();
     assert_eq!(reconciler.apply(&spec(), "lima-dv-1").unwrap(), []);
     assert_eq!(count(&runner, skip), 1);
+}
+
+#[test]
+fn a_leader_that_resyncs_from_a_peer_never_skips_the_initial_sync_later() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    prepare_copy(&paths, true, false);
+    // The leader was re-created and resyncs from the second copy.
+    let resyncing = THREE_INCONSISTENT.replacen(
+        "\"peer-disk-state\": \"Inconsistent\"",
+        "\"peer-disk-state\": \"UpToDate\"",
+        1,
+    );
+    assert_ne!(resyncing, THREE_INCONSISTENT);
+    let status = Rc::new(RefCell::new(resyncing));
+    let runner = configured_node(status.clone());
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let skip = "drbdadm new-current-uuid --clear-bitmap spike/0";
+
+    assert_eq!(reconciler.apply(&spec(), "lima-dv-1").unwrap(), [Action::MarkSynced]);
+    assert!(paths.synced_marker("spike").exists());
+
+    // The second copy is lost too and re-created: both disks are Inconsistent
+    // and the gate holds, but the marker says the volume has held data.
+    *status.borrow_mut() = THREE_INCONSISTENT.to_string();
+    assert_eq!(reconciler.apply(&spec(), "lima-dv-1").unwrap(), []);
+    assert_eq!(count(&runner, skip), 0);
 }
 
 #[test]
@@ -1024,4 +1182,33 @@ fn a_held_volume_lock_makes_apply_and_remove_busy() {
 
     drop(held);
     assert!(reconciler.apply(&spec(), "lima-dv-1").is_ok());
+}
+
+#[test]
+fn the_lock_file_counts_as_linked_while_its_path_names_the_open_file() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("spike.lock");
+    let file = File::create(&path).unwrap();
+    assert!(still_linked(&file, &path).unwrap());
+}
+
+#[test]
+fn a_removed_lock_file_is_not_linked() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("spike.lock");
+    let file = File::create(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!still_linked(&file, &path).unwrap());
+}
+
+#[test]
+fn a_replaced_lock_file_is_not_linked() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("spike.lock");
+    let file = File::create(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    // The new file is created while the old one is still open, so the two
+    // never share an inode.
+    File::create(&path).unwrap();
+    assert!(!still_linked(&file, &path).unwrap());
 }

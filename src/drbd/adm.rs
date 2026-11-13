@@ -38,7 +38,9 @@ impl Drbd<'_> {
     }
 
     /// Brings an already configured resource in line with its resource file.
-    /// The return code is not a verdict: re-read the status afterwards.
+    /// The caller reads the exit code from the `Output`: non-zero means the
+    /// kernel rejected the change, zero is not proof, so re-read the status
+    /// as well.
     pub fn adjust(&self, volume: &str) -> Result<Output, DrbdError> {
         self.run("drbdadm", &["adjust", volume])
     }

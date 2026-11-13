@@ -11,7 +11,13 @@ use ambar::exec::SystemRunner;
 use ambar::model::{SpecError, VolumeSpec, valid_volume_name};
 use ambar::module_loader::{self, LoaderEnv};
 use ambar::paths::Paths;
-use ambar::reconcile::Reconciler;
+use ambar::reconcile::{ReconcileError, Reconciler};
+
+/// Exit code of `ambar apply` and `ambar remove` when another process holds
+/// the volume lock: EX_TEMPFAIL from `sysexits.h`.
+const EXIT_BUSY: u8 = 75;
+
+const EXIT_CODES: &str = "Exit codes:\n  0   done\n  75  the volume is locked by another ambar process; try again later\n  1   any other error";
 
 #[derive(Parser)]
 #[command(name = "ambar", version, about = "Replicated volumes for k3s on top of DRBD 9")]
@@ -29,12 +35,14 @@ enum Command {
     },
     /// Bring this node in line with a volume description. The node is the
     /// host name: `drbdadm` picks the `on <host>` section by it.
+    #[command(after_help = EXIT_CODES)]
     Apply {
         /// JSON file with the volume description.
         #[arg(long)]
         file: PathBuf,
     },
     /// Take a volume down on this node and delete its local files.
+    #[command(after_help = EXIT_CODES)]
     Remove {
         #[arg(long)]
         name: String,
@@ -51,8 +59,15 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("ambar: {err:#}");
-            ExitCode::FAILURE
+            exit_code(&err)
         }
+    }
+}
+
+fn exit_code(err: &anyhow::Error) -> ExitCode {
+    match err.downcast_ref::<ReconcileError>() {
+        Some(ReconcileError::Busy { .. }) => ExitCode::from(EXIT_BUSY),
+        _ => ExitCode::FAILURE,
     }
 }
 
