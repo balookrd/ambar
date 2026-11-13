@@ -13,7 +13,8 @@ metadata:
 #   patch             JSON patches of finalizers, spec.initialSync, spec.nodes
 #                     and annotations
 # `update` is not granted: the code never replaces an object.
-# `pods` and `nodes` are not granted: phase 3 needs them.
+# The agent does not read `pods` or `nodes`. (`nodes` read access exists only
+# in the ClusterRole ambar-external-provisioner below.)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -22,10 +23,11 @@ rules:
   - apiGroups: ["ambar.balookrd.github.io"]
     resources: ["replicatedvolumes"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
-  # Server-side apply and JSON patch of status.nodes.
+  # Server-side apply and JSON patch of status.nodes (patch only: the code
+  # never reads the status subresource on its own).
   - apiGroups: ["ambar.balookrd.github.io"]
     resources: ["replicatedvolumes/status"]
-    verbs: ["get", "patch"]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -70,7 +72,12 @@ roleRef:
 # https://github.com/kubernetes-csi/external-provisioner at the tag v6.4.0
 # (the pinned release of the csi-provisioner image in daemonset.yaml). The
 # ClusterRole and Role are copied under other names and bound to the
-# ServiceAccount `ambar`.
+# ServiceAccount `ambar`. Left out, because the driver and the provisioner
+# flags in daemonset.yaml do not use them (checked with the stand end-to-end
+# check, no "forbidden" in the provisioner log): volumesnapshots,
+# volumesnapshotcontents, volumeattachments, csistoragecapacities (no
+# --enable-capacity), pods and replicasets (capacity owner references). Add
+# them back when snapshots or capacity tracking are turned on.
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -88,20 +95,11 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list", "watch", "create", "update", "patch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshots"]
-    verbs: ["get", "list", "watch", "update"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshotcontents"]
-    verbs: ["get", "list"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments"]
     verbs: ["get", "list", "watch"]
 ---
 kind: ClusterRoleBinding
@@ -117,7 +115,7 @@ roleRef:
   name: ambar-external-provisioner
   apiGroup: rbac.authorization.k8s.io
 ---
-# Leader election (Leases) and CSIStorageCapacity rules of the same file.
+# Leader election (Leases), the only rule of the namespaced Role in use.
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -127,15 +125,6 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["csistoragecapacities"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get"]
-  - apiGroups: ["apps"]
-    resources: ["replicasets"]
-    verbs: ["get"]
 ---
 kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
