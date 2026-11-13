@@ -8,8 +8,8 @@ itself is planned as a single Rust binary running as a DaemonSet.
 
 ## Status
 
-The driver is not written yet. The repository contains the design and the
-groundwork it rests on:
+The Kubernetes integration is not written yet. The repository contains the
+design, the groundwork it rests on and the node agent:
 
 | Part | State |
 |---|---|
@@ -17,7 +17,7 @@ groundwork it rests on:
 | Image with a prebuilt DRBD 9.3.4 module and drbd-utils 9.35.0 | builds, has tests |
 | Test stand: three Lima VMs with k3s | scripts in `stand/` |
 | DRBD 9 failure experiments on the stand | recorded with raw outputs |
-| CSI driver (Rust agent) | not started |
+| CSI driver (Rust agent) | core without Kubernetes: volume model, resource file, status parsing, module loader, local reconcile CLI; checked on the stand |
 | Measurements on the target hardware (NanoPi R5C) | not done |
 
 Nothing here has been run on a production cluster.
@@ -41,6 +41,7 @@ Nothing here has been run on a production cluster.
 | `docs/superpowers/specs/2026-11-12-ambar-design.md` | design spec (Russian) |
 | `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | record of the DRBD 9 experiments (Russian) |
 | `docs/superpowers/plans/` | executed plan of the groundwork phase (Russian, historical) |
+| `src/` | the `ambar` agent (Rust) |
 | `image/` | Dockerfile, module loader, image tests |
 | `stand/` | test stand scripts; see `stand/README.md` (Russian) |
 | `stand/spike/` | experiment scripts and `drbdsetup status --json` samples |
@@ -75,6 +76,15 @@ image/test-loader.sh
 
 Expected last line: `OK: 6 loader cases`. This test needs neither Docker nor a
 Linux kernel.
+
+## Test the agent
+
+```bash
+cargo test
+```
+
+Expected line: `test result: ok. 137 passed`. The agent is checked on the stand
+with `stand/agent-smoke.sh`, see `stand/README.md`.
 
 Bringing up the stand is described in `stand/README.md`.
 
