@@ -176,3 +176,114 @@ async fn a_symlink_at_the_socket_path_is_not_followed() {
     assert!(matches!(err, CsiError::NotASocket(_)), "{err}");
     assert_eq!(fs::read(&target).unwrap(), b"data");
 }
+
+fn staging_dirs(parent: &Path) -> Vec<String> {
+    fs::read_dir(parent)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".csi-"))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_socket_replaced_by_another_instance_survives_the_shutdown() {
+    let dir = short_dir();
+    let socket = dir.path().join("csi.sock");
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn({
+        let socket = socket.clone();
+        let shutdown = shutdown.clone();
+        async move { serve(&socket, services(true), shutdown).await }
+    });
+    wait_for_socket(&socket).await;
+
+    // The new pod of a rolling update renames its socket over the path while
+    // the old process is still alive.
+    let other = dir.path().join("other.sock");
+    let _listener = tokio::net::UnixListener::bind(&other).unwrap();
+    fs::rename(&other, &socket).unwrap();
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("serve did not return after the shutdown")
+        .unwrap()
+        .unwrap();
+    let meta = fs::symlink_metadata(&socket).expect("the replacing socket was removed");
+    assert!(std::os::unix::fs::FileTypeExt::is_socket(&meta.file_type()));
+    UnixStream::connect(&socket)
+        .await
+        .expect("the replacing socket no longer accepts connections");
+}
+
+#[tokio::test]
+async fn an_existing_socket_is_replaced_and_the_staging_directory_does_not_linger() {
+    let dir = short_dir();
+    let socket = dir.path().join("csi.sock");
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn({
+        let socket = socket.clone();
+        let shutdown = shutdown.clone();
+        async move { serve(&socket, services(true), shutdown).await }
+    });
+    wait_for_socket(&socket).await;
+    assert_eq!(staging_dirs(dir.path()), Vec::<String>::new(), "while serving");
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("serve did not return after the shutdown")
+        .unwrap()
+        .unwrap();
+    assert!(!socket.exists(), "the own socket is removed on shutdown");
+    assert_eq!(staging_dirs(dir.path()), Vec::<String>::new(), "after the return");
+}
+
+#[tokio::test]
+async fn serve_returns_promptly_without_open_connections() {
+    let dir = short_dir();
+    let socket = dir.path().join("csi.sock");
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn({
+        let socket = socket.clone();
+        let shutdown = shutdown.clone();
+        async move { serve(&socket, services(true), shutdown).await }
+    });
+    wait_for_socket(&socket).await;
+
+    let started = std::time::Instant::now();
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+    assert!(
+        started.elapsed() < SHUTDOWN_GRACE / 2,
+        "an idle server took {:?} to stop",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn serve_returns_within_the_cap_with_a_connection_held_open() {
+    let dir = short_dir();
+    let socket = dir.path().join("csi.sock");
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn({
+        let socket = socket.clone();
+        let shutdown = shutdown.clone();
+        async move { serve(&socket, services(true), shutdown).await }
+    });
+    wait_for_socket(&socket).await;
+    let channel = connect(&socket).await;
+    let mut client = IdentityClient::new(channel);
+    client.probe(ProbeRequest {}).await.unwrap();
+
+    let started = std::time::Instant::now();
+    shutdown.cancel();
+    tokio::time::timeout(SHUTDOWN_GRACE + Duration::from_secs(3), server)
+        .await
+        .expect("serve outlived the shutdown cap")
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() < SHUTDOWN_GRACE + Duration::from_secs(3));
+    drop(client);
+}
