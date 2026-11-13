@@ -1,0 +1,114 @@
+# One pod per node: the agent (reconcile loop plus the CSI Identity, Controller
+# and Node services) and the two CSI sidecars.
+#
+# Placeholders, substituted by stand/install.sh (see stand/README.md):
+#   AMBAR_IMAGE              image of the agent, default ambar-drbd:dev
+#   AMBAR_IMAGE_PULL_POLICY  Never on the stand (the image is imported into
+#                            containerd), IfNotPresent or Always on a cluster
+# On a real cluster set both before `kubectl apply`:
+#   sed -e 's|AMBAR_IMAGE_PULL_POLICY|IfNotPresent|' \
+#       -e 's|AMBAR_IMAGE|registry.example.com/ambar-drbd:1.0|' \
+#       deploy/daemonset.yaml | kubectl apply -f -
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ambar
+  namespace: ambar-system
+spec:
+  selector:
+    matchLabels:
+      app: ambar
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: ambar
+    spec:
+      serviceAccountName: ambar
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      # One reconcile pass runs external commands for up to 120 s and must not
+      # be killed in the middle: SIGTERM lets the pass finish.
+      terminationGracePeriodSeconds: 150
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: ambar
+          image: AMBAR_IMAGE
+          imagePullPolicy: AMBAR_IMAGE_PULL_POLICY
+          command: ["ambar", "agent"]
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - {name: dev, mountPath: /dev}
+            - {name: modules, mountPath: /lib/modules, readOnly: true}
+            - {name: res, mountPath: /etc/drbd.d}
+            - {name: volumes, mountPath: /var/lib/rancher/ambar/volumes}
+            # Mounts made by the agent (NodeStageVolume, NodePublishVolume)
+            # must be visible to kubelet and the container runtime on the host.
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - {name: socket-dir, mountPath: /var/lib/kubelet/plugins/ambar}
+        - name: node-driver-registrar
+          # registry.k8s.io/sig-storage/csi-node-driver-registrar v2.18.0
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar@sha256:b7fefd08651f00ac4df1a196ed4c621c2451fbb899297fe9fad9e36c667af0c0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/ambar/csi.sock
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: registration-dir, mountPath: /registration}
+        - name: csi-provisioner
+          # registry.k8s.io/sig-storage/csi-provisioner v6.4.0
+          image: registry.k8s.io/sig-storage/csi-provisioner@sha256:6ebe60fd8ed67a7f8a90d34402e9e706b274e53612d6fa5fbb8285728db622e2
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          args:
+            - --csi-address=/csi/csi.sock
+            # Every pod of the DaemonSet runs a provisioner; exactly one may be
+            # active. The Lease in the namespace of the pod decides which.
+            - --leader-election
+            - --leader-election-namespace=$(POD_NAMESPACE)
+            # The Topology feature gate is GA and on by default since v5.0;
+            # --feature-gates=Topology=true is not set (v6.4.0 prints a
+            # "GA feature gate" warning for it).
+            - --strict-topology
+            # CreateVolume waits up to 60 s for the replicas to become
+            # UpToDate; the default of 10 s would cancel it.
+            - --timeout=90s
+            - --default-fstype=ext4
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+      volumes:
+        - name: dev
+          hostPath: {path: /dev}
+        - name: modules
+          hostPath: {path: /lib/modules}
+        # The install step creates both directories on every node: the agent
+        # does not create the volumes directory and stops if it is missing.
+        - name: res
+          hostPath: {path: /var/lib/rancher/ambar/res, type: Directory}
+        - name: volumes
+          hostPath: {path: /var/lib/rancher/ambar/volumes, type: Directory}
+        - name: kubelet
+          hostPath: {path: /var/lib/kubelet}
+        - name: socket-dir
+          hostPath: {path: /var/lib/kubelet/plugins/ambar, type: DirectoryOrCreate}
+        - name: registration-dir
+          hostPath: {path: /var/lib/kubelet/plugins_registry, type: Directory}

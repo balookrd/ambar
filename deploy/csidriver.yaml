@@ -1,0 +1,13 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: ambar.balookrd.github.io
+spec:
+  # No VolumeAttachment objects: the volume is reachable from every node
+  # through DRBD, and without an attach step Kubernetes does not wait for a
+  # forced detach from an unreachable node.
+  attachRequired: false
+  podInfoOnMount: false
+  volumeLifecycleModes:
+    - Persistent
+  fsGroupPolicy: File

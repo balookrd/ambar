@@ -41,6 +41,7 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; са�
 | `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | протокол опытов с DRBD 9 |
 | `docs/superpowers/plans/` | исполненные планы фаз 0 и 1 (исторические) |
 | `src/` | агент `ambar` (Rust) |
+| `deploy/` | манифесты Kubernetes: CRD, CSIDriver, RBAC, DaemonSet, StorageClass |
 | `image/` | Dockerfile, загрузчик модуля, тесты образа |
 | `stand/` | скрипты стенда; см. `stand/README.md` |
 | `stand/spike/` | скрипты опытов и образцы `drbdsetup status --json` |
