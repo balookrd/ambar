@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use ambar::agent::kube::KubeVolumes;
 use ambar::agent::run::{Agent, VolumeLocks, preflight};
 use ambar::cli;
+use ambar::csi::{self, ControllerService, IdentityService, NodeService, Services};
 use ambar::drbd::adm::Drbd;
 use ambar::drbd::status::ResourceStatus;
 use ambar::exec::SystemRunner;
@@ -57,8 +58,8 @@ enum Command {
         /// Kubernetes name of this node; must equal the host name.
         #[arg(long, env = "NODE_NAME")]
         node_name: String,
-        /// Socket of the CSI Node and Controller services. Not used yet: the
-        /// CSI server is started by a later change.
+        /// Unix socket of the CSI gRPC server (Identity, Controller, Node).
+        /// A stale socket file is replaced; any other file there is an error.
         #[arg(long, default_value = "/var/lib/kubelet/plugins/ambar/csi.sock")]
         csi_socket: PathBuf,
         /// Namespace of the agent's own objects. Not used yet.
@@ -92,8 +93,11 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::LoadModule { modules_dir } => println!("{}", load_module(&modules_dir, &runner)?),
         Command::Agent {
-            node_name, modules_dir, ..
-        } => run_agent(&node_name, &modules_dir, paths)?,
+            node_name,
+            csi_socket,
+            modules_dir,
+            ..
+        } => run_agent(&node_name, &csi_socket, &modules_dir, paths)?,
         Command::Apply { file } => {
             let json = fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
             let spec = VolumeSpec::from_json(&json)?;
@@ -155,7 +159,7 @@ fn load_module(modules_dir: &Path, runner: &SystemRunner) -> Result<String> {
 
 /// The checks that need no API server come first: a wrong node name or a
 /// missing volumes directory must stop the agent before it touches anything.
-fn run_agent(node: &str, modules_dir: &Path, paths: Paths) -> Result<()> {
+fn run_agent(node: &str, csi_socket: &Path, modules_dir: &Path, paths: Paths) -> Result<()> {
     let hostname = read_trimmed(Path::new("/proc/sys/kernel/hostname"))?;
     preflight(node, &hostname, &paths)?;
     let runner = Arc::new(SystemRunner::default());
@@ -179,10 +183,37 @@ fn run_agent(node: &str, modules_dir: &Path, paths: Paths) -> Result<()> {
         };
         let shutdown = CancellationToken::new();
         tokio::spawn(cancel_on_signal(shutdown.clone()));
+        let services = Services {
+            identity: IdentityService {
+                ready: agent.ready.clone(),
+            },
+            controller: ControllerService,
+            node: NodeService,
+        };
         eprintln!("ambar-agent: node {node} started");
-        agent.run(shutdown).await?;
+        // Either side ending (an error, or the signal) stops the other one.
+        let (agent_result, csi_result) = tokio::join!(
+            async {
+                let result = agent.run(shutdown.clone()).await;
+                shutdown.cancel();
+                result
+            },
+            async {
+                let result = csi::serve(csi_socket, services, shutdown.clone()).await;
+                shutdown.cancel();
+                result
+            },
+        );
         eprintln!("ambar-agent: stopped");
-        Ok(())
+        match (agent_result, csi_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(agent_err), Ok(())) => Err(agent_err.into()),
+            (Ok(()), Err(csi_err)) => Err(anyhow::Error::from(csi_err).context("the CSI server stopped")),
+            (Err(agent_err), Err(csi_err)) => {
+                eprintln!("ambar-agent: the CSI server also failed: {csi_err}");
+                Err(agent_err.into())
+            }
+        }
     })
 }
 

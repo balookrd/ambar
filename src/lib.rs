@@ -5,6 +5,7 @@ pub mod backing;
 pub mod cli;
 pub mod config;
 pub mod crd;
+pub mod csi;
 pub mod drbd;
 pub mod exec;
 pub mod membership;
