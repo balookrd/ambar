@@ -64,6 +64,10 @@ bash -c 'source stand/lib.sh; tb dv-2 "/opt/ambar/load-module.sh"'
 Ресурсы DRBD, loop-устройства и вспомогательные скрипты проверок удаляет
 `stand/spike/clean.sh`. ВМ и их диски удаляет `stand/down.sh`.
 
+## Опыты перед CSI
+
+Скрипт `stand/spike/pre-csi.sh <p7|p8|p9|clean>` выполняет опыты P7 (`drbdadm dump-md`), P8 (отключение стороны без диска от работающего ресурса с писателем) и P9 (`blkid -p` и чтение по смещению 1080 на устройстве DRBD). Перед опытом и после него он убирает ресурсы `p7`–`p9`. Результаты записаны в разделе «Опыты перед CSI (P7–P9)» документа `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md`.
+
 ## Проверка агента
 
 Скрипт `stand/agent-smoke.sh` применяет описание тома `smoke` (копии на `dv-1` и

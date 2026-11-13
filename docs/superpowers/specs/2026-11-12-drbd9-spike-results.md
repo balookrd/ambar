@@ -3590,6 +3590,616 @@ OK: stand is up
 
 На трёх узлах `drbdsetup status` — `# No currently configured DRBD found.`, `losetup -l -n | wc -l` = 0, `/dev/ambar` и `/mnt/pa` отсутствуют, в `/var/tmp` только `cloud-init` и каталог `systemd-private-…`, `/sys/module/drbd/version` = `9.3.4`.
 
+## Опыты перед CSI (P7–P9)
+
+Дата: 2026-11-13. Стенд тот же: три ВМ Lima, ядро `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0 (версии заново не снимались). Опыты выполняет `stand/spike/pre-csi.sh <p7|p8|p9>`: перед опытом и после него скрипт останавливает ресурсы `p7`–`p9`, отсоединяет loop-устройства и удаляет файлы. Файлы ресурсов содержат `options { quorum majority; on-no-quorum io-error; auto-promote yes; }`. P7 и P8 запущены по одному разу, P9 — дважды (см. «Отклонения и правки скрипта»). Метки времени в выводе P8 — по часам узлов.
+
+| Опыт | Условия | Команда | Код возврата | Вывод | Прогонов |
+|---|---|---|---|---|---|
+| P7 (1) | `dv-1`, файл 1 ГиБ без метаданных, ресурс не поднят | `drbdadm dump-md p7` | 255 | stdout пуст; stderr: `No valid meta data found`, `Command 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 255` | 1 |
+| P7 (2) | после `drbdadm create-md --force --max-peers=7 p7` | `drbdadm dump-md p7` | 0 | дамп метаданных (`version "v09"; max-peers 7;`, `md_offset 1073737728`), stderr пуст | 1 |
+| P7 (3) | после `drbdadm up p7` | `drbdadm dump-md p7` | 20 | stdout: `Operation canceled.`; stderr: `open(/dev/ambar/p7) failed: Device or resource busy`, `Exclusive open failed. Do it anyways?`, `stdin not a TTY, not waiting for confirmation`, `Command 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 20` | 1 |
+| P8 (1) | `down p8` на `dv-3`, `p8.res` на `dv-3` удалён, на `dv-1` идёт запись | `drbdsetup status p8 --verbose` на `dv-1`, `dv-2` | 0 | связь с `lima-dv-3`: `connection:Connecting role:Unknown`, `peer-disk:DUnknown` на обоих; `quorum:yes` | 1 |
+| P8 (2) | `p8.res` без `dv-3` на `dv-1` и `dv-2` | `drbdadm adjust p8` на `dv-1`, затем на `dv-2` | 0, 0 | вывода нет; в статусе обоих узлов остался только пир `Connected`, секции `lima-dv-3` нет; в `dmesg` `lima-dv-3: conn( Connecting -> Disconnecting ) [del-peer]`, затем `Disconnecting -> StandAlone` | 1 |
+| P8 (3) | то же | журнал `watch.sh`, `dmesg`, `quorum` | — | `probe=alive:S` в каждой выборке (~0.5 с), `acked` растёт в каждой; `probe.sh` ничего не писал в stderr; строк `quorum( yes -> no )` в `dmesg` нет; `quorum:yes` на обоих узлах | 1 |
+| P8 (4) | файл с тремя сторонами на всех, `adjust` на `dv-1`, `dv-2`, `up` на `dv-3` | `drbdsetup status p8 --verbose --statistics` | 0 на трёх узлах | три связи `Connected`, `dv-3`: `node-id:2`, `Diskless client:yes`; `out-of-sync:0` на всех связях; `bm-writes:112` на `dv-1` и `dv-2` | 1 |
+| P8 (5) | писатель остановлен | подтверждённый номер и последний номер на томе | — | `acked=10875 on-volume=10876` | 1 |
+| P9 (1) | `p9`, три копии, синхронизация пропущена, ФС нет, чтение на `dv-2` | `blkid -p -o value -s TYPE /dev/drbd1009` | 2 | stdout и stderr пусты | 2 |
+| P9 (1) | то же | `dd if=/dev/drbd1009 bs=1 skip=1080 count=2 status=none \| od -An -tx1` | 0 | ` 00 00` | 1 |
+| P9 (2) | `mkfs.ext4 -q` на `dv-1`, не смонтирован | `blkid -p -o value -s TYPE /dev/drbd1009` на `dv-2` | 0 | stdout `ext4`, stderr пуст | 2 |
+| P9 (2) | то же | `dd … \| od -An -tx1` на `dv-2` | 0 | ` 53 ef` | 1 |
+| P9 (3) | том смонтирован на `dv-1` (Primary) | `blkid -p -o value -s TYPE /dev/drbd1009` на `dv-2` | 2 | stdout пуст; stderr `blkid: error: /dev/drbd1009: Wrong medium type` | 2 |
+| P9 (3) | то же | `dd … \| od -An -tx1` на `dv-2` (с `set -o pipefail`) | 1 | stderr `dd: failed to open '/dev/drbd1009': Wrong medium type`; stdout `od` пуст | 1 |
+| P9 (4) | `/dev/drbd1999` не существует (`ls -l`: код 2, `No such file or directory`) | `blkid -p -o value -s TYPE /dev/drbd1999` | 2 | stdout и stderr пусты | 2 |
+| P9 (4) | то же | `dd … \| od -An -tx1` на `dv-2` (с `set -o pipefail`) | 1 | stderr `dd: failed to open '/dev/drbd1999': No such file or directory` | 1 |
+
+Наблюдения в пределах записанного:
+
+- P7: код возврата 255 без метаданных, 0 при метаданных на неподнятом ресурсе, 20 после `up`; команда запускалась с закрытым stdin (`</dev/null`).
+- P8: после `adjust` на `dv-1` и `dv-2` соединение с `dv-3` исчезло из статуса обоих узлов; в выборках `watch.sh` номер рос в каждой, состояние `probe.sh` `S`, `quorum` оставался `yes`. После возврата `dv-3` с тем же `node-id 2` соединения стали `Connected`. Остановка короче интервала выборки `watch.sh` (~0.5 с) не видна.
+- P9: в состоянии (3) на `dv-2` и `blkid`, и `dd` получили `Wrong medium type` (на `dv-2` роль `Secondary`, `open:no`). Код возврата `blkid` равен 2 для «нет файловой системы», «устройства нет» и «Wrong medium type»; различает их только stderr: пустой в (1) и (4), `Wrong medium type` в (3). В (4) `blkid` ничего не печатает; об отсутствии устройства сообщает `dd` (код 1).
+
+### Отклонения и правки скрипта
+
+| Место | Что произошло |
+|---|---|
+| `run_split`, первый прогон P9 | команда `$* >/tmp/rs.out 2>/tmp/rs.err </dev/null` применяла `</dev/null` к последней команде конвейера: `od` читал пустой stdin, строки `od` в состояниях (1) и (2) были пусты, а ошибка `dd` в (3) и (4) попала в stdout пода вместо файла. Команда обёрнута в `{ set -o pipefail; …; }`, редирект относится к группе. P9 запущен заново целиком; в протоколе вывод второго прогона. Коды `blkid` первого прогона: (1) 2, (2) 0, (3) 2, (4) 2, как во втором. Вывод первого прогона в протокол не включён |
+| P7, P8 | выполнены до правки `run_split`. В P7 нет конвейеров, P8 `run_split` не использует; правка на них не влияет |
+| P9, код возврата `dd` | в первом прогоне записан код `od` (0), во втором с `pipefail` — код `dd` (1) |
+| Диагностика P9 | при разборе пустого вывода `od` ресурс `p9` поднимался отдельным отладочным скриптом (не входит в `pre-csi.sh`); `dd … \| od -An -tx1` на готовой ext4 на `dv-2` дал ` 53 ef` в пяти запусках. После отладки выполнены `pre-csi.sh clean` и `stand/spike/clean.sh` |
+
+### P7. `drbdadm dump-md`
+
+Ресурс `p7`: `dv-1` (`node-id` 0, `disk /dev/ambar/p7; meta-disk internal`), `dv-2` и `dv-3` только в файле, minor 1007, port 7007.
+
+```bash
+stand/spike/pre-csi.sh p7
+```
+
+```text
+
+### P7: drbdadm dump-md in three states, resource p7 on dv-1
+
+### P7 (1): empty sparse file, no metadata
+$ [dv-1] drbdadm dump-md p7
+rc=255
+--- stdout (first 20 lines)
+--- stderr
+No valid meta data found
+Command 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 255
+
+### P7 (2): after create-md --force --max-peers=7
+$ [dv-1] drbdadm create-md --force --max-peers=7 p7
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm dump-md p7
+rc=0
+--- stdout (first 20 lines)
+# DRBD meta data dump
+# 2026-11-13 11:46:03 +0000 [1794570363]
+# lima-dv-1> drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md
+#
+
+version "v09";
+
+max-peers 7;
+# md_size_sect 520
+# md_offset 1073737728
+# al_offset 1073704960
+# bm_offset 1073475584
+
+node-id -1;
+current-uuid 0x0000000000000004;
+flags 0x00000080;
+members 0x0000000000000000;
+features 0x0000000000000001;
+peer[0] {
+    bitmap-index -1;
+--- stderr
+
+### P7 (3): after drbdadm up (disk attached)
+$ [dv-1] drbdadm up p7
+rc=0
+$ [dv-1] drbdadm dump-md p7
+rc=20
+--- stdout (first 20 lines)
+Operation canceled.
+--- stderr
+open(/dev/ambar/p7) failed: Device or resource busy
+
+Exclusive open failed. Do it anyways?
+stdin not a TTY, not waiting for confirmation
+Command 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 20
+$ [dv-1] drbdsetup status p7 --verbose
+p7 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1007 disk:Inconsistent backing_dev:/dev/ambar/p7 quorum:no open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+```
+
+### P8. Отключение стороны без диска от работающего ресурса
+
+Ресурс `p8`: `dv-1` (`node-id` 0) и `dv-2` (`node-id` 1) с копией, `dv-3` (`node-id` 2) без диска, `create-md --max-peers=7`, `new-current-uuid --clear-bitmap`, ext4 смонтирована на `dv-1`, `probe.sh` и `watch.sh` запущены как в P5.
+
+```bash
+stand/spike/pre-csi.sh p8
+```
+
+```text
+
+### P8: two copies and a diskless node, writer on dv-1; the diskless node is removed
+$ [dv-1] drbdadm create-md --force --max-peers=7 p8
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p8
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p8
+rc=0
+$ [dv-2] drbdadm up p8
+rc=0
+$ [dv-3] drbdadm up p8
+rc=0
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p8/0
+rc=0
+$ [dv-1] drbdsetup status p8 --verbose
+p8 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1008 disk:UpToDate backing_dev:/dev/ambar/p8 quorum:yes open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+19:47:02.869
+979
+
+### P8 step 1: down on dv-3, delete its p8.res
+19:47:03.023
+$ [dv-3] drbdadm down p8
+rc=0
+ls: cannot access '/var/lib/rancher/ambar/res/p8.res': No such file or directory
+$ [dv-1] drbdsetup status p8 --verbose
+p8 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1008 disk:UpToDate backing_dev:/dev/ambar/p8 quorum:yes open:yes
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:24 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p8 --verbose
+p8 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1008 disk:UpToDate backing_dev:/dev/ambar/p8 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+
+### P8 step 2: p8.res without dv-3 on dv-1 and dv-2, adjust
+resource p8 {
+    options { quorum majority; on-no-quorum io-error; auto-promote yes; }
+    net { protocol C; }
+    on lima-dv-1 {
+        node-id 0;
+        address ipv4 192.168.104.1:7008;
+        volume 0 { device minor 1008; disk /dev/ambar/p8; meta-disk internal; }
+    }
+    on lima-dv-2 {
+        node-id 1;
+        address ipv4 192.168.104.3:7008;
+        volume 0 { device minor 1008; disk /dev/ambar/p8; meta-disk internal; }
+    }
+    connection-mesh { hosts lima-dv-1 lima-dv-2; }
+}
+19:47:13.235
+$ [dv-1] drbdadm adjust p8
+rc=0
+$ [dv-2] drbdadm adjust p8
+rc=0
+$ [dv-1] drbdsetup status p8 --verbose
+p8 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1008 disk:UpToDate backing_dev:/dev/ambar/p8 quorum:yes open:yes
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p8 --verbose
+p8 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1008 disk:UpToDate backing_dev:/dev/ambar/p8 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+
+### P8 step 3: writer log, kernel log, quorum
+--- watch.sh tail
+19:47:03.007 acked=1002 probe=alive:S
+19:47:03.528 acked=1099 probe=alive:S
+19:47:04.038 acked=1191 probe=alive:S
+19:47:04.549 acked=1277 probe=alive:S
+19:47:05.062 acked=1407 probe=alive:S
+19:47:05.572 acked=1550 probe=alive:S
+19:47:06.079 acked=1737 probe=alive:S
+19:47:06.587 acked=1905 probe=alive:S
+19:47:07.097 acked=2056 probe=alive:S
+19:47:07.606 acked=2201 probe=alive:S
+19:47:08.116 acked=2342 probe=alive:S
+19:47:08.636 acked=2468 probe=alive:S
+19:47:09.146 acked=2608 probe=alive:S
+19:47:09.658 acked=2727 probe=alive:S
+19:47:10.172 acked=2844 probe=alive:S
+19:47:10.684 acked=2978 probe=alive:S
+19:47:11.197 acked=3106 probe=alive:S
+19:47:11.708 acked=3259 probe=alive:S
+19:47:12.221 acked=3398 probe=alive:S
+19:47:12.734 acked=3534 probe=alive:S
+19:47:13.247 acked=3666 probe=alive:S
+19:47:13.758 acked=3788 probe=alive:S
+19:47:14.269 acked=3889 probe=alive:S
+19:47:14.778 acked=4002 probe=alive:S
+19:47:15.289 acked=4120 probe=alive:S
+19:47:15.801 acked=4221 probe=alive:S
+19:47:16.312 acked=4359 probe=alive:S
+19:47:16.823 acked=4489 probe=alive:S
+19:47:17.332 acked=4641 probe=alive:S
+19:47:17.842 acked=4793 probe=alive:S
+19:47:18.353 acked=4946 probe=alive:S
+19:47:18.864 acked=5057 probe=alive:S
+19:47:19.377 acked=5141 probe=alive:S
+19:47:19.887 acked=5285 probe=alive:S
+19:47:20.396 acked=5458 probe=alive:S
+19:47:20.909 acked=5629 probe=alive:S
+19:47:21.424 acked=5761 probe=alive:S
+19:47:21.942 acked=5867 probe=alive:S
+19:47:22.454 acked=5960 probe=alive:S
+19:47:22.970 acked=6046 probe=alive:S
+--- probe.sh log
+--- dmesg
+[Fri Nov 13 19:46:45 2026] drbd p8 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Fri Nov 13 19:46:45 2026] drbd p8/0 drbd1008: quorum( no -> yes ) [connected]
+[Fri Nov 13 19:46:45 2026] drbd p8/0 drbd1008 lima-dv-2: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Fri Nov 13 19:46:45 2026] drbd p8/0 drbd1008: Resumed AL updates
+[Fri Nov 13 19:46:46 2026] drbd p8 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Fri Nov 13 19:46:46 2026] drbd p8 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Fri Nov 13 19:46:46 2026] drbd p8: Preparing remote state change 3590099414: 1->2 role( Secondary ) conn( Connected )
+[Fri Nov 13 19:46:46 2026] drbd p8 lima-dv-2: Committing remote state change 3590099414 (primary_nodes=0)
+[Fri Nov 13 19:46:46 2026] drbd p8: Preparing cluster-wide state change 3865360331: 0->2 role( Secondary ) conn( Connected )
+[Fri Nov 13 19:46:46 2026] drbd p8/0 drbd1008 lima-dv-3: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:0
+[Fri Nov 13 19:46:46 2026] drbd p8/0 drbd1008 lima-dv-3: peer's exposed UUID: 0000000000000000
+[Fri Nov 13 19:46:46 2026] drbd p8: State change 3865360331: primary_nodes=0, weak_nodes=0
+[Fri Nov 13 19:46:46 2026] drbd p8: Committing cluster-wide state change 3865360331 (16ms)
+[Fri Nov 13 19:46:46 2026] drbd p8 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Fri Nov 13 19:46:46 2026] drbd p8/0 drbd1008 lima-dv-3: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) peer_replication( yes -> no ) [connected]
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008 lima-dv-2: Preparing to skip initial sync
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008: Bitmap UUID for initial resync: 98134CC01C44E404
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008: new current UUID: 2DC8A9ED69CE5784 weak: FFFFFFFFFFFFFFFD
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008 lima-dv-3: cleared bitmap UUID 2DC8A9ED69CE5784:0000000000000000:0000000000000000:0000000000000000
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008 lima-dv-2: cleared bitmap UUID 2DC8A9ED69CE5784:0000000000000000:0000000000000000:0000000000000000
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008: disk( Inconsistent -> UpToDate ) [new-c-uuid]
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008 lima-dv-2: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [new-c-uuid]
+[Fri Nov 13 19:46:52 2026] drbd p8/0 drbd1008: persisting effective size = 1024 MB (1048316 KB)
+[Fri Nov 13 19:46:57 2026] drbd p8: Preparing cluster-wide state change 1309512101: 0->all role( Primary )
+[Fri Nov 13 19:46:57 2026] drbd p8: State change 1309512101: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Fri Nov 13 19:46:57 2026] drbd p8: Committing cluster-wide state change 1309512101 (0ms)
+[Fri Nov 13 19:46:57 2026] drbd p8: role( Secondary -> Primary ) [mkfs.ext4:158924 auto-promote]
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: NONE -> ARMED(promoted)
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Fri Nov 13 19:46:57 2026] drbd p8: Preparing cluster-wide state change 4235780657: 0->all role( Secondary )
+[Fri Nov 13 19:46:57 2026] drbd p8: State change 4235780657: primary_nodes=0, weak_nodes=0
+[Fri Nov 13 19:46:57 2026] drbd p8: Committing cluster-wide state change 4235780657 (0ms)
+[Fri Nov 13 19:46:57 2026] drbd p8: role( Primary -> Secondary ) [mkfs.ext4:158924 auto-demote]
+[Fri Nov 13 19:46:57 2026] drbd p8: Preparing cluster-wide state change 806938607: 0->all role( Primary )
+[Fri Nov 13 19:46:57 2026] drbd p8: State change 806938607: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Fri Nov 13 19:46:57 2026] drbd p8: Committing cluster-wide state change 806938607 (0ms)
+[Fri Nov 13 19:46:57 2026] drbd p8: role( Secondary -> Primary ) [mount:158954 auto-promote]
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Fri Nov 13 19:47:03 2026] drbd p8: Preparing remote state change 750299192: 2->0 conn( Disconnecting ) disk( Outdated )
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Committing remote state change 750299192 (primary_nodes=1)
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Fri Nov 13 19:47:03 2026] drbd p8/0 drbd1008 lima-dv-3: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [remote]
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Terminating sender thread
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Connection closed
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Restarting receiver thread
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Fri Nov 13 19:47:03 2026] drbd p8: Preparing remote state change 4192292609: 2->1 conn( Disconnecting )
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-2: Committing remote state change 4192292609 (primary_nodes=1)
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: conn( Connecting -> Disconnecting ) [del-peer]
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Terminating sender thread
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Connection closed
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Terminating receiver thread
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Terminating sender thread
+$ [dv-1] drbdsetup status p8 --verbose | grep -o 'quorum:[a-z]*'
+quorum:yes
+rc=0
+$ [dv-2] drbdsetup status p8 --verbose | grep -o 'quorum:[a-z]*'
+quorum:yes
+rc=0
+
+### P8 step 4: dv-3 returns with the same node-id
+19:47:27.567
+$ [dv-1] drbdadm adjust p8
+rc=0
+$ [dv-2] drbdadm adjust p8
+rc=0
+$ [dv-3] drbdadm up p8
+rc=0
+$ [dv-1] drbdsetup status p8 --verbose --statistics
+p8 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1008 disk:UpToDate backing_dev:/dev/ambar/p8 quorum:yes open:yes
+      size:1048316 read:1005 written:1248108 al-writes:5 bm-writes:112 upper-pending:2
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:16 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:166896 out-of-sync:0 pending:1 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p8 --verbose --statistics
+p8 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1008 disk:UpToDate backing_dev:/dev/ambar/p8 quorum:yes open:no
+      size:1048316 read:0 written:1251988 al-writes:5 bm-writes:112 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:170780 sent:0 out-of-sync:0 pending:0 unacked:2
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p8 --verbose --statistics
+p8 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:none
+  volume:0 minor:1008 disk:Diskless client:yes backing_dev:none quorum:yes open:no
+      size:1048316 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+--- watch.sh tail
+19:47:33.237 acked=8274 probe=alive:S
+19:47:33.746 acked=8434 probe=alive:S
+19:47:34.254 acked=8607 probe=alive:S
+19:47:34.763 acked=8753 probe=alive:S
+19:47:35.275 acked=8894 probe=alive:S
+19:47:35.784 acked=9024 probe=alive:S
+19:47:36.297 acked=9120 probe=alive:S
+19:47:36.807 acked=9238 probe=alive:S
+19:47:37.315 acked=9373 probe=alive:S
+19:47:37.825 acked=9531 probe=alive:S
+19:47:38.337 acked=9708 probe=alive:S
+19:47:38.845 acked=9887 probe=alive:S
+19:47:39.354 acked=10042 probe=alive:S
+19:47:39.878 acked=10155 probe=alive:S
+19:47:40.401 acked=10282 probe=alive:S
+19:47:40.912 acked=10411 probe=alive:S
+19:47:41.422 acked=10532 probe=alive:S
+19:47:41.936 acked=10621 probe=alive:S
+19:47:42.448 acked=10712 probe=alive:S
+19:47:42.964 acked=10813 probe=alive:S
+--- dmesg
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Fri Nov 13 19:46:57 2026] drbd p8/0 drbd1008: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Fri Nov 13 19:47:03 2026] drbd p8: Preparing remote state change 750299192: 2->0 conn( Disconnecting ) disk( Outdated )
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Committing remote state change 750299192 (primary_nodes=1)
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Fri Nov 13 19:47:03 2026] drbd p8/0 drbd1008 lima-dv-3: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [remote]
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Terminating sender thread
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Connection closed
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: Restarting receiver thread
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Fri Nov 13 19:47:03 2026] drbd p8: Preparing remote state change 4192292609: 2->1 conn( Disconnecting )
+[Fri Nov 13 19:47:03 2026] drbd p8 lima-dv-2: Committing remote state change 4192292609 (primary_nodes=1)
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: conn( Connecting -> Disconnecting ) [del-peer]
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Terminating sender thread
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Connection closed
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Terminating receiver thread
+[Fri Nov 13 19:47:14 2026] drbd p8 lima-dv-3: Terminating sender thread
+[Fri Nov 13 19:47:28 2026] drbd p8 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Fri Nov 13 19:47:28 2026] drbd p8 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Fri Nov 13 19:47:28 2026] drbd p8 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Fri Nov 13 19:47:28 2026] drbd p8 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Fri Nov 13 19:47:31 2026] drbd p8 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Fri Nov 13 19:47:31 2026] drbd p8 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Fri Nov 13 19:47:31 2026] drbd p8: Preparing cluster-wide state change 1055869879: 0->2 role( Primary ) conn( Connected )
+[Fri Nov 13 19:47:31 2026] drbd p8/0 drbd1008 lima-dv-3: self 2DC8A9ED69CE5784:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:0
+[Fri Nov 13 19:47:31 2026] drbd p8/0 drbd1008 lima-dv-3: peer's exposed UUID: 0000000000000000
+[Fri Nov 13 19:47:31 2026] drbd p8: State change 1055869879: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Fri Nov 13 19:47:31 2026] drbd p8: Committing cluster-wide state change 1055869879 (20ms)
+[Fri Nov 13 19:47:31 2026] drbd p8 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Fri Nov 13 19:47:31 2026] drbd p8/0 drbd1008 lima-dv-3: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) [connected]
+[Fri Nov 13 19:47:31 2026] drbd p8/0 drbd1008: gen-obligation: DISCHARGED(promoted) -> ARMED(peer-returned-diskless)
+[Fri Nov 13 19:47:31 2026] drbd p8: Preparing remote state change 3548478819: 1->2 role( Secondary ) conn( Connected )
+[Fri Nov 13 19:47:31 2026] drbd p8/0 drbd1008: gen-obligation: ARMED(peer-returned-diskless) -> MINTING(peer-returned-diskless)
+[Fri Nov 13 19:47:31 2026] drbd p8/0 drbd1008: gen-obligation: MINTING(peer-returned-diskless) -> DISCHARGED(peer-returned-diskless)
+[Fri Nov 13 19:47:31 2026] drbd p8 lima-dv-2: Committing remote state change 3548478819 (primary_nodes=1)
+
+### P8 step 5: stop the writer, compare acknowledged and on-volume numbers
+acked=10875 on-volume=10876
+```
+
+### P9. Признак файловой системы и занятое устройство
+
+Ресурс `p9`: три копии, `create-md --max-peers=7`, `new-current-uuid --clear-bitmap`. Чтение с `dv-2` (роль `Secondary`), `mkfs` и монтирование на `dv-1`.
+
+```bash
+stand/spike/pre-csi.sh p9
+```
+
+```text
+
+### P9: blkid -p and a 2-byte read at offset 1080 on /dev/drbd1009, read on dv-2
+$ [dv-1] drbdadm create-md --force --max-peers=7 p9
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p9
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p9
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm up p9
+rc=0
+$ [dv-3] drbdadm create-md --force --max-peers=7 p9
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p9
+rc=0
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p9/0
+rc=0
+$ [dv-1] drbdsetup status p9 --verbose
+p9 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1009 disk:UpToDate backing_dev:/dev/ambar/p9 quorum:yes open:no
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+
+### P9 (1): no filesystem
+$ [dv-2] blkid -p -o value -s TYPE /dev/drbd1009
+rc=2
+--- stdout (first 20 lines)
+--- stderr
+$ [dv-2] dd if=/dev/drbd1009 bs=1 skip=1080 count=2 status=none | od -An -tx1
+rc=0
+--- stdout (first 20 lines)
+ 00 00
+--- stderr
+
+### P9 (2): after mkfs.ext4 -q on dv-1, not mounted
+$ [dv-1] mkfs.ext4 -q /dev/drbd1009
+rc=0
+$ [dv-2] blkid -p -o value -s TYPE /dev/drbd1009
+rc=0
+--- stdout (first 20 lines)
+ext4
+--- stderr
+$ [dv-2] dd if=/dev/drbd1009 bs=1 skip=1080 count=2 status=none | od -An -tx1
+rc=0
+--- stdout (first 20 lines)
+ 53 ef
+--- stderr
+
+### P9 (3): mounted on dv-1
+$ [dv-1] drbdsetup status p9 --verbose
+p9 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1009 disk:UpToDate backing_dev:/dev/ambar/p9 quorum:yes open:yes
+      blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-2] blkid -p -o value -s TYPE /dev/drbd1009
+rc=2
+--- stdout (first 20 lines)
+--- stderr
+blkid: error: /dev/drbd1009: Wrong medium type
+$ [dv-2] dd if=/dev/drbd1009 bs=1 skip=1080 count=2 status=none | od -An -tx1
+rc=1
+--- stdout (first 20 lines)
+--- stderr
+dd: failed to open '/dev/drbd1009': Wrong medium type
+$ [dv-2] drbdsetup status p9 --verbose
+p9 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1009 disk:UpToDate backing_dev:/dev/ambar/p9 quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+
+### P9 (4): /dev/drbd1999 does not exist
+$ [dv-2] ls -l /dev/drbd1999
+rc=2
+--- stdout (first 20 lines)
+--- stderr
+ls: cannot access '/dev/drbd1999': No such file or directory
+$ [dv-2] blkid -p -o value -s TYPE /dev/drbd1999
+rc=2
+--- stdout (first 20 lines)
+--- stderr
+$ [dv-2] dd if=/dev/drbd1999 bs=1 skip=1080 count=2 status=none | od -An -tx1
+rc=1
+--- stdout (first 20 lines)
+--- stderr
+dd: failed to open '/dev/drbd1999': No such file or directory
+```
+
+### Очистка стенда после опытов P7–P9
+
+```bash
+stand/spike/pre-csi.sh clean && stand/check.sh
+```
+
+```text
+OK: stand is up
+```
+
+На трёх узлах `drbdsetup status` — `# No currently configured DRBD found.`, `losetup -l -n | wc -l` = 0, `/dev/ambar` и `/mnt/pa` отсутствуют, в `/var/tmp` только `cloud-init` и каталог `systemd-private-…`.
+
 ## Проверки агента на стенде
 
 Первые две проверки выполнены 2026-11-13 на стенде в поде `toolbox`, по одному прогону. Третья
