@@ -7,6 +7,18 @@
 //! node's finalizer is still on it. `Task::CleanDiskless` is never returned
 //! for a node that has a backing file. Anything the table does not cover is
 //! `Refuse` or `Ignore`.
+//!
+//! A node listed more than once in `spec.nodes` is `Refuse(InvalidSpec)`
+//! before any row below: which entry is "this node" is undefined, and the
+//! deletion rows depend on it. `Task::DropFinalizer` is also returned for a
+//! stray finalizer: a deleting object that carries this node's replica
+//! finalizer although the node is not a `Replica` in it, when the node holds
+//! nothing (neither a backing file nor traces); without it the object would
+//! wait forever. With a backing file that case stays
+//! `Refuse(ImageWithoutMembership)`, with traces only `CleanDiskless` runs
+//! first and the finalizer goes in a later pass.
+
+use std::fmt;
 
 use crate::crd::{NodeKind, ReplicatedVolumeSpec, to_volume_spec};
 use crate::membership::replica_finalizer;
@@ -41,7 +53,8 @@ pub enum Task {
     Apply { spec: VolumeSpec, mark_done: bool },
     /// Delete the local copy (Reconciler::remove), then drop this node's finalizer.
     DeleteReplica,
-    /// The local copy is already gone: drop this node's finalizer.
+    /// Nothing is left on this node: drop this node's finalizer (the local copy
+    /// of a Replica is already gone, or the finalizer is a stray one).
     DropFinalizer,
     /// Remove what a node without a disk leaves behind (Reconciler::remove on a node with no image).
     CleanDiskless,
@@ -58,8 +71,24 @@ pub enum Refusal {
     /// The object is being deleted, this node is a Replica, but its finalizer is missing.
     DeletingWithoutFinalizer,
     Collision(Vec<String>),
-    /// Error text of `CrdError`.
+    /// Error text of `CrdError`, or a description of what else is wrong with the spec.
     InvalidSpec(String),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OrphanImage => f.write_str("a backing file exists but no ReplicatedVolume object has this name"),
+            Self::ImageWithoutMembership => {
+                f.write_str("a backing file exists but this node is not a Replica of the object")
+            }
+            Self::DeletingWithoutFinalizer => {
+                f.write_str("the object is being deleted and this node's finalizer is missing, the local copy is kept")
+            }
+            Self::Collision(names) => write!(f, "minor or port collides with {}", names.join(", ")),
+            Self::InvalidSpec(text) => write!(f, "invalid spec: {text}"),
+        }
+    }
 }
 
 /// `CleanDiskless` when something is left, `Ignore` otherwise. Never reached
@@ -86,7 +115,14 @@ pub fn decide(node: &str, volume: &str, object: Option<&ObjectView>, local: Loca
         return clean_or_ignore(local);
     };
 
-    let kind = object.spec.nodes.iter().find(|n| n.name == node).map(|n| n.kind);
+    // exists or deleting / node listed more than once -> Refuse(InvalidSpec)
+    let mut entries = object.spec.nodes.iter().filter(|n| n.name == node);
+    let kind = entries.next().map(|n| n.kind);
+    if entries.next().is_some() {
+        return Task::Refuse(Refusal::InvalidSpec(format!(
+            "node {node:?} is listed more than once in spec.nodes"
+        )));
+    }
 
     // Object: being deleted.
     if object.deleting {
@@ -110,6 +146,10 @@ pub fn decide(node: &str, volume: &str, object: Option<&ObjectView>, local: Loca
         // deleting / Witness, Client or not a member / image -> Refuse(ImageWithoutMembership)
         if local.image {
             return Task::Refuse(Refusal::ImageWithoutMembership);
+        }
+        // deleting / Witness, Client or not a member, own finalizer / nothing -> DropFinalizer
+        if object.finalizers.contains(&replica_finalizer(node)) && !local.image && !local.traces {
+            return Task::DropFinalizer;
         }
         // deleting / Witness, Client or not a member / no image -> CleanDiskless if traces, else Ignore
         return clean_or_ignore(local);
