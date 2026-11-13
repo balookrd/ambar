@@ -36,12 +36,29 @@ impl Runner for SystemRunner {
     }
 }
 
-/// Renders a command line for error messages and logs.
+/// Renders a command line for error messages and logs. An argument that is
+/// empty or contains whitespace or a double quote is wrapped in double quotes
+/// (`"` and `\` inside are escaped), so `["a b"]` and `["a", "b"]` differ.
 pub fn command_line(program: &str, args: &[&str]) -> String {
     let mut line = String::from(program);
     for arg in args {
         line.push(' ');
-        line.push_str(arg);
+        if arg.is_empty() || arg.contains(|c: char| c.is_whitespace() || c == '"') {
+            line.push('"');
+            for c in arg.chars() {
+                if c == '"' || c == '\\' {
+                    line.push('\\');
+                }
+                line.push(c);
+            }
+            line.push('"');
+        } else {
+            line.push_str(arg);
+        }
     }
     line
 }
+
+#[cfg(test)]
+#[path = "tests/exec.rs"]
+mod tests;

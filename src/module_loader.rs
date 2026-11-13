@@ -4,6 +4,7 @@
 //! covers the shell version, the unit tests here cover this one.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use crate::exec::{Runner, command_line};
@@ -34,6 +35,13 @@ pub enum LoadError {
 /// Makes sure DRBD 9 and its TCP transport are loaded.
 /// Returns a one-line description of what was found or done.
 pub fn load(env: &LoaderEnv, runner: &dyn Runner) -> Result<String, LoadError> {
+    load_with_log(env, runner, &mut std::io::stderr())
+}
+
+/// Same as [`load`]; stderr of commands that succeed is copied to `log`,
+/// one line at a time, prefixed with the program name (the shell version lets
+/// `modprobe` and `insmod` write such warnings to the container log).
+pub fn load_with_log(env: &LoaderEnv, runner: &dyn Runner, log: &mut dyn Write) -> Result<String, LoadError> {
     let dir = env.modules_dir.join(env.kernel_release);
     let version_file = env.sys_module_dir.join("drbd").join("version");
 
@@ -44,7 +52,7 @@ pub fn load(env: &LoaderEnv, runner: &dyn Runner) -> Result<String, LoadError> {
         }
         // A previous run may have died between the two insmod calls:
         // resources cannot connect without the transport.
-        load_transport(env, &dir, runner)?;
+        load_transport(env, &dir, runner, log)?;
         return Ok(format!("drbd {loaded} is already loaded"));
     }
 
@@ -54,14 +62,19 @@ pub fn load(env: &LoaderEnv, runner: &dyn Runner) -> Result<String, LoadError> {
     }
 
     // Dependencies come from the host module tree mounted at /lib/modules.
-    run(runner, "modprobe", &["-a", "lru_cache", "libcrc32c"])?;
-    run(runner, "insmod", &[&core.to_string_lossy(), "usermode_helper=disabled"])?;
-    load_transport(env, &dir, runner)?;
+    run(runner, log, "modprobe", &["-a", "lru_cache", "libcrc32c"])?;
+    run(
+        runner,
+        log,
+        "insmod",
+        &[&core.to_string_lossy(), "usermode_helper=disabled"],
+    )?;
+    load_transport(env, &dir, runner, log)?;
     let loaded = read_version(&version_file)?;
     Ok(format!("loaded drbd {loaded} for kernel {}", env.kernel_release))
 }
 
-fn load_transport(env: &LoaderEnv, dir: &Path, runner: &dyn Runner) -> Result<(), LoadError> {
+fn load_transport(env: &LoaderEnv, dir: &Path, runner: &dyn Runner, log: &mut dyn Write) -> Result<(), LoadError> {
     if env.sys_module_dir.join("drbd_transport_tcp").is_dir() {
         return Ok(());
     }
@@ -69,7 +82,7 @@ fn load_transport(env: &LoaderEnv, dir: &Path, runner: &dyn Runner) -> Result<()
     if !transport.is_file() {
         return Err(LoadError::NoTransport(env.kernel_release.to_string()));
     }
-    run(runner, "insmod", &[&transport.to_string_lossy()])
+    run(runner, log, "insmod", &[&transport.to_string_lossy()])
 }
 
 fn read_version(path: &Path) -> Result<String, LoadError> {
@@ -78,12 +91,16 @@ fn read_version(path: &Path) -> Result<String, LoadError> {
         .map_err(|e| LoadError::Io(format!("cannot read {}: {e}", path.display())))
 }
 
-fn run(runner: &dyn Runner, program: &str, args: &[&str]) -> Result<(), LoadError> {
+fn run(runner: &dyn Runner, log: &mut dyn Write, program: &str, args: &[&str]) -> Result<(), LoadError> {
     let command = command_line(program, args);
     let out = runner
         .run(program, args)
         .map_err(|e| LoadError::Io(format!("cannot start {command}: {e}")))?;
     if out.success() {
+        // A broken log must not fail the load.
+        for line in out.stderr.trim().lines() {
+            let _ = writeln!(log, "{program}: {line}");
+        }
         return Ok(());
     }
     Err(LoadError::Command {
