@@ -10,18 +10,32 @@
 //!
 //! | Path | Task | Checked before the lock | Guard, under the lock |
 //! |---|---|---|---|
-//! | `delete_replica`, copy with data | `DeleteReplica`, backing file with the ready marker, resource configured | the DRBD status can be read; rules 1-3 below on the object read at the start of the pass | the DRBD status is read again; rules 1-3a below; 3b uses the same object |
-//! | `delete_replica`, no data | `DeleteReplica`, no backing file or one without the ready marker | the DRBD status can be read and does not show this node `Primary` | the file state is read again and is still not "ready marker"; the DRBD status is read again and does not show this node `Primary` |
+//! | `delete_replica`, peer checks | `DeleteReplica`, resource configured in the kernel, any file state | the DRBD status can be read; rules 1-3 below on the object read at the start of the pass | the DRBD status is read again; rules 1-3a below; 3b uses the same object |
+//! | `delete_replica`, no data | `DeleteReplica`, resource not configured, and `prove_no_data` shows the node holds no data (rows 3 and 5 of the table below) | the resource is not configured; `prove_no_data` | the DRBD status is read again and the resource is still not configured; `prove_no_data` again |
 //! | `clean_diskless` | `CleanDiskless` | nothing | no backing file exists |
 //!
-//! `DeleteReplica` by what this node holds (`local::file_state`):
+//! `DeleteReplica` by what this node holds. The first matching row applies;
+//! a state that matches no row that ends in a removal keeps the copy.
+//! "Configured" is `drbdsetup status` showing the resource, whatever its disk
+//! state.
 //!
-//! | Backing file | Resource in the kernel | Action |
-//! |---|---|---|
-//! | absent (only traces) | any | nothing can be lost here: removed without the peer checks, guard as in the table |
-//! | present, no ready marker | any | the copy never held data: removed without the peer checks, same guard |
-//! | present, ready marker | not configured | `bring_up`: `Reconciler::apply` with the object's description and `initialSync: Done`, status written, `Progress` (1 s); nothing is deleted. A description that cannot be converted or a failed `apply`: the copy is kept, the error is in the status `message`, `Kept` (30 s) |
-//! | present, ready marker | configured | rules 1-3 below |
+//! | Resource in the kernel | Backing file | Other facts | Action |
+//! |---|---|---|---|
+//! | configured | any (absent, no ready marker, ready marker) | | peer checks, rules 1-3 below: DRBD holds the disk, so the file state does not matter |
+//! | not configured | ready marker | | `bring_up`: `Reconciler::apply` with the object's description and `initialSync: Done`, status written, `Progress` (1 s); nothing is deleted. A description that cannot be converted or a failed `apply`: the copy is kept, the error is in the status `message`, `Kept` (30 s) |
+//! | not configured | absent | no loop device is attached to the image path (`local::loops_holding` is empty) | no data: removed without the peer checks |
+//! | not configured | absent | a loop device still holds the deleted file | kept, `Kept`: "the backing file is gone but a loop device still holds it" |
+//! | not configured | no ready marker | the synced marker is absent and `Drbd::metadata` (`drbdadm dump-md`) is `Absent` or `Fresh` | no data: removed without the peer checks |
+//! | not configured | no ready marker | the synced marker exists, or the metadata is `Used`, or the check fails | kept, `Kept`; the message names the reason (same wording family as `ReadyMarkerLost` and `MetadataPresent` of `reconcile`); the operator decides |
+//!
+//! Every fact of "no data" is read, never assumed. A path that cannot be
+//! inspected, a `losetup` or `drbdadm dump-md` that fails (`dump-md` needs the
+//! resource file, the device link and an attached loop device; nothing is
+//! prepared on the deletion path) and a status that cannot be read all count as
+//! "cannot be shown": the copy stays. `losetup -j <path>` is not used for the
+//! loop devices of a missing file: it finds files by path and says nothing for
+//! a path that no longer exists, while `losetup --list` shows the device with
+//! `<path> (deleted)` (checked on the stand).
 //!
 //! Why the bring-up: after a reboot the resource of a deleting object is not
 //! configured, so this node sees no peers and the peers see it not connected
@@ -33,10 +47,17 @@
 //! `new-current-uuid` only for `initialSync: Skip`, which the bring-up turns
 //! off.
 //!
+//! The entry of this node in `status.nodes` is removed with
+//! `Agent::clear_entry`: an empty server-side apply, a read of the object, and
+//! when the entry is still there (another field manager co-owns it) a JSON
+//! patch on the status subresource (see `kube`). While the entry cannot be
+//! removed the pass is `Kept` (30 s), the finalizer of this node stays, and
+//! the next pass tries again.
+//!
 //! `ambar remove` (the CLI) calls `Reconciler::remove`, which has no guard:
 //! it is an operator's decision and bypasses these checks by design.
 //!
-//! `Task::DeleteReplica` for a copy with data (extends R18, R10). The copy is
+//! `Task::DeleteReplica` by the peer checks (extends R18, R10). The copy is
 //! deleted only if all of these hold; otherwise it is kept, the reason goes
 //! into the `message` of this node's `status.nodes` entry and the pass is
 //! repeated after 30 s (or earlier, when the object changes):
@@ -81,7 +102,9 @@
 //! The loop. One task runs `reconcile_one` for the names of a queue, one
 //! after another. A name is queued at once when the watch reports its
 //! object, and again after a pass: after 1 s when the pass made progress, 30 s
-//! when it settled, 60 s when it refused, 5 s on an error. Every 30 s the
+//! when it settled or kept a copy, 60 s when it refused, 5 s on an error; not
+//! at all when there is no object and nothing local (`Outcome::Gone`), so the
+//! queue does not grow with every name ever seen. Every 30 s the
 //! names of all objects and all local leftovers are queued, which finds
 //! leftovers of objects that are gone. `ready` becomes true once every name
 //! of the first listing has had one pass without an API error, or has failed
@@ -101,7 +124,7 @@ use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use crate::crd::{NodeStatus, ReplicatedVolume, ReplicatedVolumeSpec, to_volume_spec};
-use crate::drbd::adm::Drbd;
+use crate::drbd::adm::{Drbd, Metadata};
 use crate::drbd::status::{ConnectionState, ResourceStatus, Role};
 use crate::exec::Runner;
 use crate::membership::{collisions, replica_finalizer};
@@ -111,7 +134,7 @@ use crate::reconcile::{FileState, ReconcileError, Reconciler};
 
 use super::decide::{Local, ObjectView, Refusal, Task, decide};
 use super::kube::{ApiError, Volumes};
-use super::local::{file_state, local, local_volumes};
+use super::local::{file_state, local, local_volumes, loops_holding, synced_marker_present};
 use super::status::node_status;
 
 /// Next pass after one that ran a node-level action or changed the status.
@@ -151,6 +174,10 @@ pub enum AgentError {
 pub enum Outcome {
     /// Nothing to do.
     Settled,
+    /// No object has this name and the node holds nothing for it: the name is
+    /// not queued again (the watch and the periodic pass find it should it
+    /// come back).
+    Gone,
     /// Something was done or reported, or has to be tried again soon.
     Progress,
     /// The local copy of a deleting volume was kept because deleting it is
@@ -270,31 +297,68 @@ fn keep_reasons(
     reasons
 }
 
-/// What has to hold before the copy of a deleting volume is deleted, by what
-/// the node holds (module doc).
+/// What has to hold before the copy of a deleting volume is deleted (module doc).
 enum Check {
-    /// A backing file with the ready marker: rules 2 and 3, with the
-    /// `status.nodes` the pass read.
+    /// The resource is configured, or the copy is a ready one: rules 2 and 3,
+    /// with the `status.nodes` the pass read.
     Peers(Vec<NodeStatus>),
-    /// No backing file, or one without the ready marker: this node holds no
-    /// data, so only rule 2 applies (the resource is not in use here).
-    NoData,
+    /// The resource is not configured and `prove_no_data` shows the node holds
+    /// no data, for a backing file in this state.
+    NoData(FileState),
 }
 
-impl Check {
-    fn needs_no_data(&self) -> bool {
-        matches!(self, Check::NoData)
+/// Shows that a node whose resource is not configured holds no data for
+/// `volume`, for a backing file in the state `file` (`Absent` or `Pending`).
+/// `Err` is the reason it cannot be shown, in words; whatever fails to be
+/// read counts as "cannot be shown". The caller has seen the resource not
+/// configured. Nothing is changed and no device is prepared: `dump-md` needs
+/// the resource file, the device link and an attached loop device, and when
+/// one is missing the check fails and the copy stays.
+///
+/// * the state of the backing file is still `file`;
+/// * `Absent`: no loop device is attached to the path of the file, so the
+///   deleted inode is not held;
+/// * `Pending`: the synced marker is absent and `Drbd::metadata` is `Absent`
+///   or `Fresh`.
+fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileState) -> Result<(), String> {
+    let now = file_state(paths, volume).map_err(|e| format!("cannot inspect the backing file: {e}"))?;
+    if now != file {
+        return Err(format!(
+            "the backing file was {file:?} at the decision and is {now:?} now; the next pass decides again"
+        ));
     }
-
-    fn reasons(&self, node: &str, spec: &ReplicatedVolumeSpec, status: Option<&ResourceStatus>) -> Vec<String> {
-        match self {
-            Check::Peers(reported) => keep_reasons(node, spec, reported, status),
-            Check::NoData => {
-                if status.is_some_and(|s| s.role == Role::Primary) {
-                    vec!["this node is Primary".to_string()]
-                } else {
-                    Vec::new()
-                }
+    match file {
+        FileState::Ready => Err("a backing file with the ready marker has appeared since the decision".to_string()),
+        FileState::Absent => {
+            let devices = loops_holding(runner, &paths.image(volume))
+                .map_err(|e| format!("cannot tell whether a loop device holds the backing file: {e}"))?;
+            if devices.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the backing file is gone but a loop device still holds it ({}); it is not detached here, check \
+                     it by hand",
+                    devices.join(", ")
+                ))
+            }
+        }
+        FileState::Pending => {
+            let synced =
+                synced_marker_present(paths, volume).map_err(|e| format!("cannot inspect the synced marker: {e}"))?;
+            if synced {
+                return Err(format!(
+                    "the backing file has no ready marker but the synced marker exists, so it held data; it is not \
+                     deleted: check it by hand, then restore the ready marker or run `ambar remove --name {volume}`"
+                ));
+            }
+            match (Drbd { runner }).metadata(volume) {
+                Ok(Metadata::Absent | Metadata::Fresh) => Ok(()),
+                Ok(Metadata::Used) => Err(
+                    "the backing file has no ready marker but already holds DRBD metadata; the metadata was not \
+                     touched, check the file by hand"
+                        .to_string(),
+                ),
+                Err(e) => Err(format!("cannot tell whether the backing file holds DRBD metadata: {e}")),
             }
         }
     }
@@ -387,6 +451,45 @@ impl Agent {
         Ok(true)
     }
 
+    /// Removes this node's entry from `status.nodes` and checks that it is
+    /// gone. The empty server-side apply removes only the fields this field
+    /// manager owns: when another manager co-owns the entry (an operator's
+    /// `kubectl patch` of the status) it stays. The object is then read again
+    /// and, when the entry is still there, removed with a JSON patch on the
+    /// status subresource (see `kube`). `Ok(true)`: the entry is gone (or the
+    /// object is). `Ok(false)`: it could not be removed; the reason is logged
+    /// and the caller keeps the pass at `Outcome::Kept`, because the other
+    /// nodes wait for the entry and a retry in a second would not change it.
+    async fn clear_entry(&self, volume: &str, object: &ReplicatedVolume) -> Result<bool, AgentError> {
+        self.report(volume, Some(object), None).await?;
+        let Some(fresh) = self.volumes.get(volume).await? else {
+            return Ok(true);
+        };
+        if !has_entry(&fresh, &self.node) {
+            return Ok(true);
+        }
+        let uid = uid_of(object)?;
+        match self.volumes.remove_node_entry(volume, &uid, &self.node).await {
+            Ok(removed) => {
+                if removed {
+                    log_info(
+                        volume,
+                        "the empty apply left the entry of this node in status.nodes (another field manager \
+                         co-owns it); removed it with a JSON patch",
+                    );
+                }
+                Ok(true)
+            }
+            Err(error) => {
+                log_error(
+                    volume,
+                    format!("the entry of this node in status.nodes could not be removed: {error}"),
+                );
+                Ok(false)
+            }
+        }
+    }
+
     /// Entry with `message`, built from the status read now (best effort).
     async fn report_message(
         &self,
@@ -452,7 +555,11 @@ impl Agent {
             },
             Task::DropFinalizer => match object.as_ref() {
                 Some(object) => {
-                    self.report(volume, Some(object), None).await?;
+                    if !self.clear_entry(volume, object).await? {
+                        // The other nodes wait for the entry; the finalizer
+                        // stays with it and the pass is repeated.
+                        return Ok(Outcome::Kept);
+                    }
                     if self.drop_finalizer(volume, object).await? {
                         log_info(volume, "nothing is left on this node: finalizer dropped");
                     }
@@ -476,11 +583,14 @@ impl Agent {
     /// because the other nodes wait for it to go.
     async fn ignore(&self, volume: &str, object: Option<&ReplicatedVolume>) -> Result<Outcome, AgentError> {
         let Some(object) = object else {
-            return Ok(Outcome::Settled);
+            return Ok(Outcome::Gone);
         };
         if object.metadata.deletion_timestamp.is_some() && has_entry(object, &self.node) {
-            self.report(volume, Some(object), None).await?;
-            return Ok(Outcome::Progress);
+            return Ok(if self.clear_entry(volume, object).await? {
+                Outcome::Progress
+            } else {
+                Outcome::Kept
+            });
         }
         Ok(Outcome::Settled)
     }
@@ -539,67 +649,101 @@ impl Agent {
         })
     }
 
+    /// Keeps the copy: the reason goes into this node's status entry and the
+    /// log, the next pass is in `KEPT_DELAY`.
+    async fn keep(
+        &self,
+        volume: &str,
+        object: &ReplicatedVolume,
+        status: Option<&ResourceStatus>,
+        why: &str,
+    ) -> Result<Outcome, AgentError> {
+        let message = format!("the local copy is kept: {why}");
+        let entry = node_status(&self.node, status, &message);
+        if self.report(volume, Some(object), Some(entry)).await? {
+            log_error(volume, &message);
+        }
+        Ok(Outcome::Kept)
+    }
+
     async fn delete_replica(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
         let file = {
             let name = volume.to_string();
-            self.blocking(move |paths, _| file_state(paths, &name))
-                .await?
-                .map_err(|e| Self::reconcile_error(volume, e))?
+            self.blocking(move |paths, _| file_state(paths, &name)).await?
+        };
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => {
+                return self
+                    .keep(
+                        volume,
+                        object,
+                        None,
+                        &format!("cannot inspect the backing file: {error}"),
+                    )
+                    .await;
+            }
         };
         // Rule 1 on the object this pass read.
         let status = match self.read_status(volume).await {
             Ok(status) => status,
             Err(error) => {
-                let message = format!("the local copy is kept: cannot read the DRBD status: {error}");
-                let entry = node_status(&self.node, None, &message);
-                if self.report(volume, Some(object), Some(entry)).await.unwrap_or(false) {
-                    log_error(volume, &message);
+                return self
+                    .keep(volume, object, None, &format!("cannot read the DRBD status: {error}"))
+                    .await;
+            }
+        };
+        let check = if status.is_some() {
+            // DRBD holds the disk, whatever the file state says.
+            Check::Peers(object.status.clone().unwrap_or_default().nodes)
+        } else {
+            match file {
+                FileState::Ready => return self.bring_up(volume, object).await,
+                FileState::Absent | FileState::Pending => {
+                    let name = volume.to_string();
+                    let proof = self
+                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file))
+                        .await?;
+                    if let Err(why) = proof {
+                        return self.keep(volume, object, None, &why).await;
+                    }
+                    Check::NoData(file)
                 }
-                return Err(Self::reconcile_error(volume, error));
             }
         };
-        let reported = object.status.clone().unwrap_or_default().nodes;
-        let check = match file {
-            FileState::Absent | FileState::Pending => Check::NoData,
-            FileState::Ready if status.is_none() => return self.bring_up(volume, object).await,
-            FileState::Ready => Check::Peers(reported),
-        };
-        let reasons = check.reasons(&self.node, &object.spec, status.as_ref());
-        if !reasons.is_empty() {
-            let message = format!("the local copy is kept: {}", reasons.join("; "));
-            let entry = node_status(&self.node, status.as_ref(), &message);
-            if self.report(volume, Some(object), Some(entry)).await? {
-                log_error(volume, &message);
+        if let Check::Peers(reported) = &check {
+            let reasons = keep_reasons(&self.node, &object.spec, reported, status.as_ref());
+            if !reasons.is_empty() {
+                return self.keep(volume, object, status.as_ref(), &reasons.join("; ")).await;
             }
-            return Ok(Outcome::Kept);
         }
-        // The same checks again under the volume lock, on a status read there.
+        // The same checks again under the volume lock, on facts read there.
         let name = volume.to_string();
         let node = self.node.clone();
         let spec = object.spec.clone();
         let removed = self
             .blocking(move |paths, runner| {
                 let guard = || {
-                    if check.needs_no_data() {
-                        // The file may have appeared since the decision.
-                        match file_state(paths, &name) {
-                            Ok(FileState::Ready) => {
-                                return Err(
-                                    "a backing file with the ready marker has appeared since the decision".to_string()
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => return Err(format!("cannot inspect the backing file: {e}")),
-                        }
-                    }
                     let status = Drbd { runner }
                         .status(&name)
                         .map_err(|e| format!("cannot read the DRBD status: {e}"))?;
-                    let reasons = check.reasons(&node, &spec, status.as_ref());
-                    if reasons.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(reasons.join("; "))
+                    match &check {
+                        Check::Peers(reported) => {
+                            let reasons = keep_reasons(&node, &spec, reported, status.as_ref());
+                            if reasons.is_empty() {
+                                Ok(())
+                            } else {
+                                Err(reasons.join("; "))
+                            }
+                        }
+                        Check::NoData(file) => {
+                            if status.is_some() {
+                                return Err(
+                                    "the resource has been configured in the kernel since the decision".to_string()
+                                );
+                            }
+                            prove_no_data(paths, runner, &name, *file)
+                        }
                     }
                 };
                 Reconciler { paths, runner }.remove_checked(&name, &guard)
@@ -608,7 +752,11 @@ impl Agent {
         match removed {
             Ok(steps) => {
                 log_info(volume, format!("removed the local copy {steps:?}"));
-                self.report(volume, Some(object), None).await?;
+                if !self.clear_entry(volume, object).await? {
+                    // The finalizer stays: the next pass finds nothing local
+                    // and tries the entry again (`Task::DropFinalizer`).
+                    return Ok(Outcome::Kept);
+                }
                 self.drop_finalizer(volume, object).await?;
                 Ok(Outcome::Progress)
             }
@@ -711,7 +859,11 @@ impl Agent {
         match removed {
             Ok(steps) => {
                 log_info(volume, format!("cleaned leftovers {steps:?}"));
-                self.report(volume, object, None).await?;
+                if let Some(object) = object
+                    && !self.clear_entry(volume, object).await?
+                {
+                    return Ok(Outcome::Kept);
+                }
                 Ok(Outcome::Progress)
             }
             Err(ReconcileError::Busy { .. }) => Ok(Outcome::Progress),
@@ -786,7 +938,9 @@ impl Agent {
             match queue.pop_due(now) {
                 Ok(name) => {
                     let result = self.reconcile_one(&name).await;
-                    queue.schedule(&name, Instant::now() + settle(&name, &result));
+                    if let Some(delay) = settle(&name, &result) {
+                        queue.schedule(&name, Instant::now() + delay);
+                    }
                     startup.record(&name, &result);
                     self.publish_readiness(&startup);
                 }
@@ -858,18 +1012,19 @@ impl Startup {
     }
 }
 
-/// Logs an error result and says when the name is due again.
-fn settle(name: &str, result: &Result<Outcome, AgentError>) -> Duration {
-    match result {
+/// Logs an error result and says when the name is due again; `None`: not at all.
+fn settle(name: &str, result: &Result<Outcome, AgentError>) -> Option<Duration> {
+    Some(match result {
         Ok(Outcome::Progress) => PROGRESS_DELAY,
         Ok(Outcome::Settled) => SETTLED_DELAY,
+        Ok(Outcome::Gone) => return None,
         Ok(Outcome::Kept) => KEPT_DELAY,
         Ok(Outcome::Refused(_)) => REFUSED_DELAY,
         Err(error) => {
             log_error(name, error);
             ERROR_DELAY
         }
-    }
+    })
 }
 
 /// Names with the time of their next pass. A name is queued once; queuing it

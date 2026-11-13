@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
@@ -11,8 +12,12 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::agent::kube::{Created, Objects, initial_sync_done_ops, patch_retrying, remove_finalizer_ops};
+use crate::agent::kube::{
+    Created, Objects, initial_sync_done_ops, patch_retrying, patch_status_retrying, remove_finalizer_ops,
+    remove_node_entry_ops,
+};
 use crate::crd::ReplicatedVolumeSpec;
+use crate::exec::Output;
 use crate::model::InitialSync;
 use crate::tests::{FakeRunner, THREE_UPTODATE, configured_node, fake_node, out, prepare_copy, temp_paths};
 
@@ -43,6 +48,11 @@ struct FakeVolumes {
     list_failures: AtomicU32,
     /// `get` of these names fails.
     failing: Mutex<BTreeSet<String>>,
+    /// An entry of `status.nodes` that another field manager co-owns: the
+    /// empty server-side apply of this node does not remove it.
+    co_owned: AtomicBool,
+    /// Every JSON patch of the status subresource fails.
+    fail_status_patch: AtomicBool,
     /// Runs once at the start of the next `list`.
     on_list: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     events: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
@@ -164,6 +174,22 @@ impl Objects for FakeVolumes {
     }
 
     async fn patch(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
+        self.patch_on(name, ops, false)
+    }
+
+    async fn patch_status(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
+        if self.fail_status_patch.load(Ordering::SeqCst) {
+            self.log(format!("patch-status {name} failed"));
+            return Err(ApiError::Other("the status patch is refused".into()));
+        }
+        self.patch_on(name, ops, true)
+    }
+}
+
+impl FakeVolumes {
+    /// A JSON patch of the object or, with `status`, of its status subresource.
+    fn patch_on(&self, name: &str, ops: Vec<Value>, status: bool) -> Result<bool, ApiError> {
+        let verb = if status { "patch-status" } else { "patch" };
         let injected = {
             let mut left = self.conflicts.lock().unwrap();
             let injected = *left > 0;
@@ -171,7 +197,7 @@ impl Objects for FakeVolumes {
             injected
         };
         if injected {
-            self.log(format!("patch {name} conflict"));
+            self.log(format!("{verb} {name} conflict"));
             return Err(ApiError::Conflict("the object has been modified".into()));
         }
         let mut objects = self.objects.lock().unwrap();
@@ -181,7 +207,7 @@ impl Objects for FakeVolumes {
         let mut next = stored.clone();
         if let Err(why) = apply_ops(&mut next, &ops) {
             drop(objects);
-            self.log(format!("patch {name} rejected"));
+            self.log(format!("{verb} {name} rejected"));
             return Err(ApiError::Rejected(why));
         }
         next["metadata"]["resourceVersion"] = json!(self.next_version());
@@ -198,7 +224,7 @@ impl Objects for FakeVolumes {
             objects.insert(name.to_string(), next);
         }
         drop(objects);
-        self.log(format!("patch {name}"));
+        self.log(format!("{verb} {name}"));
         Ok(true)
     }
 }
@@ -256,6 +282,10 @@ impl Volumes for FakeVolumes {
         patch_retrying(self, name, uid, &initial_sync_done_ops).await
     }
 
+    async fn remove_node_entry(&self, name: &str, uid: &str, node: &str) -> Result<bool, ApiError> {
+        patch_status_retrying(self, name, uid, &|object| remove_node_entry_ops(object, node)).await
+    }
+
     async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError> {
         self.log(format!(
             "status {name} {node} {}",
@@ -268,7 +298,7 @@ impl Volumes for FakeVolumes {
         if self.object(name).is_some() {
             if let Some(entry) = entry {
                 self.set_entry(name, entry.clone());
-            } else {
+            } else if !self.co_owned.load(Ordering::SeqCst) {
                 let mut objects = self.objects.lock().unwrap();
                 let object = objects.get_mut(name).unwrap();
                 let mut nodes: Vec<NodeStatus> =
@@ -546,7 +576,7 @@ async fn the_last_replica_that_removes_its_finalizer_lets_the_object_go() {
 
     e.agent.reconcile_one(VOLUME).await.unwrap();
     assert!(e.volumes.object(VOLUME).is_none());
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Settled);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Gone);
 }
 
 /// R18: a deleting volume with a Primary on this node or on a peer keeps its copy.
@@ -593,11 +623,20 @@ async fn a_copy_is_kept_when_the_status_cannot_be_read() {
     e.volumes.put(spike("Done"));
     e.volumes.delete(VOLUME).await.unwrap();
 
-    // The state cannot even be read before the decision: nothing is deleted.
-    assert!(e.agent.reconcile_one(VOLUME).await.is_err());
+    // The state cannot even be read before the decision: nothing is deleted,
+    // the reason is in the status and the next pass is in 30 s, not 5.
+    let outcome = e.agent.reconcile_one(VOLUME).await;
+    assert_eq!(outcome.as_ref().unwrap(), &Outcome::Kept);
+    assert_eq!(settle(VOLUME, &outcome), Some(Duration::from_secs(30)));
     assert!(commands(&e.runner, &["drbdadm", "losetup"]).is_empty());
     assert!(e.paths.image(VOLUME).exists());
     assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the reason is in the status");
+    assert!(
+        entry.message.contains("cannot read the DRBD status") && entry.message.contains("no kernel module"),
+        "{}",
+        entry.message
+    );
 }
 
 #[tokio::test]
@@ -946,9 +985,10 @@ async fn a_peer_that_becomes_primary_before_the_lock_keeps_the_copy() {
 
 #[tokio::test]
 async fn the_three_replicas_of_a_deleting_volume_all_end_deleted() {
-    // Three Replicas, all connected and Secondary; each has reported. The
-    // volume is deleted: the first node deletes and removes its entry, the
-    // second then sees the first neither connected nor reported, and so on.
+    // Three Replicas, all connected and Secondary, each seeing the others
+    // `Connected`; each has reported. The volume is deleted: the first node
+    // deletes and removes its entry, the second then sees the first neither
+    // connected (it is down) nor reported, and so on.
     let volumes = Arc::new(FakeVolumes::default());
     let mut volume = spike_with_third("Replica", &[DV1, DV2, DV3]);
     volume.spec.nodes[2].kind = crate::crd::NodeKind::Replica;
@@ -959,26 +999,38 @@ async fn the_three_replicas_of_a_deleting_volume_all_end_deleted() {
     volumes.delete(VOLUME).await.unwrap();
 
     let node_of = |node: &str, peers: &[(&str, &str, &str)]| {
-        let kernel = Arc::new(Mutex::new(kernel_peers("Secondary", peers)));
-        let e = env_sharing(node, node_with_status(kernel, true), true, volumes.clone());
+        let kernel = Arc::new(Mutex::new(kernel_of(node, "Secondary", peers)));
+        let e = env_sharing(node, node_with_status(kernel.clone(), true), true, volumes.clone());
         prepare_copy(&e.paths, true, true);
-        e
+        (e, kernel)
     };
-    let a = node_of(DV1, &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")]);
-    let b = node_of(DV2, &[(DV1, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")]);
-    let c = node_of(DV3, &[(DV1, "Connecting", "Unknown"), (DV2, "Connecting", "Unknown")]);
-
-    // B and C must wait for A's entry to go.
-    assert_eq!(b.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
-    assert_eq!(c.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
-    assert!(b.paths.image(VOLUME).exists() && c.paths.image(VOLUME).exists());
+    let (a, _) = node_of(DV1, &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")]);
+    let (b, kernel_b) = node_of(DV2, &[(DV1, "Connected", "Secondary"), (DV3, "Connected", "Secondary")]);
+    let (c, kernel_c) = node_of(DV3, &[(DV1, "Connected", "Secondary"), (DV2, "Connected", "Secondary")]);
 
     assert_eq!(a.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert!(!a.paths.image(VOLUME).exists());
     assert!(volumes.entry_of(VOLUME, DV1).is_none());
 
+    // dv-1 is down now: the others see it `Connecting` and without an entry.
+    *kernel_b.lock().unwrap() = kernel_of(
+        DV2,
+        "Secondary",
+        &[(DV1, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
+    );
+    *kernel_c.lock().unwrap() = kernel_of(
+        DV3,
+        "Secondary",
+        &[(DV1, "Connecting", "Unknown"), (DV2, "Connected", "Secondary")],
+    );
     assert_eq!(b.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert!(!b.paths.image(VOLUME).exists());
+
+    *kernel_c.lock().unwrap() = kernel_of(
+        DV3,
+        "Secondary",
+        &[(DV1, "Connecting", "Unknown"), (DV2, "Connecting", "Unknown")],
+    );
     assert_eq!(c.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert!(!c.paths.image(VOLUME).exists());
     assert!(
@@ -1113,7 +1165,7 @@ async fn a_kernel_resource_without_a_file_of_ambars_is_left_alone() {
     // A DRBD resource of someone else: no object, no `.res`, no link.
     let kernel = Arc::new(Mutex::new(kernel_json(DV1, |_| {})));
     let e = env(DV1, configured_node(kernel));
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Settled);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Gone);
     assert!(e.runner.calls().is_empty(), "{:?}", e.runner.calls());
     assert!(e.volumes.status_writes().is_empty());
 }
@@ -1367,24 +1419,6 @@ async fn a_node_with_only_traces_removes_without_the_peer_checks() {
     assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
 }
 
-#[tokio::test]
-async fn a_backing_file_without_the_ready_marker_removes_without_the_peer_checks() {
-    // The copy never finished initialisation: it never held data. The
-    // resource is live and a peer is connecting and has an entry.
-    let kernel = kernel_peers(
-        "Secondary",
-        &[(DV2, "Connecting", "Unknown"), (DV3, "Connected", "Secondary")],
-    );
-    let e = deleting_pending(&kernel, &[DV2]).await;
-
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
-    assert!(!e.paths.image(VOLUME).exists());
-    assert!(!e.paths.res_file(VOLUME).exists());
-    assert_eq!(commands(&e.runner, &["drbdadm down"]), ["drbdadm down spike"]);
-    assert_eq!(e.volumes.finalizers(VOLUME), [replica_finalizer(DV2)]);
-    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
-}
-
 /// A deleting `spike` on dv-1 whose backing file has no ready marker.
 async fn deleting_pending(kernel: &str, entries: &[&str]) -> Env {
     let e = env(DV1, node_with_status(Arc::new(Mutex::new(kernel.to_string())), true));
@@ -1443,37 +1477,41 @@ async fn a_copy_without_data_is_kept_when_the_status_cannot_be_read() {
     e.volumes.put(spike("Done"));
     e.volumes.delete(VOLUME).await.unwrap();
 
-    assert!(e.agent.reconcile_one(VOLUME).await.is_err());
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert!(commands(&e.runner, &["drbdadm", "losetup"]).is_empty());
     assert!(e.paths.image(VOLUME).exists());
     assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the reason is in the status");
+    assert!(
+        entry.message.contains("cannot read the DRBD status"),
+        "{}",
+        entry.message
+    );
 }
 
 #[tokio::test]
-async fn a_ready_file_that_appears_before_the_lock_goes_through_the_peer_checks() {
-    // The pass sees no backing file and reads the status; before the lock is
-    // taken the file and its ready marker appear (the CLI, a CSI call). The
-    // guard under the lock must stop the removal.
+async fn a_ready_file_that_appears_before_the_lock_stops_the_removal() {
+    // The pass sees no backing file and no configured resource; before the
+    // lock is taken the file and its ready marker appear (the CLI, a CSI
+    // call). The guard under the lock must stop the removal.
     let paths_cell: Arc<Mutex<Option<Paths>>> = Arc::new(Mutex::new(None));
     let cell = paths_cell.clone();
     let reads = Arc::new(AtomicUsize::new(0));
     let counter = reads.clone();
-    let kernel = kernel_peers(
-        "Secondary",
-        &[(DV2, "Connected", "Secondary"), (DV3, "Connected", "Secondary")],
-    );
     let e = env(
         DV1,
         FakeRunner::new(move |program, args| match (program, args) {
-            ("drbdsetup", _) => {
+            // The proof that no loop device holds the file is the last thing
+            // the pass does before it takes the lock.
+            ("losetup", ["--list", ..]) => {
                 if counter.fetch_add(1, Ordering::SeqCst) == 0 {
                     let paths = cell.lock().unwrap().clone().unwrap();
                     fs::write(paths.image(VOLUME), "data").unwrap();
                     fs::write(paths.ready_marker(VOLUME), "").unwrap();
                 }
-                out(0, &kernel, "")
+                out(0, "", "")
             }
-            ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+            ("drbdsetup", _) => out(0, EMPTY_KERNEL, ""),
             _ => out(0, "", ""),
         }),
     );
@@ -1531,6 +1569,593 @@ async fn a_node_that_becomes_primary_before_the_lock_keeps_a_copy_without_data()
     assert!(entry.message.contains("this node is Primary"), "{}", entry.message);
 }
 
+// ---- reconcile_one: "no data" is proven, not assumed (round 3) ----
+
+/// `dump-md` right after `create-md` (experiment P10 (1)).
+const FRESH_DUMP: &str = include_str!("../../drbd/tests/fixtures/p10-1-just-created.txt");
+/// `dump-md` of metadata with a file system on it (experiment P10 (5)).
+const USED_DUMP: &str = include_str!("../../drbd/tests/fixtures/p10-5-filesystem-and-file.txt");
+
+/// The parts of a node the "no data" proof reads: the kernel, the loop
+/// devices and `drbdadm dump-md`. A test changes them, also from a hook that
+/// runs while the pass is between the decision and the lock.
+type Hook = Arc<dyn Fn(&str, usize) + Send + Sync>;
+
+#[derive(Clone)]
+struct Script {
+    kernel: Arc<Mutex<String>>,
+    /// The answer of `losetup --list`.
+    loops: Arc<Mutex<Output>>,
+    /// The answers of `drbdadm dump-md`, in order; the last one repeats.
+    dump_md: Arc<Mutex<Vec<Output>>>,
+    dump_calls: Arc<AtomicUsize>,
+    loop_calls: Arc<AtomicUsize>,
+    /// Runs after the n-th (from 0) call of `"dump-md"` or `"losetup"` has been answered.
+    after: Arc<Mutex<Option<Hook>>>,
+}
+
+impl Script {
+    fn new(kernel: &str, dump_md: Output) -> Self {
+        Self {
+            kernel: Arc::new(Mutex::new(kernel.to_string())),
+            loops: Arc::new(Mutex::new(out(0, "", ""))),
+            dump_md: Arc::new(Mutex::new(vec![dump_md])),
+            dump_calls: Arc::new(AtomicUsize::new(0)),
+            loop_calls: Arc::new(AtomicUsize::new(0)),
+            after: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn no_metadata() -> Output {
+        out(255, "", crate::tests::P7_NO_METADATA_STDERR)
+    }
+
+    fn hold_loop(&self, image: &Path) {
+        *self.loops.lock().unwrap() = out(0, &format!("/dev/loop7 {} (deleted)\n", image.display()), "");
+    }
+
+    fn after(&self, hook: impl Fn(&str, usize) + Send + Sync + 'static) {
+        *self.after.lock().unwrap() = Some(Arc::new(hook));
+    }
+
+    fn runner(&self) -> FakeRunner {
+        let script = self.clone();
+        FakeRunner::new(move |program, args| {
+            let announce = |command: &str, n: usize| {
+                let hook = script.after.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook(command, n);
+                }
+            };
+            match (program, args) {
+                ("losetup", ["--list", ..]) => {
+                    let n = script.loop_calls.fetch_add(1, Ordering::SeqCst);
+                    let reply = script.loops.lock().unwrap().clone();
+                    announce("losetup", n);
+                    reply
+                }
+                ("drbdadm", ["dump-md", _]) => {
+                    let n = script.dump_calls.fetch_add(1, Ordering::SeqCst);
+                    let reply = {
+                        let answers = script.dump_md.lock().unwrap();
+                        answers[n.min(answers.len() - 1)].clone()
+                    };
+                    announce("dump-md", n);
+                    reply
+                }
+                ("drbdadm", ["down", _]) => {
+                    *script.kernel.lock().unwrap() = EMPTY_KERNEL.to_string();
+                    out(0, "", "")
+                }
+                ("drbdsetup", _) => out(0, &script.kernel.lock().unwrap(), ""),
+                _ => out(0, "", ""),
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Backing {
+    Absent,
+    /// A backing file without the ready marker; whether the synced marker exists.
+    Pending {
+        synced: bool,
+    },
+}
+
+/// A deleting `spike` on dv-1, with the backing file as `backing` says and
+/// the other nodes in `entries` having reported.
+async fn deleting_with(backing: Backing, script: &Script, entries: &[&str]) -> Env {
+    let e = env(DV1, script.runner());
+    prepare_copy(&e.paths, true, matches!(backing, Backing::Pending { synced: true }));
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    if matches!(backing, Backing::Absent) {
+        fs::remove_file(e.paths.image(VOLUME)).unwrap();
+    }
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    for node in entries {
+        e.volumes.set_entry(VOLUME, reported(node));
+    }
+    e.volumes.delete(VOLUME).await.unwrap();
+    e
+}
+
+fn assert_copy_kept(e: &Env, reason: &str) {
+    assert!(
+        commands(&e.runner, &["drbdadm down", "losetup -d"]).is_empty(),
+        "{:?}",
+        e.runner.calls()
+    );
+    assert!(e.paths.res_file(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the reason is in the status");
+    assert!(entry.message.contains(reason), "{reason:?} not in {:?}", entry.message);
+}
+
+fn assert_copy_removed(e: &Env) {
+    assert!(!e.paths.image(VOLUME).exists());
+    assert!(!e.paths.res_file(VOLUME).exists());
+    assert!(!e.paths.synced_marker(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME), [replica_finalizer(DV2)]);
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+}
+
+/// dv-3 is connected and Secondary; dv-2 is connected with the role `dv2_role`.
+fn calm_kernel(dv2_role: &str) -> String {
+    kernel_peers(
+        "Secondary",
+        &[(DV2, "Connected", dv2_role), (DV3, "Connected", "Secondary")],
+    )
+}
+
+async fn pending_with_metadata_is_removed_without_the_peer_checks(dump_md: Output) {
+    // The resource is not configured and dv-2 has an entry and is not
+    // connected: the peer checks would keep a copy with data.
+    let script = Script::new(EMPTY_KERNEL, dump_md);
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[DV2]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert!(!commands(&e.runner, &["drbdadm dump-md"]).is_empty(), "the proof ran");
+}
+
+#[tokio::test]
+async fn a_pending_file_without_the_synced_marker_and_without_metadata_is_removed_without_the_peer_checks() {
+    pending_with_metadata_is_removed_without_the_peer_checks(Script::no_metadata()).await;
+}
+
+#[tokio::test]
+async fn a_pending_file_without_the_synced_marker_and_with_fresh_metadata_is_removed_without_the_peer_checks() {
+    pending_with_metadata_is_removed_without_the_peer_checks(out(0, FRESH_DUMP, "")).await;
+}
+
+#[tokio::test]
+async fn a_pending_file_with_the_synced_marker_is_kept() {
+    // The synced marker says the file held data; the metadata check would say "absent".
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Pending { synced: true }, &script, &[]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "synced marker");
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.paths.synced_marker(VOLUME).exists());
+}
+
+#[tokio::test]
+async fn a_pending_file_with_used_metadata_is_kept() {
+    let script = Script::new(EMPTY_KERNEL, out(0, USED_DUMP, ""));
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "already holds DRBD metadata");
+    assert!(e.paths.image(VOLUME).exists());
+}
+
+#[tokio::test]
+async fn a_pending_file_whose_metadata_cannot_be_checked_is_kept() {
+    // `dump-md` needs the resource file, the device link and an attached loop
+    // device; when one is missing it fails, which proves nothing.
+    let script = Script::new(EMPTY_KERNEL, out(10, "", "'spike' not defined in your config"));
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "not defined in your config");
+    assert!(e.paths.image(VOLUME).exists());
+}
+
+#[tokio::test]
+async fn a_pending_file_under_a_configured_resource_with_a_primary_peer_is_kept() {
+    // DRBD holds the disk: whatever the file marker says, the peer checks decide.
+    let script = Script::new(&calm_kernel("Primary"), Script::no_metadata());
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "peer lima-dv-2 is Primary");
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(commands(&e.runner, &["drbdadm dump-md"]).is_empty());
+}
+
+#[tokio::test]
+async fn a_pending_file_under_a_configured_resource_is_deleted_by_the_peer_checks() {
+    let script = Script::new(&calm_kernel("Secondary"), Script::no_metadata());
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[DV2]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert_eq!(commands(&e.runner, &["drbdadm down"]), ["drbdadm down spike"]);
+    assert!(commands(&e.runner, &["drbdadm dump-md"]).is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_file_under_a_configured_resource_with_a_primary_peer_is_kept() {
+    // The loop device of the deleted file still serves the disk.
+    let script = Script::new(&calm_kernel("Primary"), Script::no_metadata());
+    let e = deleting_with(Backing::Absent, &script, &[]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "peer lima-dv-2 is Primary");
+    assert!(commands(&e.runner, &["losetup"]).is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_file_under_a_configured_resource_is_deleted_by_the_peer_checks() {
+    let script = Script::new(&calm_kernel("Secondary"), Script::no_metadata());
+    let e = deleting_with(Backing::Absent, &script, &[DV2]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert_eq!(commands(&e.runner, &["drbdadm down"]), ["drbdadm down spike"]);
+}
+
+#[tokio::test]
+async fn a_missing_file_that_a_loop_device_still_holds_is_kept() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Absent, &script, &[]).await;
+    script.hold_loop(&e.paths.image(VOLUME));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "the backing file is gone but a loop device still holds it");
+    assert!(fs::symlink_metadata(e.paths.device_link(VOLUME)).is_ok());
+}
+
+#[tokio::test]
+async fn a_missing_file_that_no_loop_device_holds_is_removed_without_the_peer_checks() {
+    // Another file's loop device is not this file's. dv-2 has an entry and is
+    // not connected: the peer checks would keep the copy.
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    *script.loops.lock().unwrap() = out(0, "/dev/loop3 /var/lib/other/volume.img\n", "");
+    let e = deleting_with(Backing::Absent, &script, &[DV2]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert!(!commands(&e.runner, &["losetup --list"]).is_empty(), "the proof ran");
+}
+
+#[tokio::test]
+async fn a_missing_file_whose_loop_devices_cannot_be_listed_is_kept() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    *script.loops.lock().unwrap() = out(1, "", "losetup: cannot open /dev/loop-control");
+    let e = deleting_with(Backing::Absent, &script, &[]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "cannot open /dev/loop-control");
+}
+
+// The guard re-establishes every fact of a "no data" row under the lock.
+
+#[tokio::test]
+async fn a_synced_marker_that_appears_before_the_lock_stops_the_removal() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+    let marker = e.paths.synced_marker(VOLUME);
+    // The first `dump-md` is the last step of the proof before the lock.
+    script.after(move |command, n| {
+        if command == "dump-md" && n == 0 {
+            fs::write(&marker, "").unwrap();
+        }
+    });
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "synced marker");
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.paths.synced_marker(VOLUME).exists());
+}
+
+#[tokio::test]
+async fn a_resource_that_is_configured_before_the_lock_stops_the_removal() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+    let (kernel, up) = (script.kernel.clone(), calm_kernel("Secondary"));
+    script.after(move |command, n| {
+        if command == "dump-md" && n == 0 {
+            *kernel.lock().unwrap() = up.clone();
+        }
+    });
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "configured");
+    assert!(e.paths.image(VOLUME).exists());
+}
+
+#[tokio::test]
+async fn metadata_that_is_used_by_the_time_of_the_lock_stops_the_removal() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    script.dump_md.lock().unwrap().push(out(0, USED_DUMP, ""));
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "already holds DRBD metadata");
+    assert!(e.paths.image(VOLUME).exists());
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_loop_device_that_holds_the_file_by_the_time_of_the_lock_stops_the_removal() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = deleting_with(Backing::Absent, &script, &[]).await;
+    let (held, image) = (script.clone(), e.paths.image(VOLUME));
+    script.after(move |command, n| {
+        if command == "losetup" && n == 0 {
+            held.hold_loop(&image);
+        }
+    });
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_copy_kept(&e, "a loop device still holds it");
+    assert_eq!(script.loop_calls.load(Ordering::SeqCst), 2);
+}
+
+// ---- the removal of the status entry is verified (round 3) ----
+
+/// dv-3 holds nothing, the object is deleting and still shows the entries of
+/// dv-2 and dv-3: the removal of dv-3's entry is all that is left to do.
+async fn leftover_entry_of_a_witness() -> Env {
+    let e = env(DV3, fake_node());
+    e.volumes.put(spike("Done"));
+    e.volumes.set_entry(VOLUME, reported(DV2));
+    e.volumes.set_entry(VOLUME, reported(DV3));
+    e.volumes.delete(VOLUME).await.unwrap();
+    e
+}
+
+fn patches_of_the_status(volumes: &FakeVolumes) -> Vec<String> {
+    volumes
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("patch-status"))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_entry_that_survives_the_empty_apply_is_removed_with_a_patch() {
+    // Another field manager co-owns the entry: the empty apply leaves it.
+    let e = leftover_entry_of_a_witness().await;
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_none());
+    assert!(
+        e.volumes.entry_of(VOLUME, DV2).is_some(),
+        "the entry of another node stays"
+    );
+    assert_eq!(patches_of_the_status(&e.volumes), [format!("patch-status {VOLUME}")]);
+}
+
+#[tokio::test]
+async fn an_entry_that_the_empty_apply_removes_needs_no_patch() {
+    let e = leftover_entry_of_a_witness().await;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_none());
+    assert!(patches_of_the_status(&e.volumes).is_empty());
+}
+
+#[tokio::test]
+async fn an_entry_that_cannot_be_removed_keeps_the_pass_at_thirty_seconds() {
+    let e = leftover_entry_of_a_witness().await;
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+    e.volumes.fail_status_patch.store(true, Ordering::SeqCst);
+
+    let outcome = e.agent.reconcile_one(VOLUME).await;
+    assert_eq!(outcome.as_ref().unwrap(), &Outcome::Kept);
+    assert_eq!(settle(VOLUME, &outcome), Some(Duration::from_secs(30)));
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_some());
+    // One empty apply and one patch in a pass, not a loop.
+    assert_eq!(
+        patches_of_the_status(&e.volumes),
+        [format!("patch-status {VOLUME} failed")]
+    );
+    assert_eq!(e.volumes.status_writes().len(), 1);
+}
+
+#[tokio::test]
+async fn a_conflicting_status_patch_is_tried_again() {
+    let e = leftover_entry_of_a_witness().await;
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+    *e.volumes.conflicts.lock().unwrap() = 2;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_none());
+    assert_eq!(
+        patches_of_the_status(&e.volumes),
+        [
+            format!("patch-status {VOLUME} conflict"),
+            format!("patch-status {VOLUME} conflict"),
+            format!("patch-status {VOLUME}"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_status_patch_that_never_applies_gives_up_after_five_attempts() {
+    let e = leftover_entry_of_a_witness().await;
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+    *e.volumes.conflicts.lock().unwrap() = 99;
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(patches_of_the_status(&e.volumes).len(), 5);
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_some());
+}
+
+#[tokio::test]
+async fn the_status_patch_removes_the_entry_by_its_name_not_by_the_index_that_was_read() {
+    // Between the read and the patch the list is reordered: the index that was
+    // read now holds the entry of the other node, which must not be removed.
+    let volumes = FakeVolumes::default();
+    volumes.put(spike("Done"));
+    volumes.set_entry(VOLUME, reported(DV2));
+    volumes.set_entry(VOLUME, reported(DV3));
+    let uid = uid_of_object(&volumes, VOLUME);
+    let reorder = Changing {
+        inner: &volumes,
+        change: Box::new(|raw| raw["status"]["nodes"].as_array_mut().unwrap().reverse()),
+        once: AtomicBool::new(false),
+    };
+
+    let removed = patch_status_retrying(&reorder, VOLUME, &uid, &|o| remove_node_entry_ops(o, DV3)).await;
+    assert!(removed.unwrap());
+    assert!(volumes.entry_of(VOLUME, DV3).is_none());
+    assert!(volumes.entry_of(VOLUME, DV2).is_some());
+    assert!(volumes.calls().contains(&format!("patch-status {VOLUME} rejected")));
+}
+
+#[tokio::test]
+async fn the_status_patch_of_an_object_with_another_uid_changes_nothing() {
+    let volumes = FakeVolumes::default();
+    volumes.put(spike("Done"));
+    volumes.set_entry(VOLUME, reported(DV3));
+
+    assert!(!volumes.remove_node_entry(VOLUME, "another-uid", DV3).await.unwrap());
+    assert!(volumes.entry_of(VOLUME, DV3).is_some());
+    assert!(patches_of_the_status(&volumes).is_empty());
+}
+
+#[tokio::test]
+async fn a_deleted_copy_whose_entry_cannot_be_removed_keeps_its_finalizer_until_it_can() {
+    let kernel = Arc::new(Mutex::new(kernel_peers("Secondary", &secondary(DV2, DV3))));
+    let e = env(DV1, node_with_status(kernel, true));
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    e.volumes.set_entry(VOLUME, reported(DV1));
+    e.volumes.delete(VOLUME).await.unwrap();
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+    e.volumes.fail_status_patch.store(true, Ordering::SeqCst);
+
+    // The copy is removed, the entry stays: the finalizer stays with it.
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(!e.paths.image(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_some());
+
+    // Nothing is left on the node but the entry: still Kept, finalizer kept.
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+
+    // The API works again: the patch removes the entry, then the finalizer goes.
+    e.volumes.fail_status_patch.store(false, Ordering::SeqCst);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+    assert_eq!(e.volumes.finalizers(VOLUME), [replica_finalizer(DV2)]);
+}
+
+#[tokio::test]
+async fn a_deleted_copy_whose_entry_is_co_owned_ends_deleted() {
+    let kernel = Arc::new(Mutex::new(kernel_peers("Secondary", &secondary(DV2, DV3))));
+    let e = env(DV1, node_with_status(kernel, true));
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    e.volumes.set_entry(VOLUME, reported(DV1));
+    e.volumes.delete(VOLUME).await.unwrap();
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_deleted(&e);
+}
+
+#[tokio::test]
+async fn cleaning_leftovers_whose_entry_cannot_be_removed_is_kept() {
+    let e = env(DV3, fake_node());
+    e.volumes.put(spike("Done"));
+    e.volumes.set_entry(VOLUME, reported(DV3));
+    e.volumes.delete(VOLUME).await.unwrap();
+    fs::create_dir_all(&e.paths.res_dir).unwrap();
+    fs::write(e.paths.res_file(VOLUME), "resource spike {}").unwrap();
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+    e.volumes.fail_status_patch.store(true, Ordering::SeqCst);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(!e.paths.res_file(VOLUME).exists());
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_some());
+}
+
+#[tokio::test]
+async fn a_stray_finalizer_stays_while_the_entry_of_the_node_cannot_be_removed() {
+    // dv-3 is not a Replica but carries the finalizer, holds nothing and has an entry.
+    let e = env(DV3, fake_node());
+    let mut volume = spike("Done");
+    volume.metadata.finalizers = Some(vec![replica_finalizer(DV1), replica_finalizer(DV3)]);
+    e.volumes.put(volume);
+    e.volumes.set_entry(VOLUME, reported(DV3));
+    e.volumes.delete(VOLUME).await.unwrap();
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+    e.volumes.fail_status_patch.store(true, Ordering::SeqCst);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(e.volumes.finalizers(VOLUME).contains(&replica_finalizer(DV3)));
+}
+
+// ---- small items (round 3) ----
+
+#[tokio::test]
+async fn a_backing_file_state_that_cannot_be_read_keeps_the_copy() {
+    // The ready marker is a symbolic link to itself: `stat` fails with ELOOP.
+    // `local` does not look at the marker, so the pass reaches `delete_replica`.
+    // With the resource configured and the peers fine, a file state read as
+    // "absent" would let the peer checks delete the copy.
+    for kernel in [EMPTY_KERNEL.to_string(), calm_kernel("Secondary")] {
+        let e = env(DV1, node_with_status(Arc::new(Mutex::new(kernel.clone())), true));
+        prepare_copy(&e.paths, true, true);
+        fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+        std::os::unix::fs::symlink(e.paths.ready_marker(VOLUME), e.paths.ready_marker(VOLUME)).unwrap();
+        e.volumes.put(spike("Done"));
+        e.volumes.delete(VOLUME).await.unwrap();
+
+        let outcome = e.agent.reconcile_one(VOLUME).await;
+        assert_eq!(outcome.as_ref().unwrap(), &Outcome::Kept, "{kernel}");
+        assert_copy_kept(&e, "cannot inspect the backing file");
+        assert!(e.paths.image(VOLUME).exists());
+        assert!(commands(&e.runner, &["drbdadm", "losetup"]).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_name_with_no_object_and_nothing_local_is_not_queued_again() {
+    let e = env(DV1, fake_node());
+    assert_eq!(e.agent.reconcile_one("ghost").await.unwrap(), Outcome::Gone);
+
+    let queue = Arc::new(Queue::default());
+    queue.schedule("ghost", Instant::now());
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn({
+        let agent = e.agent.clone();
+        let queue = queue.clone();
+        let shutdown = shutdown.clone();
+        async move { agent.serve(&queue, &shutdown).await }
+    });
+    wait_for("the pass over the name", || {
+        e.volumes.calls().iter().filter(|c| *c == "get ghost").count() >= 2
+    })
+    .await;
+    assert!(
+        queue.due.lock().unwrap().is_empty(),
+        "{:?}",
+        queue.due.lock().unwrap().keys().collect::<Vec<_>>()
+    );
+
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+}
+
 // ---- reconcile_one: no object, not a member, refusals ----
 
 #[tokio::test]
@@ -1578,7 +2203,7 @@ async fn leftovers_without_an_object_are_cleaned() {
 
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert!(!e.paths.res_file(VOLUME).exists());
-    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Settled);
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Gone);
 }
 
 #[tokio::test]
@@ -1738,6 +2363,10 @@ async fn the_server_rejects_a_patch_when_the_uid_changed_after_the_read() {
         async fn patch(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
             self.inner.patch(name, ops).await
         }
+
+        async fn patch_status(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
+            self.inner.patch_status(name, ops).await
+        }
     }
     let volumes = FakeVolumes::default();
     volumes.put(spike("Skip"));
@@ -1771,6 +2400,10 @@ impl Objects for Changing<'_> {
 
     async fn patch(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
         self.inner.patch(name, ops).await
+    }
+
+    async fn patch_status(&self, name: &str, ops: Vec<Value>) -> Result<bool, ApiError> {
+        self.inner.patch_status(name, ops).await
     }
 }
 
@@ -1880,17 +2513,19 @@ async fn the_lock_of_a_volume_excludes_a_second_holder_but_not_another_volume() 
 
 #[test]
 fn the_delay_after_a_pass_depends_on_its_outcome() {
-    assert_eq!(settle("v", &Ok(Outcome::Progress)), Duration::from_secs(1));
-    assert_eq!(settle("v", &Ok(Outcome::Settled)), Duration::from_secs(30));
-    assert_eq!(settle("v", &Ok(Outcome::Kept)), Duration::from_secs(30));
+    assert_eq!(settle("v", &Ok(Outcome::Progress)), Some(Duration::from_secs(1)));
+    assert_eq!(settle("v", &Ok(Outcome::Settled)), Some(Duration::from_secs(30)));
+    assert_eq!(settle("v", &Ok(Outcome::Kept)), Some(Duration::from_secs(30)));
     assert_eq!(
         settle("v", &Ok(Outcome::Refused(Refusal::OrphanImage))),
-        Duration::from_secs(60)
+        Some(Duration::from_secs(60))
     );
     assert_eq!(
         settle("v", &Err(AgentError::Api(ApiError::Other("down".into())))),
-        Duration::from_secs(5)
+        Some(Duration::from_secs(5))
     );
+    // A name with no object and nothing local is not queued again.
+    assert_eq!(settle("v", &Ok(Outcome::Gone)), None);
 }
 
 #[test]
