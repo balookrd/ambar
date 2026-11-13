@@ -73,8 +73,11 @@ roleRef:
 # (the pinned release of the csi-provisioner image in daemonset.yaml). The
 # ClusterRole and Role are copied under other names and bound to the
 # ServiceAccount `ambar`. Left out, because the driver and the provisioner
-# flags in daemonset.yaml do not use them (no "forbidden" in the provisioner log
-# of the stand end-to-end check [not recorded]): volumesnapshots,
+# flags in daemonset.yaml do not use them (no "forbidden" in the logs of the
+# four agent pods after the stand end-to-end check at commit 245fc7b, recorded
+# in docs/superpowers/specs/2026-11-12-drbd9-spike-results.md, section "Запись
+# прогона на итоговом коммите фазы 2а"; the logs cover the time after the
+# agents were replaced by the check): volumesnapshots,
 # volumesnapshotcontents, volumeattachments, csistoragecapacities (no
 # --enable-capacity), pods and replicasets (capacity owner references). Add
 # them back when snapshots or capacity tracking are turned on.
