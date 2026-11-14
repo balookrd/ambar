@@ -86,7 +86,21 @@ bash -c 'source stand/lib.sh; tb dv-2 "/opt/ambar/load-module.sh"'
 ```
 
 Ресурсы DRBD, loop-устройства и вспомогательные скрипты проверок удаляет
-`stand/spike/clean.sh`. ВМ и их диски удаляет `stand/down.sh`.
+`stand/spike/clean.sh`.
+
+## Остановка и удаление стенда
+
+Остановить ВМ, сохранив диски и кластер:
+
+```bash
+for n in dv-1 dv-2 dv-3 dv-4; do limactl stop "$n"; done
+```
+
+Остановленные ВМ запускает `stand/up.sh` с тем же значением `NODES`.
+
+**Внимание.** `stand/down.sh` не останавливает, а удаляет ВМ вместе с дисками
+(`limactl delete --force`). После него стенд создаётся заново: `stand/up.sh`,
+`stand/k3s.sh`, `stand/install.sh`. Тома, существовавшие на стенде, теряются.
 
 ## Опыты перед CSI
 
