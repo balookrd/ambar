@@ -661,6 +661,14 @@ impl Agent {
                 None => Ok(Outcome::Settled),
             },
             Task::CleanDiskless => self.clean_diskless(volume, object.as_ref()).await,
+            Task::RetireReplica => {
+                log_info(volume, "retire replica not implemented yet");
+                Ok(Outcome::Kept)
+            }
+            Task::FinishRetire => {
+                log_info(volume, "finish retire not implemented yet");
+                Ok(Outcome::Kept)
+            }
             Task::Refuse(refusal) => {
                 log_error(volume, format!("refused: {refusal}"));
                 self.report_message(volume, object.as_ref(), &refusal.to_string())

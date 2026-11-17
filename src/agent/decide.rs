@@ -2,11 +2,16 @@
 //! server says about it and what the node holds locally, what should the node
 //! do. Pure: no API calls, no I/O, no commands.
 //!
-//! Data-safety rule (R10): `Task::DeleteReplica` is returned only when the
-//! object exists, is being deleted, this node is a `Replica` in it and this
-//! node's finalizer is still on it. `Task::CleanDiskless` is never returned
-//! for a node that has a backing file. Anything the table does not cover is
-//! `Refuse` or `Ignore`.
+//! Data-safety rules:
+//! - R10: `Task::DeleteReplica` is returned only when the object exists, is being
+//!   deleted, this node is a `Replica` or `Retiring` in it and this node's
+//!   finalizer is still on it.
+//! - `Task::RetireReplica` is returned only for an existing object that is not
+//!   being deleted, where this node is `Retiring` and this node's finalizer is
+//!   still on the object.
+//! - `Task::CleanDiskless` is never returned for a node that has a backing file.
+//!
+//! Anything the table does not cover is `Refuse` or `Ignore`.
 //!
 //! A node listed more than once in `spec.nodes` is `Refuse(InvalidSpec)`
 //! before any row below: which entry is "this node" is undefined, and the
@@ -58,6 +63,10 @@ pub enum Task {
     DropFinalizer,
     /// Remove what a node without a disk leaves behind (Reconciler::remove on a node with no image).
     CleanDiskless,
+    /// Retire this node's replica according to R26.
+    RetireReplica,
+    /// Clean up the node's record and finalizer after retiring.
+    FinishRetire,
     /// Do nothing and report: the state needs a human.
     Refuse(Refusal),
 }
@@ -70,6 +79,10 @@ pub enum Refusal {
     ImageWithoutMembership,
     /// The object is being deleted, this node is a Replica, but its finalizer is missing.
     DeletingWithoutFinalizer,
+    /// The node is Retiring but its finalizer is missing; the local copy is kept.
+    RetiringWithoutFinalizer,
+    /// This node is a Replica without its finalizer; no copy is created.
+    ReplicaWithoutFinalizer,
     Collision(Vec<String>),
     /// Error text of `CrdError`, or a description of what else is wrong with the spec.
     InvalidSpec(String),
@@ -84,6 +97,12 @@ impl fmt::Display for Refusal {
             }
             Self::DeletingWithoutFinalizer => {
                 f.write_str("the object is being deleted and this node's finalizer is missing, the local copy is kept")
+            }
+            Self::RetiringWithoutFinalizer => {
+                f.write_str("the node is Retiring but its finalizer is missing, the local copy is kept")
+            }
+            Self::ReplicaWithoutFinalizer => {
+                f.write_str("this node is a Replica without its finalizer; no copy is created")
             }
             Self::Collision(names) => write!(f, "minor or port collides with {}", names.join(", ")),
             Self::InvalidSpec(text) => write!(f, "invalid spec: {text}"),
@@ -126,7 +145,7 @@ pub fn decide(node: &str, volume: &str, object: Option<&ObjectView>, local: Loca
 
     // Object: being deleted.
     if object.deleting {
-        if kind == Some(NodeKind::Replica) {
+        if matches!(kind, Some(NodeKind::Replica | NodeKind::Retiring)) {
             let has_finalizer = object.finalizers.contains(&replica_finalizer(node));
             if has_finalizer {
                 // deleting / Replica, finalizer / image or traces -> DeleteReplica
@@ -156,6 +175,7 @@ pub fn decide(node: &str, volume: &str, object: Option<&ObjectView>, local: Loca
     }
 
     // Object: exists, not being deleted.
+    let has_finalizer = object.finalizers.contains(&replica_finalizer(node));
     match kind {
         None => {
             // exists / not a member / image -> Refuse(ImageWithoutMembership)
@@ -168,6 +188,18 @@ pub fn decide(node: &str, volume: &str, object: Option<&ObjectView>, local: Loca
         // exists / Witness or Client / image -> Refuse(ImageWithoutMembership)
         Some(NodeKind::Witness | NodeKind::Client) if local.image => {
             return Task::Refuse(Refusal::ImageWithoutMembership);
+        }
+        Some(NodeKind::Retiring) => {
+            // exists / Retiring / any finalizer / nothing -> FinishRetire
+            if !local.image && !local.traces {
+                return Task::FinishRetire;
+            }
+            // exists / Retiring / finalizer / image or traces -> RetireReplica
+            if has_finalizer {
+                return Task::RetireReplica;
+            }
+            // exists / Retiring / no finalizer / image or traces -> Refuse(RetiringWithoutFinalizer)
+            return Task::Refuse(Refusal::RetiringWithoutFinalizer);
         }
         Some(_) => {}
     }
@@ -182,6 +214,11 @@ pub fn decide(node: &str, volume: &str, object: Option<&ObjectView>, local: Loca
         Ok(spec) => spec,
         Err(err) => return Task::Refuse(Refusal::InvalidSpec(err.to_string())),
     };
+
+    // exists / Replica / no finalizer / no image -> Refuse(ReplicaWithoutFinalizer)
+    if kind == Some(NodeKind::Replica) && !has_finalizer && !local.image {
+        return Task::Refuse(Refusal::ReplicaWithoutFinalizer);
+    }
 
     // exists / member / - -> Apply
     let mark_done = spec.initial_sync == InitialSync::Skip

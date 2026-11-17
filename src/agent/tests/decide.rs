@@ -331,6 +331,84 @@ fn row_exists_member_applies_the_converted_spec() {
     assert!(!mark_done);
 }
 
+// --- retiring and replica finalizer checks (Task 5) -------------------------
+
+#[test]
+fn deleting_retiring_behaves_like_deleting_replica() {
+    let s = spec(Some("Retiring"));
+    assert_eq!(run(&s, true, &own_finalizer(), IMAGE), Task::DeleteReplica);
+    assert_eq!(run(&s, true, &own_finalizer(), TRACES), Task::DeleteReplica);
+    assert_eq!(run(&s, true, &own_finalizer(), NONE), Task::DropFinalizer);
+
+    assert_eq!(
+        run(&s, true, &[], IMAGE),
+        Task::Refuse(Refusal::DeletingWithoutFinalizer)
+    );
+    assert_eq!(run(&s, true, &[], TRACES), Task::CleanDiskless);
+    assert_eq!(run(&s, true, &[], NONE), Task::Ignore);
+}
+
+#[test]
+fn exists_retiring_with_finalizer_and_image_or_traces_retires() {
+    let s = spec(Some("Retiring"));
+    assert_eq!(run(&s, false, &own_finalizer(), IMAGE), Task::RetireReplica);
+    assert_eq!(run(&s, false, &own_finalizer(), TRACES), Task::RetireReplica);
+}
+
+#[test]
+fn exists_retiring_with_nothing_finishes_retire() {
+    let s = spec(Some("Retiring"));
+    assert_eq!(run(&s, false, &own_finalizer(), NONE), Task::FinishRetire);
+    assert_eq!(run(&s, false, &[], NONE), Task::FinishRetire);
+}
+
+#[test]
+fn exists_retiring_without_finalizer_and_image_or_traces_refuses() {
+    let s = spec(Some("Retiring"));
+    assert_eq!(
+        run(&s, false, &[], IMAGE),
+        Task::Refuse(Refusal::RetiringWithoutFinalizer)
+    );
+    assert_eq!(
+        run(&s, false, &[], TRACES),
+        Task::Refuse(Refusal::RetiringWithoutFinalizer)
+    );
+}
+
+#[test]
+fn exists_replica_without_finalizer_and_no_image_refuses() {
+    let s = spec(Some("Replica"));
+    assert_eq!(
+        run(&s, false, &[], NONE),
+        Task::Refuse(Refusal::ReplicaWithoutFinalizer)
+    );
+    assert_eq!(
+        run(&s, false, &[], TRACES),
+        Task::Refuse(Refusal::ReplicaWithoutFinalizer)
+    );
+}
+
+#[test]
+fn exists_replica_without_finalizer_and_image_applies() {
+    let s = spec(Some("Replica"));
+    assert!(matches!(run(&s, false, &[], IMAGE), Task::Apply { .. }));
+}
+
+#[test]
+fn exists_retiring_retires_despite_collision() {
+    let s = spec(Some("Retiring"));
+    let names = vec!["pvc-2".to_string()];
+    let object = ObjectView {
+        spec: &s,
+        deleting: false,
+        finalizers: &own_finalizer(),
+        collides_with: &names,
+    };
+    assert_eq!(decide(NODE, VOLUME, Some(&object), IMAGE), Task::RetireReplica);
+    assert_eq!(decide(NODE, VOLUME, Some(&object), TRACES), Task::RetireReplica);
+    assert_eq!(decide(NODE, VOLUME, Some(&object), NONE), Task::FinishRetire);
+}
+
 // --- mark_done ---------------------------------------------------------------
 
 /// The leader is the diskful node with the lowest node id.
