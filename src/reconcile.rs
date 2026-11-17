@@ -37,6 +37,10 @@
 //!
 //! Decision table of `plan`. "Copy" means the node holds a copy (`diskful`).
 //! `matches` is `status_matches_spec`; `applied` is `Observed::res_applied`.
+//! "Client" means `device.client` (the node is configured diskless).
+//! Rule 1 (`create-md` is never run under a configured resource) holds across
+//! a role change: `plan` emits `Down` first, so the resource is taken down
+//! before any step that touches metadata.
 //!
 //! Errors, checked first; nothing is planned when one applies:
 //!
@@ -44,20 +48,22 @@
 //! |---|---|
 //! | node not in the description | `NotAMember` |
 //! | copy, backing file without the ready marker, synced marker present | `ReadyMarkerLost` |
-//! | copy, backing file absent or without the ready marker, resource configured | `UninitialisedFileWithLiveResource` |
+//! | copy, resource configured, client, role `Primary` | `ConvertWhilePrimary` |
+//! | copy, backing file absent or without the ready marker, resource configured, not client | `UninitialisedFileWithLiveResource` |
 //!
 //! Otherwise the actions below are appended in this order:
 //!
 //! | Input | Actions |
 //! |---|---|
+//! | copy, resource configured, client, role not `Primary` | `Down` |
 //! | copy, ready or synced marker present while the image is absent | `ClearStaleMarkers` |
 //! | copy, no backing file | `CreateFile` |
 //! | copy, no loop device | `AttachLoop` |
 //! | copy, no loop device or the link points elsewhere | `LinkDevice` |
 //! | resource file differs from the rendered one | `WriteRes` |
 //! | copy, backing file without the ready marker | `CreateMd`, `MarkReady` |
-//! | resource not configured | `Up`, `MarkApplied` |
-//! | resource configured, and the file differs, or not `applied`, or not `matches` | `Adjust`, `MarkApplied` |
+//! | resource not configured, or `Down` was planned | `Up`, `MarkApplied` |
+//! | resource configured, `Down` was not planned, and the file differs, or not `applied`, or not `matches` | `Adjust`, `MarkApplied` |
 //!
 //! Only when the resource is configured, the file matches, it was applied,
 //! the status matches the description, the node holds a copy and nothing
@@ -88,7 +94,7 @@ use std::path::{Path, PathBuf};
 use crate::backing::{self, BackingError};
 use crate::drbd::adm::{Drbd, DrbdError, Metadata};
 use crate::drbd::resource;
-use crate::drbd::status::{DiskState, ResourceStatus};
+use crate::drbd::status::{DiskState, ResourceStatus, Role};
 use crate::exec::Runner;
 use crate::model::{InitialSync, SpecError, VolumeSpec, valid_volume_name};
 use crate::paths::Paths;
@@ -132,6 +138,7 @@ pub struct Observed {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    Down,
     ClearStaleMarkers,
     CreateFile { bytes: u64 },
     AttachLoop,
@@ -150,6 +157,11 @@ pub enum Action {
 pub enum PlanError {
     #[error("node {node:?} is not a member of volume {volume:?}")]
     NotAMember { node: String, volume: String },
+    #[error(
+        "volume {volume:?}: this node becomes a Replica but is Primary; the copy is created after the volume is \
+         unmounted here"
+    )]
+    ConvertWhilePrimary { volume: String },
     #[error(
         "volume {volume:?}: the backing file is missing or has no ready marker, but the resource is configured in the \
          kernel; metadata is never created under a configured resource. Check `drbdsetup status {volume}` and take the \
@@ -211,13 +223,25 @@ pub fn plan(spec: &VolumeSpec, node_name: &str, obs: &Observed) -> Result<Vec<Ac
             volume: spec.name.clone(),
         });
     }
-    if node.diskful && obs.file != FileState::Ready && obs.status.is_some() {
+    let is_client = obs.status.as_ref().and_then(|s| s.device()).is_some_and(|d| d.client);
+
+    if node.diskful && is_client {
+        if obs.status.as_ref().is_some_and(|s| s.role == Role::Primary) {
+            return Err(PlanError::ConvertWhilePrimary {
+                volume: spec.name.clone(),
+            });
+        }
+    } else if node.diskful && obs.file != FileState::Ready && obs.status.is_some() {
         return Err(PlanError::UninitialisedFileWithLiveResource {
             volume: spec.name.clone(),
         });
     }
 
     let mut actions = Vec::new();
+    if node.diskful && is_client {
+        actions.push(Action::Down);
+    }
+
     if node.diskful {
         if obs.stale_markers {
             actions.push(Action::ClearStaleMarkers);
@@ -243,36 +267,45 @@ pub fn plan(spec: &VolumeSpec, node_name: &str, obs: &Observed) -> Result<Vec<Ac
         actions.push(Action::MarkReady);
     }
 
-    match &obs.status {
-        None => {
-            actions.push(Action::Up);
-            actions.push(Action::MarkApplied);
-        }
-        Some(status) if !obs.res_matches || !obs.res_applied || !status_matches_spec(spec, node_name, status) => {
-            actions.push(Action::Adjust);
-            actions.push(Action::MarkApplied);
-        }
-        Some(status) if node.diskful && actions.is_empty() => {
-            let leader = spec.initial_sync_leader().is_some_and(|l| l.name == node_name);
-            let disk = status.device().map(|d| d.disk_state);
-            let peer_has_data = status.connections.iter().any(|c| {
-                c.peer_devices.iter().find(|p| p.volume == 0).is_some_and(|p| {
-                    matches!(
-                        p.peer_disk_state,
-                        DiskState::UpToDate | DiskState::Consistent | DiskState::Outdated
-                    )
-                })
-            });
-            if !obs.synced && leader && spec.initial_sync == InitialSync::Skip && status.ready_to_skip_initial_sync() {
-                actions.push(Action::SkipInitialSync);
-            } else if !obs.synced && (disk == Some(DiskState::UpToDate) || peer_has_data) {
-                // The volume has a data source: this copy is the one that
-                // holds data or receives it. The marker stops a later skip
-                // from declaring a partial copy identical to an empty one.
-                actions.push(Action::MarkSynced);
+    if node.diskful && is_client {
+        actions.push(Action::Up);
+        actions.push(Action::MarkApplied);
+    } else {
+        match &obs.status {
+            None => {
+                actions.push(Action::Up);
+                actions.push(Action::MarkApplied);
             }
+            Some(status) if !obs.res_matches || !obs.res_applied || !status_matches_spec(spec, node_name, status) => {
+                actions.push(Action::Adjust);
+                actions.push(Action::MarkApplied);
+            }
+            Some(status) if node.diskful && actions.is_empty() => {
+                let leader = spec.initial_sync_leader().is_some_and(|l| l.name == node_name);
+                let disk = status.device().map(|d| d.disk_state);
+                let peer_has_data = status.connections.iter().any(|c| {
+                    c.peer_devices.iter().find(|p| p.volume == 0).is_some_and(|p| {
+                        matches!(
+                            p.peer_disk_state,
+                            DiskState::UpToDate | DiskState::Consistent | DiskState::Outdated
+                        )
+                    })
+                });
+                if !obs.synced
+                    && leader
+                    && spec.initial_sync == InitialSync::Skip
+                    && status.ready_to_skip_initial_sync()
+                {
+                    actions.push(Action::SkipInitialSync);
+                } else if !obs.synced && (disk == Some(DiskState::UpToDate) || peer_has_data) {
+                    // The volume has a data source: this copy is the one that
+                    // holds data or receives it. The marker stops a later skip
+                    // from declaring a partial copy identical to an empty one.
+                    actions.push(Action::MarkSynced);
+                }
+            }
+            Some(_) => {}
         }
-        Some(_) => {}
     }
     Ok(actions)
 }
@@ -392,6 +425,12 @@ impl Reconciler<'_> {
             volume: volume.to_string(),
         };
         match action {
+            Action::Down => {
+                drbd.down(volume)?;
+                if drbd.status(volume)?.is_some() {
+                    return Err(not_applied("down"));
+                }
+            }
             Action::ClearStaleMarkers => {
                 remove_if_present(&self.paths.ready_marker(volume))?;
                 remove_if_present(&self.paths.synced_marker(volume))?;

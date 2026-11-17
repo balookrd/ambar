@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::backing::backing_file_bytes;
-use crate::drbd::status::{self, ConnectionState, DiskState};
+use crate::drbd::status::{self, ConnectionState, DiskState, Role};
 use crate::exec::Output;
 use crate::tests::{
     FakeRunner, P7_NO_METADATA_STDERR, THREE_INCONSISTENT, THREE_UPTODATE, configured_node, fake_node, fake_node_with,
@@ -479,6 +479,94 @@ fn a_copy_with_a_detached_disk_is_adjusted() {
         ..steady_on("lima-dv-3")
     };
     assert_eq!(plan(&spec(), "lima-dv-3", &obs).unwrap(), []);
+}
+
+fn with_client_device(node: &str, role: Role) -> ResourceStatus {
+    let mut status = seen_from(node, THREE_UPTODATE);
+    status.role = role;
+    let device = status.devices.iter_mut().find(|d| d.volume == 0).unwrap();
+    device.client = true;
+    device.disk_state = DiskState::Diskless;
+    status
+}
+
+#[test]
+fn convert_while_primary_is_an_error() {
+    for file in [FileState::Absent, FileState::Pending, FileState::Ready] {
+        let obs = Observed {
+            file,
+            synced: false,
+            status: Some(with_client_device("lima-dv-1", Role::Primary)),
+            ..steady_on("lima-dv-1")
+        };
+        assert_eq!(
+            plan(&spec(), "lima-dv-1", &obs),
+            Err(PlanError::ConvertWhilePrimary { volume: "spike".into() })
+        );
+    }
+}
+
+#[test]
+fn turn_diskless_into_copy_from_scratch() {
+    let bytes = backing_file_bytes(1_073_741_824, 7);
+    let obs = Observed {
+        status: Some(with_client_device("lima-dv-1", Role::Secondary)),
+        ..nothing_on_the_node()
+    };
+    assert_eq!(
+        plan(&spec(), "lima-dv-1", &obs).unwrap(),
+        [
+            Action::Down,
+            Action::CreateFile { bytes },
+            Action::AttachLoop,
+            Action::LinkDevice,
+            Action::WriteRes,
+            Action::CreateMd,
+            Action::MarkReady,
+            Action::Up,
+            Action::MarkApplied,
+        ]
+    );
+}
+
+#[test]
+fn turn_diskless_into_copy_with_ready_file() {
+    let obs = Observed {
+        file: FileState::Ready,
+        loop_device: None,
+        link_target: None,
+        res_matches: false,
+        res_applied: false,
+        status: Some(with_client_device("lima-dv-1", Role::Secondary)),
+        ..nothing_on_the_node()
+    };
+    assert_eq!(
+        plan(&spec(), "lima-dv-1", &obs).unwrap(),
+        [
+            Action::Down,
+            Action::AttachLoop,
+            Action::LinkDevice,
+            Action::WriteRes,
+            Action::Up,
+            Action::MarkApplied,
+        ]
+    );
+}
+
+#[test]
+fn detached_disk_copy_is_not_treated_as_client() {
+    for file in [FileState::Absent, FileState::Pending] {
+        let obs = Observed {
+            file,
+            synced: false,
+            status: with_local_disk("lima-dv-1", DiskState::Diskless),
+            ..steady()
+        };
+        assert_eq!(
+            plan(&spec(), "lima-dv-1", &obs),
+            Err(PlanError::UninitialisedFileWithLiveResource { volume: "spike".into() })
+        );
+    }
 }
 
 // ---- status_matches_spec ----
@@ -1926,4 +2014,108 @@ fn an_atomic_write_does_not_create_a_missing_directory() {
     let err = write_atomically(&paths.ready_marker("spike"), "").unwrap_err();
     assert!(matches!(err, ReconcileError::Io { action: "create", .. }), "{err}");
     assert!(!paths.volumes_dir.exists());
+}
+
+#[test]
+fn turn_diskless_into_copy_executes_down_before_create_md() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    let attached = Arc::new(AtomicBool::new(false));
+    let up = Arc::new(AtomicBool::new(true));
+    let runner = FakeRunner::new({
+        let attached = attached.clone();
+        let up = up.clone();
+        move |program, args| match (program, args) {
+            ("losetup", ["-j", _]) if attached.load(Ordering::SeqCst) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+            ("losetup", ["--find", ..]) => {
+                attached.store(true, Ordering::SeqCst);
+                out(0, "/dev/loop7\n", "")
+            }
+            ("drbdadm", ["down", "spike"]) => {
+                up.store(false, Ordering::SeqCst);
+                out(0, "", "")
+            }
+            ("drbdadm", ["dump-md", "spike"]) => out(255, "", P7_NO_METADATA_STDERR),
+            ("drbdadm", ["create-md", ..]) => out(0, "", ""),
+            ("drbdadm", ["up", "spike"]) => {
+                up.store(true, Ordering::SeqCst);
+                out(0, "", "")
+            }
+            ("drbdadm", ["new-current-uuid", ..]) => out(0, "", ""),
+            ("drbdsetup", _) if up.load(Ordering::SeqCst) && attached.load(Ordering::SeqCst) => {
+                out(0, THREE_UPTODATE, "")
+            }
+            ("drbdsetup", _) if up.load(Ordering::SeqCst) => {
+                let client_status = THREE_UPTODATE
+                    .replacen("\"client\": false", "\"client\": true", 1)
+                    .replacen("\"disk-state\": \"UpToDate\"", "\"disk-state\": \"Diskless\"", 1);
+                out(0, &client_status, "")
+            }
+            ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
+            _ => out(0, "", ""),
+        }
+    });
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let bytes = backing_file_bytes(1_073_741_824, 7);
+    let done = reconciler.apply(&spec(), "lima-dv-1").unwrap();
+    assert_eq!(
+        done,
+        [
+            Action::Down,
+            Action::CreateFile { bytes },
+            Action::AttachLoop,
+            Action::LinkDevice,
+            Action::WriteRes,
+            Action::CreateMd,
+            Action::MarkReady,
+            Action::Up,
+            Action::MarkApplied,
+            Action::MarkSynced,
+        ]
+    );
+
+    let calls = runner.calls();
+    let down_pos = calls
+        .iter()
+        .position(|c| c == "drbdadm down spike")
+        .expect("down called");
+    let dump_pos = calls
+        .iter()
+        .position(|c| c == "drbdadm dump-md spike")
+        .expect("dump-md called");
+    let create_pos = calls
+        .iter()
+        .position(|c| c.starts_with("drbdadm create-md"))
+        .expect("create-md called");
+    let up_pos = calls.iter().position(|c| c == "drbdadm up spike").expect("up called");
+
+    assert!(down_pos < dump_pos, "down must precede dump-md");
+    assert!(dump_pos < create_pos, "dump-md must precede create-md");
+    assert!(create_pos < up_pos, "create-md must precede up");
+    assert!(paths.ready_marker("spike").exists());
+}
+
+#[test]
+fn down_without_effect_is_an_error() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    let runner = configured_node(Arc::new(Mutex::new(THREE_UPTODATE.to_string())));
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+    };
+    let mut loop_dev = None;
+    let err = reconciler
+        .execute(&spec(), "lima-dv-1", &Action::Down, &mut loop_dev)
+        .unwrap_err();
+    assert!(
+        matches!(&err, ReconcileError::NotApplied { command: "down", volume } if volume == "spike"),
+        "{err}"
+    );
+    assert_eq!(runner.calls(), ["drbdadm down spike", "drbdsetup status --json"]);
 }
