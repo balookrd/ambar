@@ -6728,6 +6728,3747 @@ OK: stand is up
 
 На трёх узлах `drbdsetup status` — `# No currently configured DRBD found.`, `losetup -l -n | wc -l` = 0, `/dev/ambar` и `/mnt/pa` отсутствуют, в `/var/tmp` только `cloud-init` и каталог `systemd-private-…`. После опытов P10 на `dv-1`: `drbdsetup status` — `# No currently configured DRBD found.`, `/dev/ambar` и `/var/lib/rancher/ambar/volumes` пусты, `stand/check.sh` — `OK: stand is up` (остальные узлы не смотрелись `[проверить: dv-2, dv-3 после P10]`).
 
+## Опыты перед сменой набора копий (P11–P14)
+
+Дата: 2026-11-17. Стенд: четыре ВМ Lima (`dv-1`..`dv-4`), ядро `6.12.116+deb13-arm64`, DRBD 9.3.4, drbd-utils 9.35.0 (версии те же, что в фазе 2а). Опыты выполняет скрипт `stand/spike/pre-2b.sh <p11|p12|p13|p14|clean>`: файлы томов и метаданных изолированы в `/var/lib/rancher/ambar-exp/{volumes,res}` и `/dev/ambar-exp`, выполнение команд идёт в поде `toolbox` пространства имён `ambar-spike` через `stand/lib.sh`. Драйвер `ambar` в пространстве имён `ambar-system`, его DaemonSet и CRD не затрагиваются; томов `ReplicatedVolume` на стенде нет. Перед каждым опытом и после него скрипт выполняет очистку (`cleanup`). Файлы конфигурации ресурсов содержат `options { quorum majority; on-no-quorum io-error; auto-promote yes; }`.
+
+| Опыт | Условия | Команда | Код возврата | Вывод | Прогонов |
+|---|---|---|---|---|---|
+| P11 (1) | `dv-1`, `dv-2` с копией (1 ГиБ), писатель на `dv-1`, `dv-3` поднят без диска | `drbdadm create-md --force --max-peers=7 p11` на `dv-3` | 0 | `New drbd meta data block successfully created.`; устройство backing_dev не занято ядром в режиме Diskless; статус остаётся `Diskless client:yes` | 2 |
+| P11 (2) | то же | `drbdadm down p11` на `dv-3` | 0 | на `dv-1` и `dv-2` связь с `dv-3` переходит в `Connecting role:Unknown`, `peer-disk:DUnknown`, `quorum:yes` сохраняется | 2 |
+| P11 (3) | после `down` на `dv-3` | `create-md` и `up` на `dv-3` | 0, 0 | метаданные подтверждены (`--force`), ресурс поднят на `dv-3` | 2 |
+| P11 (4) | порядок 1: смена роли на `dv-3` первой, затем на `dv-1`, `dv-2` записан `p11.res` с диском на `dv-3` | `drbdadm adjust p11` на `dv-1` и `dv-2` | 0, 0 | `dv-1` переводит репликацию с `dv-3` в `SyncSource`, `dv-3` — `Inconsistent`; ресинхронизация началась | 2 |
+| P11 (5) | опрос `drbdsetup status` на `dv-3` до `UpToDate` | опрос каждые 5 с | 0 | полная синхронизация 1 ГиБ: 88 с (прогон 1), 75 с (прогон 2); `out-of-sync` снизился до 0, `disk:UpToDate` | 2 |
+| P11 (6) | остановка писателя на `dv-1` | сравнение подтверждённого номера и номера на томе | — | `acked=34526 on-volume=34527` (прогон 1), `acked=40508 on-volume=40509` (прогон 2); запись не прерывалась, `quorum:yes` непрерывно во время всей смены роли и синхронизации | 2 |
+| P11 (7) | порядок 2 (независимые агенты): `adjust` на `dv-1`, `dv-2` пока `dv-3` без диска; затем `down`, `create-md`, `up` на `dv-3` | `adjust` на пирах, затем `down`/`create-md`/`up` на `dv-3` | все 0 | `dv-3` соединяется и переходит в `UpToDate` за 75 с; оба порядка команд функционально эквивалентны | 2 |
+| P12 (1) | три копии `p12` (1 ГиБ), писатель на `dv-1`; уход `dv-3` | `drbdadm down p12` на `dv-3` | 0 | на `dv-1` и `dv-2` связь с `dv-3` `Connecting/Outdated`, `quorum:yes` сохраняется непрерывно (2 из 3 копий на месте) | 1 |
+| P12 (2) | `p12.res` без `dv-3` на `dv-1` и `dv-2` | `drbdadm adjust p12` на `dv-1`, `dv-2` | 0, 0 | пир `lima-dv-3` удалён из статуса обоих узлов; `quorum:yes` сохраняется, писатель не останавливался | 1 |
+| P12 (3) | `dv-1` после ухода `dv-3` (`node-id` 2) | `drbdsetup forget-peer p12 2`, дважды подряд | 0, 0 | stdout и stderr пусты при обоих вызовах; команда идемпотентна | 1 |
+| P12 (4) | `dv-2` | `drbdsetup forget-peer p12 5` (узла 5 не было в метаданных) | 0 | stdout и stderr пусты; код возврата 0 | 1 |
+| P12 (5) | остановка писателя на `dv-1` | сравнение номеров | — | `acked=23484 on-volume=23485` | 1 |
+| P12 (6a) | обратный порядок: уход стороны без диска (`dv-4`); `adjust` на `dv-1` и `dv-2` без `dv-4`, пока `dv-4` поднят | `drbdadm adjust p12` на `dv-1`, `dv-2` | 0, 0 | на `dv-1` и `dv-2` секция `dv-4` удалена; на `dv-4` связи перешли в `Connecting/DUnknown`, `quorum:no` | 1 |
+| P12 (6b) | снятие `dv-4` после отключения пиров | `drbdadm down p12` на `dv-4` | 0 | ресурс остановлен; последующий статус даёт код 10 (ресурс не существует); писатель `acked=6979 on-volume=6980` | 1 |
+| P13 (1) | `--max-peers=1`, уход `dv-2` без `forget-peer`; добавление `dv-3` (`node-id` 2) | `drbdadm adjust p13` на `dv-1` | 1 | отказ: в dmesg `drbd p13/0 drbd1013 lima-dv-3: Not enough free bitmap slots`; слот остался занят ушедшим `dv-2`; `dv-3` остался `Inconsistent` (`out-of-sync:1048508`) | 1 |
+| P13 (2) | `--max-peers=1`, уход `dv-2` с `drbdsetup forget-peer p13 1` на `dv-1`; добавление `dv-3` | `drbdadm adjust p13` на `dv-1` | 0 | в dmesg `Setting and writing one bitmap slot, after forget-peer`; слот освобождён; ресинхронизация прошла успешно до `UpToDate` | 1 |
+| P13 (3) | сверка данных после `forget-peer` и синхронизации | `dd ... \| sha256sum` первых 64 МиБ на `dv-1` и `dv-3` | 0, 0 | хэши совпали: `abc698ca27e9875612391be953337219270cbf8090a14a76a64e5ad7caca6770` | 1 |
+| P14 (w) | со свидетелем (`dv-4` без диска): копии `dv-1`, `dv-2` (4 ГиБ, 2 ГиБ данных, писатель); добавление `dv-3`; при `dv-3 Inconsistent` — `down` на `dv-2` | `drbdsetup status` на `dv-1` во время падения `dv-2` | 0 | `quorum:yes` непрерывно сохраняется на `dv-1` (соединён с `dv-3 Inconsistent` и `dv-4 Diskless`, 3 из 4 участников); писатель пишет без ошибок; после `up` на `dv-2` все копии возвращаются в `UpToDate` | 2 |
+| P14 (wo) | без свидетеля: копии `dv-1`, `dv-2` (4 ГиБ, 2 ГиБ данных, писатель); добавление `dv-3`; при `dv-3 Inconsistent` — `down` на `dv-2` | `drbdsetup status` на `dv-1` во время падения `dv-2` | 0 | `quorum:yes` непрерывно сохраняется на `dv-1` (соединён с `dv-3 Inconsistent`, 2 из 3 участников на связи удовлетворяют большинству); писатель пишет без ошибок; после `up` на `dv-2` все копии возвращаются в `UpToDate` | 2 |
+
+### Выводы по результатам опытов
+
+- **P11 (смена роли «без диска → с копией»):**
+  1. Вызов `drbdadm create-md` на узле, где ресурс поднят без диска (`Diskless`), завершается успешно (код 0), поскольку в бездисковом режиме блочное устройство не занято ядром. Однако применение диска требует перезапуска ресурса на узле (`down` и последующий `up`).
+  2. Полная синхронизация тома на добавляемом узле при активном писателе на Primary проходит без сбоев. Для 1 ГиБ время синхронизации составило 88 с в первом прогоне и 75 с во втором.
+  3. Запись на Primary не прерывалась ни на одном этапе (номера `acked` и `on-volume` расходятся ровно на единицу последнего незавершённого блока).
+  4. Кворум на первичном узле (`quorum:yes`) сохранялся непрерывно в обоих порядках применения.
+  5. Команда `drbdadm adjust` на существующих узлах необходима для уведомления ядра о появлении диска у пира и перевода связи в режим синхронизации.
+  6. Оба порядка команд («сначала узел меняет роль на дисковую, затем остальные выполняют `adjust`» и «сначала остальные выполняют `adjust`, пока узел работает без диска, затем узел перезапускается с диском») работают стабильно и приводят узел к состоянию `UpToDate`.
+
+- **P12 (уход узла):**
+  1. При отключении одной из трёх сторон с копией первичный узел сохраняет кворум (`quorum:yes`) как до выполнения `adjust` на оставшихся узлах, так и после него.
+  2. Команда `drbdsetup forget-peer <resource> <node-id>` завершается с кодом 0 и не выводит текста в stdout/stderr. Она идемпотентна: повторный вызов для того же узла и вызов для несуществующего `node-id` также возвращают код 0 без сообщений.
+  3. При уходе стороны без диска выполнение `adjust` на оставшихся узлах отключает пир; сам узел без диска переходит в статус `Connecting/DUnknown` с `quorum:no` и корректно останавливается последующим `drbdadm down` (код 0).
+
+- **P13 (слоты битовой карты):**
+  1. При ограничении числа слотов (`--max-peers=1`) вывод узла из конфигурации без вызова `forget-peer` оставляет слот битовой карты занятым. Попытка подключить новый узел с другим `node-id` завершается ошибкой `adjust` (код 1) с записью в системный журнал `Not enough free bitmap slots`, ресинхронизация не происходит.
+  2. Вызов `drbdsetup forget-peer` освобождает слот в метаданных (`Setting and writing one bitmap slot, after forget-peer`), после чего новый узел успешно подключается и синхронизируется.
+  3. Контрольные суммы SHA-256 (64 МиБ данных) на первичном узле и на новом синхронизированном узле полностью идентичны (`abc698ca27e9875612391be953337219270cbf8090a14a76a64e5ad7caca6770`).
+
+- **P14 (кворум при синхронизирующейся копии):**
+  1. Копия в состоянии `Inconsistent` учитывается модулем DRBD как участник кворума (подключённый узел).
+  2. Первичный узел сохраняет кворум и не прерывает запись при падении второй копии как в конфигурации со свидетелем (3 из 4 участников на связи), так и в конфигурации без свидетеля (2 из 3 участников на связи: Primary + Inconsistent). В обоих случаях запись продолжалась без ошибок ввода-вывода.
+
+### Отклонения и правки скрипта
+
+| Место | Что произошло |
+|---|---|
+| P14, вариант без свидетеля (первый запуск) | При синхронизации тома 4 ГиБ с отключением и возвратом соседа время ожидания превысило начальный лимит функции `wait_status` (600 с), скрипт завершился по таймауту. Лимит ожидания в `stand/spike/pre-2b.sh` был увеличен до 1200 с. Повторный запуск варианта без свидетеля (`P14_VARIANTS=0 stand/spike/pre-2b.sh p14`) прошёл успешно в обоих прогонах (код возврата 0). |
+
+### P11. Сторона без диска становится стороной с копией
+
+Ресурс `p11`: `dv-1`, `dv-2` с копией (1 ГиБ), `dv-3` без диска, port 7011, minor 1011.
+
+```bash
+stand/spike/pre-2b.sh p11
+```
+
+```text
+### P11 run 1: dv-3 changes first, then adjust on dv-1 and dv-2
+$ [dv-1] drbdadm create-md --force --max-peers=7 p11
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p11
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p11
+rc=0
+$ [dv-2] drbdadm up p11
+rc=0
+$ [dv-3] drbdadm up p11
+rc=0
+wait: dv-1: 2 connections Connected after 2 s at most
+wait: dv-2: 2 connections Connected after 2 s at most
+wait: dv-3: 2 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p11/0
+rc=0
+$ [dv-1] drbdsetup status p11 --verbose
+p11 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1011
+rc=0
+19:48:50.269
+1244
+started
+
+### P11 run 1, step 1: create-md on dv-3 while the resource runs without a disk there
+@ 19:48:53.121 create-md on the running diskless resource
+$ [dv-3] drbdadm create-md --force --max-peers=7 p11
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdsetup status p11 --verbose
+p11 node-id:2 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1011 disk:Diskless client:yes backing_dev:none quorum:yes open:no
+      blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+
+### P11 run 1, step 2: down on dv-3, status of dv-1 and dv-2
+@ 19:48:55.726 down on dv-3
+$ [dv-3] drbdadm down p11
+rc=0
+$ [dv-1] drbdsetup status p11 --verbose
+p11 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:yes blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p11 --verbose
+p11 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+
+### P11 run 1, step 3: create-md and up on dv-3
+@ 19:49:02.666 create-md on dv-3 after down
+$ [dv-3] drbdadm create-md --force --max-peers=7 p11
+
+You want me to create a v09 style flexible-size internal meta data block.
+There appears to be a v09 flexible-size internal meta data block
+already in place on /dev/ambar-exp/p11 at byte offset 1073737728
+
+Do you really want to overwrite the existing meta-data?
+*** confirmation forced via --force option ***
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p11
+rc=0
+@ 19:49:05.026 up on dv-3 (UP_T0)
+
+### P11 run 1, step 4: p11.res with a disk on dv-3 on dv-1 and dv-2, adjust
+@ 19:49:06.496 adjust on dv-1
+$ [dv-1] drbdadm adjust p11
+rc=0
+$ [dv-2] drbdadm adjust p11
+rc=0
+$ [dv-1] drbdsetup status p11 --verbose --statistics
+p11 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:yes
+      size:1048316 read:104429 written:155364 al-writes:9 bm-writes:128 upper-pending:2
+      lower-pending:3 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:24 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:122476 out-of-sync:0 pending:2 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:9.87
+        resync-suspended:no
+        received:0 sent:103424 out-of-sync:944892 pending:0 unacked:1 dbdt1:20.75 eta:44
+
+rc=0
+$ [dv-2] drbdsetup status p11 --verbose --statistics
+p11 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:159448 al-writes:10 bm-writes:125 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:126552 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:PausedSyncS peer-disk:Inconsistent done:8.21
+        resync-suspended:peer
+        received:0 sent:0 out-of-sync:962300 pending:0 unacked:0 dbdt1:17.13 eta:55
+
+rc=0
+$ [dv-3] drbdsetup status p11 --verbose --statistics
+p11 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:209920 al-writes:0 bm-writes:72 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncTarget peer-disk:UpToDate done:20.02 resync-suspended:no
+        received:209920 sent:0 out-of-sync:838396 pending:1 unacked:0 dbdt1:29.83 eta:27
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:PausedSyncT peer-disk:UpToDate done:12.89
+        resync-suspended:dependency
+        received:0 sent:0 out-of-sync:913148 pending:0 unacked:0 dbdt1:21.91 eta:41
+
+rc=0
+
+### P11 run 1, step 5: wait for UpToDate on dv-3
+t+12 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:26.26 resync-suspended:no
+  received:275456 sent:0 out-of-sync:773508 pending:8 unacked:0 dbdt1:34.08 eta:22
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:18.75
+  received:0 sent:0 out-of-sync:851712 pending:0 unacked:0 dbdt1:26.10 eta:32
+t+19 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:44.15 resync-suspended:no
+  received:470024 sent:0 out-of-sync:594688 pending:9 unacked:0 dbdt1:26.67 eta:22
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:36.69
+  received:0 sent:0 out-of-sync:671488 pending:0 unacked:0 dbdt1:26.96 eta:24
+t+25 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:44.39 resync-suspended:no
+  received:472608 sent:0 out-of-sync:592104 pending:5 unacked:0 dbdt1:0.42 eta:1373
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:37.07
+  received:0 sent:0 out-of-sync:667392 pending:0 unacked:0 dbdt1:18.89 eta:35
+t+31 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:48.87 resync-suspended:no
+  received:520320 sent:0 out-of-sync:544392 pending:5 unacked:0 dbdt1:1.82 eta:293
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:41.71
+  received:0 sent:0 out-of-sync:618240 pending:0 unacked:0 dbdt1:16.05 eta:38
+t+37 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:55.40 resync-suspended:no
+  received:589824 sent:0 out-of-sync:474904 pending:6 unacked:0 dbdt1:6.06 eta:77
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:47.89
+  received:0 sent:0 out-of-sync:552704 pending:0 unacked:0 dbdt1:14.99 eta:36
+t+44 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:59.53 resync-suspended:no
+  received:633856 sent:0 out-of-sync:430880 pending:1 unacked:0 dbdt1:10.48 eta:40
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:51.75
+  received:0 sent:0 out-of-sync:511744 pending:0 unacked:0 dbdt1:13.44 eta:37
+t+50 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:73.67 resync-suspended:no
+  received:784448 sent:0 out-of-sync:280300 pending:9 unacked:0 dbdt1:19.48 eta:14
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:66.04
+  received:0 sent:0 out-of-sync:360192 pending:0 unacked:0 dbdt1:14.86 eta:24
+t+56 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:74.45 resync-suspended:no
+  received:792752 sent:0 out-of-sync:272008 pending:5 unacked:0 dbdt1:0.40 eta:662
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:66.81
+  received:0 sent:0 out-of-sync:352000 pending:0 unacked:0 dbdt1:13.21 eta:26
+t+62 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:84.68 resync-suspended:no
+  received:901696 sent:0 out-of-sync:163080 pending:6 unacked:0 dbdt1:25.55 eta:6
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:77.24
+  received:0 sent:0 out-of-sync:241408 pending:0 unacked:0 dbdt1:13.70 eta:17
+t+69 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:89.53 resync-suspended:no
+  received:953344 sent:0 out-of-sync:111448 pending:8 unacked:0 dbdt1:11.52 eta:9
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:81.87
+  received:0 sent:0 out-of-sync:192256 pending:0 unacked:0 dbdt1:13.14 eta:14
+t+75 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:92.38 resync-suspended:no
+  received:983688 sent:0 out-of-sync:81120 pending:6 unacked:0 dbdt1:1.67 eta:47
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:84.96
+  received:0 sent:0 out-of-sync:159488 pending:0 unacked:0 dbdt1:12.39 eta:13
+t+82 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:98.67 resync-suspended:no
+  received:1050632 sent:0 out-of-sync:14180 pending:2 unacked:0 dbdt1:12.78 eta:1
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:91.50
+  received:0 sent:0 out-of-sync:90112 pending:0 unacked:0 dbdt1:12.21 eta:7
+t+88 s [dv-3]
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  received:1071460 sent:0 out-of-sync:0 pending:0 unacked:1
+  volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  received:0 sent:0 out-of-sync:72660 pending:0 unacked:0
+UpToDate on dv-3: t+88 s after the mark (poll step 5 s plus the call latency)
+$ [dv-1] drbdsetup status p11 --verbose --statistics
+p11 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:yes
+      size:1048316 read:1070329 written:579168 al-writes:10 bm-writes:223
+      upper-pending:1 lower-pending:2 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:546276 out-of-sync:0 pending:1 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:1086380 out-of-sync:4 pending:1 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p11 --verbose --statistics
+p11 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:582764 al-writes:11 bm-writes:206 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:549872 sent:0 out-of-sync:0 pending:0 unacked:1
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:71132 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p11 --verbose --statistics
+p11 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:1093428 al-writes:5 bm-writes:190 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:1093432 sent:0 out-of-sync:0 pending:0 unacked:1
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:69632 pending:0 unacked:0
+
+rc=0
+
+### P11 run 1, step 6: stop the writer, quorum log, kernel logs
+@ 19:50:40.685 stop the writer
+acked=34526 on-volume=34527
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=225 probe=alive:R=15 probe=alive:S=210 longest-gap-without-new-acked=0.6s (from 19:50:22.092)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+19:48:51.782 - 19:50:41.541  "quorum": true  x110
+--- dmesg -T | grep 'drbd p11' | tail -n 80 [dv-1]
+[Tue Nov 17 19:48:37 2026] drbd p11/0 drbd1011: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:48:42 2026] drbd p11: Preparing cluster-wide state change 1425730800: 0->all role( Primary )
+[Tue Nov 17 19:48:42 2026] drbd p11: State change 1425730800: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:48:42 2026] drbd p11: Committing cluster-wide state change 1425730800 (0ms)
+[Tue Nov 17 19:48:42 2026] drbd p11: role( Secondary -> Primary ) [mkfs.ext4:170684 auto-promote]
+[Tue Nov 17 19:48:42 2026] drbd p11/0 drbd1011: gen-obligation: NONE -> ARMED(promoted)
+[Tue Nov 17 19:48:42 2026] drbd p11/0 drbd1011: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:48:42 2026] drbd p11/0 drbd1011: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:48:42 2026] drbd p11: Preparing cluster-wide state change 1077584153: 0->all role( Secondary )
+[Tue Nov 17 19:48:42 2026] drbd p11: State change 1077584153: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:48:42 2026] drbd p11: Committing cluster-wide state change 1077584153 (0ms)
+[Tue Nov 17 19:48:42 2026] drbd p11: role( Primary -> Secondary ) [mkfs.ext4:170684 auto-demote]
+[Tue Nov 17 19:48:43 2026] drbd p11: Preparing cluster-wide state change 2208671943: 0->all role( Primary )
+[Tue Nov 17 19:48:43 2026] drbd p11: State change 2208671943: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:48:43 2026] drbd p11: Committing cluster-wide state change 2208671943 (0ms)
+[Tue Nov 17 19:48:43 2026] drbd p11: role( Secondary -> Primary ) [mount:170709 auto-promote]
+[Tue Nov 17 19:48:43 2026] drbd p11/0 drbd1011: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 19:48:43 2026] drbd p11/0 drbd1011: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:48:43 2026] drbd p11/0 drbd1011: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:48:54 2026] drbd p11: Preparing remote state change 2277214307: 2->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Committing remote state change 2277214307 (primary_nodes=1)
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 19:48:54 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Connection closed
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Restarting receiver thread
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:48:54 2026] drbd p11: Preparing remote state change 4255602590: 2->1 conn( Disconnecting )
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-2: Committing remote state change 4255602590 (primary_nodes=1)
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:49:03 2026] drbd p11: Preparing cluster-wide state change 590312596: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:49:03 2026] drbd p11/0 drbd1011 lima-dv-3: The peer is configured to be diskless but presents Inconsistent
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: conn( Connecting -> Disconnecting )
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: error receiving P_STATE, e: -5 l: 0!
+[Tue Nov 17 19:49:03 2026] drbd p11: Aborting cluster-wide state change 590312596 (12ms) rv = -21
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Failure to connect: Interrupted state change (-21); retrying
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:49:03 2026] drbd p11: Preparing remote state change 3042428756: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: Aborting remote state change 3042428756
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Connection closed
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Terminating receiver thread
+[Tue Nov 17 19:49:03 2026] drbd p11: Preparing remote state change 1767100898: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: Aborting remote state change 1767100898
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: Former intentional diskless peer got bitmap slot 1
+[Tue Nov 17 19:49:05 2026] drbd p11 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:49:05 2026] drbd p11 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 19:49:05 2026] drbd p11 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:49:05 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:49:05 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:49:05 2026] drbd p11: Preparing cluster-wide state change 1875635909: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: self 3F9C373A6A3CE662:0000000000000000:0000000000000000:0000000000000000 bits:8445 flags:120
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 19:49:05 2026] drbd p11: State change 1875635909: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:49:05 2026] drbd p11: Committing cluster-wide state change 1875635909 (16ms)
+[Tue Nov 17 19:49:05 2026] drbd p11 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) replication( yes -> no ) [connected]
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: repl( WFBitMapS -> SyncSource ) [receive-bitmap]
+[Tue Nov 17 19:49:05 2026] drbd p11/0 drbd1011 lima-dv-3: Began resync as SyncSource (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:49:07 2026] drbd p11: Preparing remote state change 1944363446: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-2: Committing remote state change 1944363446 (primary_nodes=1)
+[Tue Nov 17 19:49:18 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:50:28 2026] drbd p11/0 drbd1011 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-3: Resync done (total 84 sec; paused 0 sec; 12728 K/sec)
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 19:50:39 2026] drbd p11: Preparing cluster-wide state change 1203004661: 0->all role( Secondary )
+[Tue Nov 17 19:50:39 2026] drbd p11: State change 1203004661: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:50:39 2026] drbd p11: Committing cluster-wide state change 1203004661 (0ms)
+[Tue Nov 17 19:50:39 2026] drbd p11: role( Primary -> Secondary ) [umount:210966 auto-demote]
+[Tue Nov 17 19:50:39 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( UpToDate -> Outdated ) [peer-state]
+[Tue Nov 17 19:50:39 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Outdated -> Inconsistent ) resync-susp( no -> peer ) replication( yes -> no ) [peer-state]
+--- dmesg -T | grep 'drbd p11' | tail -n 80 [dv-2]
+[Tue Nov 17 19:48:42 2026] drbd p11: Preparing remote state change 1425730800: 0->all role( Primary )
+[Tue Nov 17 19:48:42 2026] drbd p11 lima-dv-1: Committing remote state change 1425730800 (primary_nodes=1)
+[Tue Nov 17 19:48:42 2026] drbd p11 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:48:42 2026] drbd p11: Preparing remote state change 1077584153: 0->all role( Secondary )
+[Tue Nov 17 19:48:42 2026] drbd p11 lima-dv-1: Committing remote state change 1077584153 (primary_nodes=0)
+[Tue Nov 17 19:48:42 2026] drbd p11 lima-dv-1: peer( Primary -> Secondary ) [remote]
+[Tue Nov 17 19:48:43 2026] drbd p11: Preparing remote state change 2208671943: 0->all role( Primary )
+[Tue Nov 17 19:48:43 2026] drbd p11 lima-dv-1: Committing remote state change 2208671943 (primary_nodes=1)
+[Tue Nov 17 19:48:43 2026] drbd p11 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:48:54 2026] drbd p11: Preparing remote state change 2277214307: 2->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Committing remote state change 2277214307 (primary_nodes=1)
+[Tue Nov 17 19:48:54 2026] drbd p11: Preparing remote state change 4255602590: 2->1 conn( Disconnecting )
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Committing remote state change 4255602590 (primary_nodes=1)
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 19:48:54 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Connection closed
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: Restarting receiver thread
+[Tue Nov 17 19:48:54 2026] drbd p11 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:49:03 2026] drbd p11: Preparing remote state change 590312596: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-1: Aborting remote state change 590312596
+[Tue Nov 17 19:49:03 2026] drbd p11: Preparing cluster-wide state change 3042428756: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:03 2026] drbd p11: Aborting cluster-wide state change 3042428756 (0ms) rv = -19
+[Tue Nov 17 19:49:03 2026] drbd p11: Preparing cluster-wide state change 1767100898: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:03 2026] drbd p11/0 drbd1011 lima-dv-3: The peer is configured to be diskless but presents Inconsistent
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: conn( Connecting -> Disconnecting )
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: error receiving P_STATE, e: -5 l: 0!
+[Tue Nov 17 19:49:03 2026] drbd p11: Aborting cluster-wide state change 1767100898 (16ms) rv = -21
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Failure to connect: Interrupted state change (-21); retrying
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Connection closed
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-3: Terminating receiver thread
+[Tue Nov 17 19:49:06 2026] drbd p11: Preparing remote state change 1875635909: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-1: Committing remote state change 1875635909 (primary_nodes=1)
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-3: Former intentional diskless peer got bitmap slot 1
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:49:07 2026] drbd p11: Preparing cluster-wide state change 1944363446: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: self 3F9C373A6A3CE662:0000000000000000:0000000000000000:0000000000000000 bits:8445 flags:100
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: peer 3F9C373A6A3CE662:B765FD18B0608F6D:0000000000000000:0000000000000000 bits:245695 flags:1804
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: uuid_compare()=no-sync by rule=lost-quorum
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: strategy = source-set-bitmap due to disk states. (UpToDate/Inconsistent)
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: updated bitmap UUID 3F9C373A6A3CE662:3F9C373A6A3CE662:0000000000000000:0000000000000000
+[Tue Nov 17 19:49:07 2026] drbd p11: State change 1944363446: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:49:07 2026] drbd p11: Committing cluster-wide state change 1944363446 (20ms)
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) resync-susp( no -> peer ) replication( yes -> no ) [connected]
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: repl( WFBitMapS -> PausedSyncS ) [receive-bitmap]
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-3: Began resync as PausedSyncS (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:49:18 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:50:29 2026] drbd p11/0 drbd1011 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-3: updated UUIDs 3F9C373A6A3CE662:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-3: Resync done (total 82 sec; paused 0 sec; 12932 K/sec)
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-3: expected n_oos:18166 to be 0
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( PausedSyncS -> Established ) [resync-finished]
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-3: resync-susp( peer -> no ) [peer-state]
+[Tue Nov 17 19:50:40 2026] drbd p11: Preparing remote state change 1203004661: 0->all role( Secondary )
+[Tue Nov 17 19:50:40 2026] drbd p11 lima-dv-1: Committing remote state change 1203004661 (primary_nodes=0)
+[Tue Nov 17 19:50:40 2026] drbd p11 lima-dv-1: peer( Primary -> Secondary ) [remote]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: strategy = source-use-bitmap to reconcile equal-UUID peers holding out-of-sync bits
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: Becoming WFBitMapS after unstable
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( UpToDate -> Consistent ) repl( Established -> WFBitMapS ) [after-unstable]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Consistent -> Outdated ) [peer-state]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 27(1), total 27; compression: 100.0%
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 27(1), total 27; compression: 100.0%
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Outdated -> Inconsistent ) repl( WFBitMapS -> SyncSource ) replication( yes -> no ) [receive-bitmap]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-3: Began resync as SyncSource (will sync 69632 KB [17408 bits set]).
+--- dmesg -T | grep 'drbd p11' | tail -n 80 [dv-3]
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-1: Connection closed
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-1: conn( NetworkFailure -> Unconnected ) [disconnected]
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-1: Restarting receiver thread
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:49:03 2026] drbd p11: Preparing remote state change 1767100898: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:03 2026] drbd p11/0 drbd1011 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 19:49:03 2026] drbd p11/0 drbd1011 lima-dv-2: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:49:03 2026] drbd p11/0 drbd1011 lima-dv-2: peer 3F9C373A6A3CE662:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:100
+[Tue Nov 17 19:49:03 2026] drbd p11/0 drbd1011 lima-dv-2: uuid_compare()=target-set-bitmap by rule=just-created-self
+[Tue Nov 17 19:49:03 2026] drbd p11/0 drbd1011 lima-dv-2: Setting and writing the whole bitmap, fresh node
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: meta connection shut down by peer.
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: conn( Connecting -> NetworkFailure )
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: meta connection shut down by peer.
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: sock was shut down by peer
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: Terminating sender thread
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: Aborting remote state change 1767100898 commit not possible
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: Connection closed
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: conn( NetworkFailure -> Unconnected ) [disconnected]
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 19:49:03 2026] drbd p11 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-1: Handshake to peer 0 successful: Agreed network protocol version 125
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-1: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:49:06 2026] drbd p11: Preparing remote state change 1875635909: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: drbd_sync_handshake:
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: peer 3F9C373A6A3CE662:0000000000000000:0000000000000000:0000000000000000 bits:8445 flags:1120
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: uuid_compare()=target-set-bitmap by rule=just-created-self
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: Setting and writing the whole bitmap, fresh node
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-1: Committing remote state change 1875635909 (primary_nodes=1)
+[Tue Nov 17 19:49:06 2026] drbd p11 lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Primary ) [remote]
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011: quorum( no -> yes ) [remote]
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: pdsk( DUnknown -> UpToDate ) repl( Off -> WFBitMapT ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011: Resumed AL updates
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011: Setting exposed data uuid: 3F9C373A6A3CE662
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-2: resync-susp( no -> connection dependency ) [receive-bitmap]
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: repl( WFBitMapT -> SyncTarget ) [receive-bitmap]
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011 lima-dv-1: Began resync as SyncTarget (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:49:06 2026] drbd p11/0 drbd1011: Bitmap UUID for initial resync: B765FD18B0608F6D
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:49:07 2026] drbd p11: Preparing remote state change 1944363446: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: self 3F9C373A6A3CE662:B765FD18B0608F6D:0000000000000000:0000000000000000 bits:245695 flags:4
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: peer 3F9C373A6A3CE662:0000000000000000:0000000000000000:0000000000000000 bits:8445 flags:100
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: uuid_compare()=no-sync by rule=lost-quorum
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: strategy = target-set-bitmap due to disk states. (Inconsistent/UpToDate)
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-2: Committing remote state change 1944363446 (primary_nodes=1)
+[Tue Nov 17 19:49:07 2026] drbd p11 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: pdsk( DUnknown -> UpToDate ) repl( Off -> WFBitMapT ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: repl( WFBitMapT -> PausedSyncT ) [receive-bitmap]
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011 lima-dv-2: Began resync as PausedSyncT (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:49:07 2026] drbd p11/0 drbd1011: Bitmap UUID for initial resync: B723253920811A9A
+[Tue Nov 17 19:49:18 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:50:29 2026] drbd p11/0 drbd1011 lima-dv-2: peer_replication( no -> yes ) [enable-peer-replication]
+[Tue Nov 17 19:50:29 2026] drbd p11/0 drbd1011 lima-dv-1: peer_replication( no -> yes ) [enable-peer-replication]
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-1: Resync done (total 84 sec; paused 0 sec; 12728 K/sec)
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-1: updated UUIDs 3F9C373A6A3CE662:0000000000000000:1AF6148E57588A3E:0000000000000000
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011: disk( Inconsistent -> UpToDate ) [resync-finished]
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-2: repl( PausedSyncT -> Established ) resync-susp( connection dependency -> no ) [resync-finished]
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-1: repl( SyncTarget -> Established ) [resync-finished]
+[Tue Nov 17 19:50:30 2026] drbd p11/0 drbd1011 lima-dv-1: Sync source can not get this write, postponing it towards the writer
+[Tue Nov 17 19:50:40 2026] drbd p11: Preparing remote state change 1203004661: 0->all role( Secondary )
+[Tue Nov 17 19:50:40 2026] drbd p11 lima-dv-1: Committing remote state change 1203004661 (primary_nodes=0)
+[Tue Nov 17 19:50:40 2026] drbd p11 lima-dv-1: peer( Primary -> Secondary ) [remote]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-2: strategy = target-use-bitmap to reconcile equal-UUID peers holding out-of-sync bits
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-2: Becoming WFBitMapT after unstable
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011: disk( UpToDate -> Outdated ) [after-unstable]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-2: repl( Established -> WFBitMapT ) [after-unstable]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-2: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 27(1), total 27; compression: 100.0%
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-2: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 27(1), total 27; compression: 100.0%
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011: disk( Outdated -> Inconsistent ) [receive-bitmap]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-2: repl( WFBitMapT -> SyncTarget ) peer_replication( yes -> no ) [receive-bitmap]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-1: resync-susp( no -> connection dependency ) peer_replication( yes -> no ) [receive-bitmap]
+[Tue Nov 17 19:50:40 2026] drbd p11/0 drbd1011 lima-dv-2: Began resync as SyncTarget (will sync 69632 KB [17408 bits set]).
+P11 run 1 result: dv-3 UpToDate=1
+
+### P11 run 2: adjust on dv-1 and dv-2 first, then dv-3 changes
+$ [dv-1] drbdadm create-md --force --max-peers=7 p11
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p11
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p11
+rc=0
+$ [dv-2] drbdadm up p11
+rc=0
+$ [dv-3] drbdadm up p11
+rc=0
+wait: dv-1: 2 connections Connected after 2 s at most
+wait: dv-2: 2 connections Connected after 2 s at most
+wait: dv-3: 2 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p11/0
+rc=0
+$ [dv-1] drbdsetup status p11 --verbose
+p11 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1011
+rc=0
+19:51:48.737
+2199
+started
+
+### P11 run 2, step 1: p11.res with a disk on dv-3 on dv-1 and dv-2, adjust while dv-3 runs without a disk
+@ 19:51:51.817 adjust on dv-1
+$ [dv-1] drbdadm adjust p11
+rc=0
+$ [dv-2] drbdadm adjust p11
+rc=0
+$ [dv-1] drbdsetup status p11 --verbose --statistics
+p11 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:yes
+      size:1048316 read:1005 written:138496 al-writes:9 bm-writes:63 upper-pending:1
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:105604 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:no
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:33780 pending:0 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p11 --verbose --statistics
+p11 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:144960 al-writes:10 bm-writes:63 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:112064 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:no
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:33784 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p11 --verbose --statistics
+p11 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:none
+  volume:0 minor:1011 disk:Diskless client:yes backing_dev:none quorum:yes open:no
+      size:1048316 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+@ 19:52:02.661 state after adjust
+
+### P11 run 2, step 2: down on dv-3, status of dv-1 and dv-2
+@ 19:52:02.779 down on dv-3
+$ [dv-3] drbdadm down p11
+rc=0
+$ [dv-1] drbdsetup status p11 --verbose
+p11 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:yes blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p11 --verbose
+p11 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+
+rc=0
+
+### P11 run 2, step 3: create-md and up on dv-3
+@ 19:52:10.096 create-md on dv-3 after down
+$ [dv-3] drbdadm create-md --force --max-peers=7 p11
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p11
+rc=0
+@ 19:52:12.630 up on dv-3 (UP_T0)
+$ [dv-1] drbdsetup status p11 --verbose --statistics
+p11 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:yes
+      size:1048316 read:10733 written:231184 al-writes:9 bm-writes:122 upper-pending:1
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:198288 out-of-sync:0 pending:1 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:0.93
+        resync-suspended:no
+        received:0 sent:9728 out-of-sync:1038600 pending:0 unacked:1 dbdt1:2.66 eta:381
+
+rc=0
+$ [dv-2] drbdsetup status p11 --verbose --statistics
+p11 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:238940 al-writes:11 bm-writes:121 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:206048 sent:0 out-of-sync:0 pending:0 unacked:1
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:PausedSyncS peer-disk:Inconsistent done:0.78
+        resync-suspended:peer
+        received:0 sent:0 out-of-sync:1040136 pending:0 unacked:0 dbdt1:1.79 eta:568
+
+rc=0
+$ [dv-3] drbdsetup status p11 --verbose --statistics
+p11 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:10248 al-writes:0 bm-writes:58 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncTarget peer-disk:UpToDate done:0.98 resync-suspended:no
+        received:10248 sent:0 out-of-sync:1038080 pending:5 unacked:0 dbdt1:1.79 eta:566
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:PausedSyncT peer-disk:UpToDate done:0.78
+        resync-suspended:dependency
+        received:0 sent:0 out-of-sync:1040136 pending:0 unacked:0 dbdt1:1.45 eta:699
+
+rc=0
+
+### P11 run 2, step 5: wait for UpToDate on dv-3
+t+7 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:3.32 resync-suspended:no
+  received:34816 sent:0 out-of-sync:1013512 pending:0 unacked:0 dbdt1:7.17 eta:138
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:3.13
+  received:0 sent:0 out-of-sync:1015560 pending:0 unacked:0 dbdt1:4.96 eta:200
+t+13 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:6.54 resync-suspended:no
+  received:68528 sent:0 out-of-sync:979800 pending:7 unacked:0 dbdt1:0.92 eta:1040
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:6.25
+  received:0 sent:0 out-of-sync:982792 pending:0 unacked:0 dbdt1:5.02 eta:191
+t+19 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:10.96 resync-suspended:no
+  received:114880 sent:0 out-of-sync:933448 pending:6 unacked:0 dbdt1:12.01 eta:76
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:10.94
+  received:0 sent:0 out-of-sync:933640 pending:0 unacked:0 dbdt1:5.95 eta:153
+t+26 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:11.30 resync-suspended:no
+  received:118480 sent:0 out-of-sync:929848 pending:3 unacked:0 dbdt1:0.24 eta:3735
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:10.94
+  received:0 sent:0 out-of-sync:933640 pending:0 unacked:0 dbdt1:4.47 eta:204
+t+32 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:27.04 resync-suspended:no
+  received:283648 sent:0 out-of-sync:765336 pending:8 unacked:0 dbdt1:17.58 eta:43
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:26.57
+  received:0 sent:0 out-of-sync:769808 pending:0 unacked:0 dbdt1:8.66 eta:87
+t+38 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:42.41 resync-suspended:no
+  received:451584 sent:0 out-of-sync:613132 pending:8 unacked:0 dbdt1:16.00 eta:37
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:42.09
+  received:0 sent:0 out-of-sync:614156 pending:0 unacked:0 dbdt1:11.22 eta:53
+t+45 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:68.57 resync-suspended:no
+  received:730112 sent:0 out-of-sync:334616 pending:8 unacked:0 dbdt1:42.86 eta:8
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:67.97
+  received:0 sent:0 out-of-sync:339724 pending:0 unacked:0 dbdt1:15.74 eta:21
+t+51 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:72.50 resync-suspended:no
+  received:771904 sent:0 out-of-sync:292840 pending:10 unacked:0 dbdt1:1.91 eta:150
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:71.83
+  received:0 sent:0 out-of-sync:298764 pending:0 unacked:0 dbdt1:14.62 eta:20
+t+57 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:80.69 resync-suspended:no
+  received:859136 sent:0 out-of-sync:205620 pending:0 unacked:0 dbdt1:18.15 eta:11
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:79.94
+  received:0 sent:0 out-of-sync:212748 pending:0 unacked:0 dbdt1:14.51 eta:14
+t+63 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:98.65 resync-suspended:no
+  received:1050380 sent:0 out-of-sync:14396 pending:1 unacked:0 dbdt1:27.08 eta:1
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:98.07
+  received:0 sent:0 out-of-sync:20480 pending:0 unacked:0 dbdt1:16.09 eta:1
+t+69 s [dv-3]
+  volume:0 minor:1011 disk:Inconsistent backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:SyncTarget peer-disk:UpToDate done:99.95 resync-suspended:no
+  received:1085524 sent:0 out-of-sync:532 pending:0 unacked:0 dbdt1:0.52 eta:1
+  volume:0 replication:PausedSyncT peer-disk:UpToDate done:99.31
+  received:0 sent:0 out-of-sync:7408 pending:0 unacked:0 dbdt1:14.81 eta:0
+t+75 s [dv-3]
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+  volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  received:1112424 sent:0 out-of-sync:0 pending:0 unacked:0
+  volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+UpToDate on dv-3: t+75 s after the mark (poll step 5 s plus the call latency)
+$ [dv-1] drbdsetup status p11 --verbose --statistics
+p11 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:yes
+      size:1048316 read:1081565 written:674636 al-writes:10 bm-writes:216
+      upper-pending:2 lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:16 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:641740 out-of-sync:0 pending:2 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:16 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:1132460 out-of-sync:4 pending:2 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p11 --verbose --statistics
+p11 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:678576 al-writes:11 bm-writes:203 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:645680 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p11 --verbose --statistics
+p11 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1011 disk:UpToDate backing_dev:/dev/ambar-exp/p11 quorum:yes
+      open:no
+      size:1048316 read:0 written:1140208 al-writes:6 bm-writes:178 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:1140212 sent:0 out-of-sync:0 pending:0 unacked:1
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+
+### P11 run 2, step 6: stop the writer, quorum log, kernel logs
+@ 19:53:35.432 stop the writer
+acked=40508 on-volume=40509
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=219 probe=alive:R=15 probe=alive:S=204 longest-gap-without-new-acked=0.6s (from 19:52:07.784)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+19:51:50.194 - 19:53:36.800  "quorum": true  x107
+--- dmesg -T | grep 'drbd p11' | tail -n 80 [dv-1]
+[Tue Nov 17 19:51:28 2026] drbd p11/0 drbd1011 lima-dv-2: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:51:28 2026] drbd p11/0 drbd1011: Resumed AL updates
+[Tue Nov 17 19:51:29 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:51:29 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:51:29 2026] drbd p11: Preparing cluster-wide state change 763770148: 0->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:51:29 2026] drbd p11/0 drbd1011 lima-dv-3: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:0
+[Tue Nov 17 19:51:29 2026] drbd p11/0 drbd1011 lima-dv-3: peer's exposed UUID: 0000000000000000
+[Tue Nov 17 19:51:29 2026] drbd p11: State change 763770148: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:51:29 2026] drbd p11: Committing cluster-wide state change 763770148 (20ms)
+[Tue Nov 17 19:51:29 2026] drbd p11 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:51:29 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:51:29 2026] drbd p11: Preparing remote state change 3926141265: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:51:29 2026] drbd p11 lima-dv-2: Committing remote state change 3926141265 (primary_nodes=0)
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011 lima-dv-2: Preparing to skip initial sync
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011: Bitmap UUID for initial resync: E0B8AA77D93AE54C
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011: new current UUID: 92A73866FF86CC7E weak: FFFFFFFFFFFFFFFD
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011 lima-dv-3: cleared bitmap UUID 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011 lima-dv-2: cleared bitmap UUID 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011: disk( Inconsistent -> UpToDate ) [new-c-uuid]
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011 lima-dv-2: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [new-c-uuid]
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:51:41 2026] drbd p11: Preparing cluster-wide state change 728516217: 0->all role( Primary )
+[Tue Nov 17 19:51:41 2026] drbd p11: State change 728516217: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:51:41 2026] drbd p11: Committing cluster-wide state change 728516217 (0ms)
+[Tue Nov 17 19:51:41 2026] drbd p11: role( Secondary -> Primary ) [mkfs.ext4:215067 auto-promote]
+[Tue Nov 17 19:51:41 2026] drbd p11/0 drbd1011: gen-obligation: NONE -> ARMED(promoted)
+[Tue Nov 17 19:51:41 2026] drbd p11/0 drbd1011: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:51:41 2026] drbd p11/0 drbd1011: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:51:41 2026] drbd p11: Preparing cluster-wide state change 1523522869: 0->all role( Secondary )
+[Tue Nov 17 19:51:41 2026] drbd p11: State change 1523522869: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:51:41 2026] drbd p11: Committing cluster-wide state change 1523522869 (0ms)
+[Tue Nov 17 19:51:41 2026] drbd p11: role( Primary -> Secondary ) [mkfs.ext4:215067 auto-demote]
+[Tue Nov 17 19:51:41 2026] drbd p11: Preparing cluster-wide state change 597684032: 0->all role( Primary )
+[Tue Nov 17 19:51:41 2026] drbd p11: State change 597684032: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:51:41 2026] drbd p11: Committing cluster-wide state change 597684032 (0ms)
+[Tue Nov 17 19:51:41 2026] drbd p11: role( Secondary -> Primary ) [mount:215091 auto-promote]
+[Tue Nov 17 19:51:41 2026] drbd p11/0 drbd1011: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 19:51:41 2026] drbd p11/0 drbd1011: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:51:41 2026] drbd p11/0 drbd1011: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:51:50 2026] drbd p11/0 drbd1011 lima-dv-3: Former intentional diskless peer got bitmap slot 1
+[Tue Nov 17 19:51:57 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:52:01 2026] drbd p11: Preparing remote state change 1491530933: 2->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: Committing remote state change 1491530933 (primary_nodes=1)
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 19:52:01 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: Connection closed
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: Restarting receiver thread
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:52:01 2026] drbd p11: Preparing remote state change 1079172654: 2->1 conn( Disconnecting )
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-2: Committing remote state change 1079172654 (primary_nodes=1)
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:52:10 2026] drbd p11: Preparing cluster-wide state change 940763327: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: self 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000 bits:8451 flags:2120
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 19:52:10 2026] drbd p11: State change 940763327: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:52:10 2026] drbd p11: Committing cluster-wide state change 940763327 (12ms)
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) replication( yes -> no ) [connected]
+[Tue Nov 17 19:52:10 2026] drbd p11: Preparing remote state change 1889604076: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: repl( WFBitMapS -> SyncSource ) [receive-bitmap]
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011 lima-dv-3: Began resync as SyncSource (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-2: Aborting remote state change 1889604076
+[Tue Nov 17 19:52:10 2026] drbd p11: Preparing remote state change 2456370903: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-2: Committing remote state change 2456370903 (primary_nodes=1)
+[Tue Nov 17 19:53:18 2026] drbd p11/0 drbd1011 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011 lima-dv-3: Resync done (total 71 sec; paused 0 sec; 15216 K/sec)
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 19:53:34 2026] drbd p11: Preparing cluster-wide state change 2857370051: 0->all role( Secondary )
+[Tue Nov 17 19:53:34 2026] drbd p11: State change 2857370051: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:53:34 2026] drbd p11: Committing cluster-wide state change 2857370051 (0ms)
+[Tue Nov 17 19:53:34 2026] drbd p11: role( Primary -> Secondary ) [umount:261175 auto-demote]
+--- dmesg -T | grep 'drbd p11' | tail -n 80 [dv-2]
+[Tue Nov 17 19:51:29 2026] drbd p11 lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 19:51:29 2026] drbd p11/0 drbd1011: quorum( no -> yes ) [remote]
+[Tue Nov 17 19:51:29 2026] drbd p11/0 drbd1011 lima-dv-1: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 19:51:29 2026] drbd p11/0 drbd1011: Resumed AL updates
+[Tue Nov 17 19:51:30 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:51:30 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:51:30 2026] drbd p11: Preparing remote state change 763770148: 0->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:51:30 2026] drbd p11 lima-dv-1: Committing remote state change 763770148 (primary_nodes=0)
+[Tue Nov 17 19:51:30 2026] drbd p11: Preparing cluster-wide state change 3926141265: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:51:30 2026] drbd p11/0 drbd1011 lima-dv-3: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:0
+[Tue Nov 17 19:51:30 2026] drbd p11/0 drbd1011 lima-dv-3: peer's exposed UUID: 0000000000000000
+[Tue Nov 17 19:51:30 2026] drbd p11: State change 3926141265: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:51:30 2026] drbd p11: Committing cluster-wide state change 3926141265 (16ms)
+[Tue Nov 17 19:51:30 2026] drbd p11 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:51:30 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011: Accepted new current UUID, preparing to skip initial sync
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011: disk( Inconsistent -> UpToDate ) [skip-initial-sync]
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011 lima-dv-1: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [skip-initial-sync]
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:51:36 2026] drbd p11/0 drbd1011 lima-dv-1: receiver updated UUIDs to 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:51:41 2026] drbd p11: Preparing remote state change 728516217: 0->all role( Primary )
+[Tue Nov 17 19:51:41 2026] drbd p11 lima-dv-1: Committing remote state change 728516217 (primary_nodes=1)
+[Tue Nov 17 19:51:41 2026] drbd p11 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:51:41 2026] drbd p11: Preparing remote state change 1523522869: 0->all role( Secondary )
+[Tue Nov 17 19:51:41 2026] drbd p11 lima-dv-1: Committing remote state change 1523522869 (primary_nodes=0)
+[Tue Nov 17 19:51:41 2026] drbd p11 lima-dv-1: peer( Primary -> Secondary ) [remote]
+[Tue Nov 17 19:51:41 2026] drbd p11: Preparing remote state change 597684032: 0->all role( Primary )
+[Tue Nov 17 19:51:41 2026] drbd p11 lima-dv-1: Committing remote state change 597684032 (primary_nodes=1)
+[Tue Nov 17 19:51:41 2026] drbd p11 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:51:52 2026] drbd p11/0 drbd1011 lima-dv-3: Former intentional diskless peer got bitmap slot 1
+[Tue Nov 17 19:51:58 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:52:02 2026] drbd p11: Preparing remote state change 1491530933: 2->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: Committing remote state change 1491530933 (primary_nodes=1)
+[Tue Nov 17 19:52:02 2026] drbd p11: Preparing remote state change 1079172654: 2->1 conn( Disconnecting )
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: Committing remote state change 1079172654 (primary_nodes=1)
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 19:52:02 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: Connection closed
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: Restarting receiver thread
+[Tue Nov 17 19:52:02 2026] drbd p11 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:52:11 2026] drbd p11: Preparing remote state change 940763327: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-1: Committing remote state change 940763327 (primary_nodes=1)
+[Tue Nov 17 19:52:11 2026] drbd p11: Preparing cluster-wide state change 1889604076: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: self 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000 bits:8451 flags:2100
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:4
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 19:52:11 2026] drbd p11: Aborting cluster-wide state change 1889604076 (16ms) rv = -19
+[Tue Nov 17 19:52:11 2026] drbd p11: Preparing cluster-wide state change 2456370903: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: self 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2100
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: peer 92A73866FF86CC7E:168BA36802061718:0000000000000000:0000000000000000 bits:262079 flags:1804
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: uuid_compare()=no-sync by rule=lost-quorum
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: strategy = source-set-bitmap due to disk states. (UpToDate/Inconsistent)
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: updated bitmap UUID 92A73866FF86CC7E:92A73866FF86CC7E:0000000000000000:0000000000000000
+[Tue Nov 17 19:52:11 2026] drbd p11: State change 2456370903: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:52:11 2026] drbd p11: Committing cluster-wide state change 2456370903 (16ms)
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) resync-susp( no -> peer ) replication( yes -> no ) [connected]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: repl( WFBitMapS -> PausedSyncS ) [receive-bitmap]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-3: Began resync as PausedSyncS (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:53:18 2026] drbd p11/0 drbd1011 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 19:53:23 2026] drbd p11/0 drbd1011 lima-dv-3: updated UUIDs 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:53:23 2026] drbd p11/0 drbd1011 lima-dv-3: Resync done (total 71 sec; paused 0 sec; 15104 K/sec)
+[Tue Nov 17 19:53:23 2026] drbd p11/0 drbd1011 lima-dv-3: expected n_oos:505 to be 0
+[Tue Nov 17 19:53:23 2026] drbd p11/0 drbd1011 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( PausedSyncS -> Established ) [resync-finished]
+[Tue Nov 17 19:53:23 2026] drbd p11/0 drbd1011 lima-dv-3: resync-susp( peer -> no ) [peer-state]
+[Tue Nov 17 19:53:29 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:53:35 2026] drbd p11: Preparing remote state change 2857370051: 0->all role( Secondary )
+[Tue Nov 17 19:53:35 2026] drbd p11 lima-dv-1: Committing remote state change 2857370051 (primary_nodes=0)
+[Tue Nov 17 19:53:35 2026] drbd p11 lima-dv-1: peer( Primary -> Secondary ) [remote]
+--- dmesg -T | grep 'drbd p11' | tail -n 80 [dv-3]
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-2: Terminating receiver thread
+[Tue Nov 17 19:52:01 2026] drbd p11 lima-dv-2: Terminating sender thread
+[Tue Nov 17 19:52:10 2026] drbd p11: Starting worker thread (node-id 2)
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: meta-data IO uses: blk-bio
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: disk( Diskless -> Attaching ) [attach]
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: Maximum number of peer devices = 7
+[Tue Nov 17 19:52:10 2026] drbd p11: Method to ensure write ordering: flush
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: Allocating 224 KiB for new bitmap
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: resync bitmap: bits=262079 bits_4k=262079 words=28665 pages=56
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: Suspended AL updates
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 19:52:10 2026] drbd p11/0 drbd1011: attached to current UUID: 0000000000000004
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-1: Starting receiver thread (peer-node-id 0)
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-2: Starting receiver thread (peer-node-id 1)
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:52:10 2026] drbd p11 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-1: Handshake to peer 0 successful: Agreed network protocol version 125
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-1: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:52:11 2026] drbd p11: Preparing remote state change 940763327: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: drbd_sync_handshake:
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: peer 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000 bits:8451 flags:3120
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: uuid_compare()=target-set-bitmap by rule=just-created-self
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: Setting and writing the whole bitmap, fresh node
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-1: Committing remote state change 940763327 (primary_nodes=1)
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Primary ) [remote]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011: quorum( no -> yes ) [remote]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: pdsk( DUnknown -> UpToDate ) repl( Off -> WFBitMapT ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011: Resumed AL updates
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011: Setting exposed data uuid: 92A73866FF86CC7E
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:52:11 2026] drbd p11: Preparing remote state change 1889604076: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: resync-susp( no -> connection dependency ) [receive-bitmap]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: repl( WFBitMapT -> SyncTarget ) [receive-bitmap]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-1: Began resync as SyncTarget (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011: Bitmap UUID for initial resync: 168BA36802061718
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: self 92A73866FF86CC7E:168BA36802061718:0000000000000000:0000000000000000 bits:262079 flags:4
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: peer 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000 bits:8451 flags:2100
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: My current UUID changed during handshake.
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: My bitmap UUID changed during handshake. 0x0 to 0x168BA36802061718
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: My uuid_flags changed from 0x4 to 0x804 during handshake.
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: uuid_compare()=retry-connect by rule=initial-handshake-changed
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-2: Aborting remote state change 1889604076
+[Tue Nov 17 19:52:11 2026] drbd p11: Preparing remote state change 2456370903: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: self 92A73866FF86CC7E:168BA36802061718:0000000000000000:0000000000000000 bits:262079 flags:4
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: peer 92A73866FF86CC7E:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2100
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: uuid_compare()=no-sync by rule=lost-quorum
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: strategy = target-set-bitmap due to disk states. (Inconsistent/UpToDate)
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-2: Committing remote state change 2456370903 (primary_nodes=1)
+[Tue Nov 17 19:52:11 2026] drbd p11 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: pdsk( DUnknown -> UpToDate ) repl( Off -> WFBitMapT ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: repl( WFBitMapT -> PausedSyncT ) [receive-bitmap]
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011 lima-dv-2: Began resync as PausedSyncT (will sync 1048316 KB [262079 bits set]).
+[Tue Nov 17 19:52:11 2026] drbd p11/0 drbd1011: Bitmap UUID for initial resync: 13FB475862C07C54
+[Tue Nov 17 19:52:17 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:53:18 2026] drbd p11/0 drbd1011 lima-dv-2: peer_replication( no -> yes ) [enable-peer-replication]
+[Tue Nov 17 19:53:18 2026] drbd p11/0 drbd1011 lima-dv-1: peer_replication( no -> yes ) [enable-peer-replication]
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011 lima-dv-1: Resync done (total 71 sec; paused 0 sec; 15216 K/sec)
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011 lima-dv-1: updated UUIDs 92A73866FF86CC7E:0000000000000000:E0B8AA77D93AE54C:0000000000000000
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011: disk( Inconsistent -> UpToDate ) [resync-finished]
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011 lima-dv-2: repl( PausedSyncT -> Established ) resync-susp( connection dependency -> no ) [resync-finished]
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011 lima-dv-1: repl( SyncTarget -> Established ) [resync-finished]
+[Tue Nov 17 19:53:22 2026] drbd p11/0 drbd1011 lima-dv-1: Sync source can not get this write, postponing it towards the writer
+[Tue Nov 17 19:53:28 2026] drbd p11/0 drbd1011: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:53:34 2026] drbd p11: Preparing remote state change 2857370051: 0->all role( Secondary )
+[Tue Nov 17 19:53:34 2026] drbd p11 lima-dv-1: Committing remote state change 2857370051 (primary_nodes=0)
+[Tue Nov 17 19:53:34 2026] drbd p11 lima-dv-1: peer( Primary -> Secondary ) [remote]
+P11 run 2 result: dv-3 UpToDate=1
+exit=0
+```
+
+### P12. Уход стороны с копией и стороны без диска
+
+Ресурс `p12`: `dv-1`, `dv-2`, `dv-3` с копией (1 ГиБ), port 7012, minor 1012; в шаге 6 — `dv-4` без диска.
+
+```bash
+stand/spike/pre-2b.sh p12
+```
+
+```text
+### P12 steps 1-5: three copies, dv-3 leaves
+$ [dv-1] drbdadm create-md --force --max-peers=7 p12
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p12
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm create-md --force --max-peers=7 p12
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p12
+rc=0
+$ [dv-2] drbdadm up p12
+rc=0
+$ [dv-3] drbdadm up p12
+rc=0
+wait: dv-1: 2 connections Connected after 2 s at most
+wait: dv-2: 2 connections Connected after 2 s at most
+wait: dv-3: 2 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p12/0
+rc=0
+$ [dv-1] drbdsetup status p12 --verbose
+p12 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1012
+rc=0
+19:55:22.191
+1566
+started
+@ 19:55:24.011 down on dv-3
+$ [dv-3] drbdadm down p12
+rc=0
+$ [dv-1] drbdsetup status p12 --verbose
+p12 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:yes blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:16 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+
+rc=0
+$ [dv-2] drbdsetup status p12 --verbose
+p12 node-id:1 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-3 node-id:2 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+
+rc=0
+@ 19:56:01.257 30 s after down; dv-1 quorum now
+$ [dv-1] drbdsetup status p12 --verbose | grep -o 'quorum:[a-z]*'
+quorum:yes
+rc=0
+
+### P12 step 2: p12.res without dv-3 on dv-1 and dv-2, adjust
+@ 19:56:04.336 adjust on dv-1
+$ [dv-1] drbdadm adjust p12
+rc=0
+$ [dv-2] drbdadm adjust p12
+rc=0
+$ [dv-1] drbdsetup status p12 --verbose --statistics
+p12 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:yes
+      size:1048316 read:1005 written:377644 al-writes:11 bm-writes:69 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:344748 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p12 --verbose --statistics
+p12 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:no
+      size:1048316 read:0 written:380360 al-writes:11 bm-writes:69 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:347464 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+
+### P12 step 3: forget-peer for node-id 2 on dv-1, twice
+@ 19:56:15.253 forget-peer 1
+$ [dv-1] drbdsetup forget-peer p12 2
+rc=0
+@ 19:56:16.914 forget-peer 2
+$ [dv-1] drbdsetup forget-peer p12 2
+rc=0
+$ [dv-1] drbdsetup status p12 --verbose
+p12 node-id:0 role:Primary suspended:no force-io-failures:no
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:yes blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+
+### P12 step 4: forget-peer for node-id 5 (not in the metadata) on dv-2
+$ [dv-2] drbdsetup forget-peer p12 5
+rc=0
+
+### P12 step 5: stop the writer
+@ 19:56:26.048 stop the writer
+acked=23484 on-volume=23485
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=135 probe=alive:R=8 probe=alive:S=127 longest-gap-without-new-acked=0.5s (from 19:55:23.853)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+19:55:23.885 - 19:56:27.254  "quorum": true  x64
+--- dmesg -T | grep 'drbd p12' | tail -n 80 [dv-1]
+[Tue Nov 17 19:55:00 2026] drbd p12 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:55:00 2026] drbd p12: Preparing cluster-wide state change 2603897830: 0->1 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-2: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-2: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-2: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 19:55:00 2026] drbd p12: State change 2603897830: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:55:00 2026] drbd p12: Committing cluster-wide state change 2603897830 (20ms)
+[Tue Nov 17 19:55:00 2026] drbd p12 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012: quorum( no -> yes ) [connected]
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-2: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012: Resumed AL updates
+[Tue Nov 17 19:55:02 2026] drbd p12: Preparing remote state change 2970928659: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-2: Committing remote state change 2970928659 (primary_nodes=0)
+[Tue Nov 17 19:55:02 2026] drbd p12: Preparing cluster-wide state change 1835999972: 0->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:24
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:24
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 19:55:02 2026] drbd p12: State change 1835999972: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:55:02 2026] drbd p12: Committing cluster-wide state change 1835999972 (16ms)
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-3: Preparing to skip initial sync
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-2: Preparing to skip initial sync
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012: Bitmap UUID for initial resync: 2A8BA52EB3E1D96B
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012: new current UUID: 2EE98D3589280E1C weak: FFFFFFFFFFFFFFF9
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-3: cleared bitmap UUID 2EE98D3589280E1C:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-2: cleared bitmap UUID 2EE98D3589280E1C:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012: disk( Inconsistent -> UpToDate ) [new-c-uuid]
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-3: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [new-c-uuid]
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-2: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [new-c-uuid]
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:55:14 2026] drbd p12: Preparing cluster-wide state change 2573219996: 0->all role( Primary )
+[Tue Nov 17 19:55:14 2026] drbd p12: State change 2573219996: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:55:14 2026] drbd p12: Committing cluster-wide state change 2573219996 (0ms)
+[Tue Nov 17 19:55:14 2026] drbd p12: role( Secondary -> Primary ) [mkfs.ext4:268313 auto-promote]
+[Tue Nov 17 19:55:14 2026] drbd p12/0 drbd1012: gen-obligation: NONE -> ARMED(promoted)
+[Tue Nov 17 19:55:14 2026] drbd p12/0 drbd1012: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:55:14 2026] drbd p12/0 drbd1012: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:55:14 2026] drbd p12: Preparing cluster-wide state change 2400962777: 0->all role( Secondary )
+[Tue Nov 17 19:55:14 2026] drbd p12: State change 2400962777: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:55:14 2026] drbd p12: Committing cluster-wide state change 2400962777 (0ms)
+[Tue Nov 17 19:55:14 2026] drbd p12: role( Primary -> Secondary ) [mkfs.ext4:268313 auto-demote]
+[Tue Nov 17 19:55:14 2026] drbd p12: Preparing cluster-wide state change 3507366725: 0->all role( Primary )
+[Tue Nov 17 19:55:14 2026] drbd p12: State change 3507366725: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 19:55:14 2026] drbd p12: Committing cluster-wide state change 3507366725 (0ms)
+[Tue Nov 17 19:55:14 2026] drbd p12: role( Secondary -> Primary ) [mount:268340 auto-promote]
+[Tue Nov 17 19:55:14 2026] drbd p12/0 drbd1012: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 19:55:14 2026] drbd p12/0 drbd1012: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:55:14 2026] drbd p12/0 drbd1012: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:55:23 2026] drbd p12: Preparing remote state change 2351429808: 2->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Committing remote state change 2351429808 (primary_nodes=1)
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012 lima-dv-3: pdsk( UpToDate -> Outdated ) repl( Established -> Off ) [remote]
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012: gen-obligation: DISCHARGED(promoted) -> ARMED(peer-data-lost)
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012: gen-obligation: ARMED(peer-data-lost) -> MINTING(peer-data-lost)
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012: new current UUID: 4AF2630D459D876B weak: FFFFFFFFFFFFFFFC
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012: gen-obligation: MINTING(peer-data-lost) -> DISCHARGED(peer-data-lost)
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Connection closed
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Restarting receiver thread
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:55:23 2026] drbd p12: Preparing remote state change 4205220973: 2->1 conn( Disconnecting )
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-2: Committing remote state change 4205220973 (primary_nodes=1)
+[Tue Nov 17 19:56:03 2026] drbd p12 lima-dv-3: conn( Connecting -> Disconnecting ) [del-peer]
+[Tue Nov 17 19:56:03 2026] drbd p12 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:56:03 2026] drbd p12 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:56:03 2026] drbd p12 lima-dv-3: Connection closed
+[Tue Nov 17 19:56:03 2026] drbd p12 lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:56:03 2026] drbd p12 lima-dv-3: Terminating receiver thread
+[Tue Nov 17 19:56:03 2026] drbd p12 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:56:25 2026] drbd p12: Preparing cluster-wide state change 53499271: 0->all role( Secondary )
+[Tue Nov 17 19:56:25 2026] drbd p12: State change 53499271: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:56:25 2026] drbd p12: Committing cluster-wide state change 53499271 (0ms)
+[Tue Nov 17 19:56:25 2026] drbd p12: role( Primary -> Secondary ) [umount:295025 auto-demote]
+--- dmesg -T | grep 'drbd p12' | tail -n 80 [dv-2]
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: disk( Diskless -> Attaching ) [attach]
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: Maximum number of peer devices = 7
+[Tue Nov 17 19:54:59 2026] drbd p12: Method to ensure write ordering: flush
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: Allocating 224 KiB for new bitmap
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: resync bitmap: bits=262079 bits_4k=262079 words=28665 pages=56
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: Suspended AL updates
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 19:54:59 2026] drbd p12/0 drbd1012: attached to current UUID: 0000000000000004
+[Tue Nov 17 19:54:59 2026] drbd p12 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:54:59 2026] drbd p12 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:54:59 2026] drbd p12 lima-dv-1: Starting receiver thread (peer-node-id 0)
+[Tue Nov 17 19:54:59 2026] drbd p12 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:54:59 2026] drbd p12 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 19:54:59 2026] drbd p12 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:55:00 2026] drbd p12 lima-dv-1: Handshake to peer 0 successful: Agreed network protocol version 125
+[Tue Nov 17 19:55:00 2026] drbd p12 lima-dv-1: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:55:00 2026] drbd p12: Preparing remote state change 2603897830: 0->1 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-1: drbd_sync_handshake:
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-1: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-1: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-1: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 19:55:00 2026] drbd p12 lima-dv-1: Committing remote state change 2603897830 (primary_nodes=0)
+[Tue Nov 17 19:55:00 2026] drbd p12 lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012: quorum( no -> yes ) [remote]
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012 lima-dv-1: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 19:55:00 2026] drbd p12/0 drbd1012: Resumed AL updates
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:55:02 2026] drbd p12: Preparing cluster-wide state change 2970928659: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:24
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:2024
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 19:55:02 2026] drbd p12: State change 2970928659: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:55:02 2026] drbd p12: Committing cluster-wide state change 2970928659 (20ms)
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:55:02 2026] drbd p12/0 drbd1012 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:55:02 2026] drbd p12: Preparing remote state change 1835999972: 0->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:55:02 2026] drbd p12 lima-dv-1: Committing remote state change 1835999972 (primary_nodes=0)
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012: Accepted new current UUID, preparing to skip initial sync
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-3: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [peer-state]
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012: disk( Inconsistent -> UpToDate ) [skip-initial-sync]
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-1: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [skip-initial-sync]
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:55:09 2026] drbd p12/0 drbd1012 lima-dv-1: receiver updated UUIDs to 2EE98D3589280E1C:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:55:14 2026] drbd p12: Preparing remote state change 2573219996: 0->all role( Primary )
+[Tue Nov 17 19:55:14 2026] drbd p12 lima-dv-1: Committing remote state change 2573219996 (primary_nodes=1)
+[Tue Nov 17 19:55:14 2026] drbd p12 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:55:14 2026] drbd p12: Preparing remote state change 2400962777: 0->all role( Secondary )
+[Tue Nov 17 19:55:14 2026] drbd p12 lima-dv-1: Committing remote state change 2400962777 (primary_nodes=0)
+[Tue Nov 17 19:55:14 2026] drbd p12 lima-dv-1: peer( Primary -> Secondary ) [remote]
+[Tue Nov 17 19:55:15 2026] drbd p12: Preparing remote state change 3507366725: 0->all role( Primary )
+[Tue Nov 17 19:55:15 2026] drbd p12 lima-dv-1: Committing remote state change 3507366725 (primary_nodes=1)
+[Tue Nov 17 19:55:15 2026] drbd p12 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:55:23 2026] drbd p12: Preparing remote state change 2351429808: 2->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Committing remote state change 2351429808 (primary_nodes=1)
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012 lima-dv-3: pdsk( UpToDate -> Outdated ) [peer-state]
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012 lima-dv-1: received new current UUID: 4AF2630D459D876B weak_nodes=FFFFFFFFFFFFFFFC
+[Tue Nov 17 19:55:23 2026] drbd p12: Preparing remote state change 4205220973: 2->1 conn( Disconnecting )
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Committing remote state change 4205220973 (primary_nodes=1)
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 19:55:23 2026] drbd p12/0 drbd1012 lima-dv-3: repl( Established -> Off ) [remote]
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Connection closed
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: Restarting receiver thread
+[Tue Nov 17 19:55:23 2026] drbd p12 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:55:28 2026] drbd p12/0 drbd1012: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 19:56:05 2026] drbd p12 lima-dv-3: conn( Connecting -> Disconnecting ) [del-peer]
+[Tue Nov 17 19:56:05 2026] drbd p12 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:56:05 2026] drbd p12 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 19:56:05 2026] drbd p12 lima-dv-3: Connection closed
+[Tue Nov 17 19:56:05 2026] drbd p12 lima-dv-3: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:56:05 2026] drbd p12 lima-dv-3: Terminating receiver thread
+[Tue Nov 17 19:56:05 2026] drbd p12 lima-dv-3: Terminating sender thread
+[Tue Nov 17 19:56:25 2026] drbd p12: Preparing remote state change 53499271: 0->all role( Secondary )
+[Tue Nov 17 19:56:25 2026] drbd p12 lima-dv-1: Committing remote state change 53499271 (primary_nodes=0)
+[Tue Nov 17 19:56:25 2026] drbd p12 lima-dv-1: peer( Primary -> Secondary ) [remote]
+
+### P12 step 6: a diskless node leaves, adjust on the others first
+$ [dv-1] drbdadm create-md --force --max-peers=7 p12
+initializing bitmap (224 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p12
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+initializing bitmap (224 KB) to all zero
+rc=0
+$ [dv-1] drbdadm up p12
+rc=0
+$ [dv-2] drbdadm up p12
+rc=0
+$ [dv-4] drbdadm up p12
+rc=0
+wait: dv-1: 2 connections Connected after 2 s at most
+wait: dv-2: 2 connections Connected after 2 s at most
+wait: dv-4: 2 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p12/0
+rc=0
+$ [dv-1] drbdsetup status p12 --verbose
+p12 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1012
+rc=0
+19:57:51.760
+946
+started
+
+### P12 step 6a: p12.res without dv-4 on dv-1 and dv-2, adjust while dv-4 is up and connected
+@ 19:57:59.386 adjust on dv-1
+$ [dv-1] drbdadm adjust p12
+rc=0
+$ [dv-2] drbdadm adjust p12
+rc=0
+$ [dv-1] drbdsetup status p12 --verbose --statistics
+p12 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:yes
+      size:1048316 read:1005 written:83096 al-writes:9 bm-writes:65 upper-pending:2
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:24 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:50200 out-of-sync:0 pending:2 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p12 --verbose --statistics
+p12 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:no
+      size:1048316 read:0 written:86484 al-writes:10 bm-writes:65 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:53592 sent:0 out-of-sync:0 pending:0 unacked:1
+
+rc=0
+$ [dv-4] drbdsetup status p12 --verbose --statistics
+p12 node-id:3 role:Secondary suspended:no force-io-failures:no
+    write-ordering:none
+  volume:0 minor:1012 disk:Diskless client:yes backing_dev:none quorum:no open:no
+      size:1048316 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+@ 19:58:20.132 state after adjust
+
+### P12 step 6b: down on dv-4
+@ 19:58:20.323 down on dv-4
+$ [dv-4] drbdadm down p12
+rc=0
+$ [dv-1] drbdsetup status p12 --verbose --statistics
+p12 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:yes
+      size:1048316 read:1005 written:135840 al-writes:9 bm-writes:65 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:102944 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p12 --verbose --statistics
+p12 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1012 disk:UpToDate backing_dev:/dev/ambar-exp/p12 quorum:yes
+      open:no
+      size:1048316 read:0 written:140144 al-writes:10 bm-writes:65 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:107252 sent:0 out-of-sync:0 pending:0 unacked:1
+
+rc=0
+$ [dv-4] drbdsetup status p12 --verbose
+# No currently configured DRBD found.
+p12: No such resource
+rc=10
+@ 19:58:36.666 stop the writer
+acked=6979 on-volume=6980
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=95 probe=alive:R=4 probe=alive:S=91 longest-gap-without-new-acked=1.0s (from 19:57:54.633)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+19:57:57.100 - 19:58:37.636  "quorum": true  x41
+--- dmesg -T | grep 'drbd p12' | tail -n 80 [dv-1]
+[Tue Nov 17 19:57:27 2026] drbd p12: Method to ensure write ordering: flush
+[Tue Nov 17 19:57:27 2026] drbd p12/0 drbd1012: Allocating 224 KiB for new bitmap
+[Tue Nov 17 19:57:27 2026] drbd p12/0 drbd1012: resync bitmap: bits=262079 bits_4k=262079 words=28665 pages=56
+[Tue Nov 17 19:57:27 2026] drbd p12/0 drbd1012: size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:57:27 2026] drbd p12/0 drbd1012: Suspended AL updates
+[Tue Nov 17 19:57:27 2026] drbd p12/0 drbd1012: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 19:57:27 2026] drbd p12/0 drbd1012: attached to current UUID: 0000000000000004
+[Tue Nov 17 19:57:27 2026] drbd p12 lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:57:27 2026] drbd p12 lima-dv-2: Starting receiver thread (peer-node-id 1)
+[Tue Nov 17 19:57:27 2026] drbd p12 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:57:27 2026] drbd p12 lima-dv-4: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:57:27 2026] drbd p12 lima-dv-4: Starting receiver thread (peer-node-id 3)
+[Tue Nov 17 19:57:27 2026] drbd p12 lima-dv-4: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:57:29 2026] drbd p12: Preparing cluster-wide state change 189311018: 0->1 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-2: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:24
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-2: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:24
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-2: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 19:57:29 2026] drbd p12: State change 189311018: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:57:29 2026] drbd p12: Committing cluster-wide state change 189311018 (16ms)
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: quorum( no -> yes ) [connected]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-2: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: Resumed AL updates
+[Tue Nov 17 19:57:30 2026] drbd p12: Preparing remote state change 2728758467: 1->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-4: Handshake to peer 3 successful: Agreed network protocol version 125
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-4: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-2: Committing remote state change 2728758467 (primary_nodes=0)
+[Tue Nov 17 19:57:30 2026] drbd p12: Preparing cluster-wide state change 3961225815: 0->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:30 2026] drbd p12/0 drbd1012 lima-dv-4: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:0
+[Tue Nov 17 19:57:30 2026] drbd p12/0 drbd1012 lima-dv-4: peer's exposed UUID: 0000000000000000
+[Tue Nov 17 19:57:30 2026] drbd p12: State change 3961225815: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:57:30 2026] drbd p12: Committing cluster-wide state change 3961225815 (24ms)
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-4: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:57:30 2026] drbd p12/0 drbd1012 lima-dv-4: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-2: Preparing to skip initial sync
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: Bitmap UUID for initial resync: 7394624F0B1E9A68
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: new current UUID: AB82BC22D5C387A6 weak: FFFFFFFFFFFFFFFD
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-4: cleared bitmap UUID AB82BC22D5C387A6:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-2: cleared bitmap UUID AB82BC22D5C387A6:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: disk( Inconsistent -> UpToDate ) [new-c-uuid]
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-2: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [new-c-uuid]
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing cluster-wide state change 3125187760: 0->all role( Primary )
+[Tue Nov 17 19:57:44 2026] drbd p12: State change 3125187760: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF4
+[Tue Nov 17 19:57:44 2026] drbd p12: Committing cluster-wide state change 3125187760 (0ms)
+[Tue Nov 17 19:57:44 2026] drbd p12: role( Secondary -> Primary ) [mkfs.ext4:299183 auto-promote]
+[Tue Nov 17 19:57:44 2026] drbd p12/0 drbd1012: gen-obligation: NONE -> ARMED(promoted)
+[Tue Nov 17 19:57:44 2026] drbd p12/0 drbd1012: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:57:44 2026] drbd p12/0 drbd1012: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing cluster-wide state change 1572212466: 0->all role( Secondary )
+[Tue Nov 17 19:57:44 2026] drbd p12: State change 1572212466: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:57:44 2026] drbd p12: Committing cluster-wide state change 1572212466 (0ms)
+[Tue Nov 17 19:57:44 2026] drbd p12: role( Primary -> Secondary ) [mkfs.ext4:299183 auto-demote]
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing cluster-wide state change 2113764521: 0->all role( Primary )
+[Tue Nov 17 19:57:44 2026] drbd p12: State change 2113764521: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF4
+[Tue Nov 17 19:57:44 2026] drbd p12: Committing cluster-wide state change 2113764521 (4ms)
+[Tue Nov 17 19:57:44 2026] drbd p12: role( Secondary -> Primary ) [mount:299208 auto-promote]
+[Tue Nov 17 19:57:44 2026] drbd p12/0 drbd1012: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 19:57:44 2026] drbd p12/0 drbd1012: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 19:57:44 2026] drbd p12/0 drbd1012: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 19:57:59 2026] drbd p12: Preparing cluster-wide state change 424661837: 0->3 conn( Disconnecting ) pdsk( Outdated )
+[Tue Nov 17 19:57:59 2026] drbd p12: State change 424661837: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFFC
+[Tue Nov 17 19:57:59 2026] drbd p12: Committing cluster-wide state change 424661837 (0ms)
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-4: conn( Connected -> Disconnecting ) peer( Secondary -> Unknown ) [del-peer]
+[Tue Nov 17 19:57:59 2026] drbd p12/0 drbd1012 lima-dv-4: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [del-peer]
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-4: Terminating sender thread
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-4: Starting sender thread (peer-node-id 3)
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-4: Connection closed
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-4: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-4: Terminating receiver thread
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-4: Terminating sender thread
+[Tue Nov 17 19:58:01 2026] drbd p12: Preparing remote state change 451120797: 1->3 conn( Disconnecting )
+[Tue Nov 17 19:58:01 2026] drbd p12 lima-dv-2: Committing remote state change 451120797 (primary_nodes=1)
+[Tue Nov 17 19:58:36 2026] drbd p12: Preparing cluster-wide state change 1953616839: 0->all role( Secondary )
+[Tue Nov 17 19:58:36 2026] drbd p12: State change 1953616839: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:58:36 2026] drbd p12: Committing cluster-wide state change 1953616839 (4ms)
+[Tue Nov 17 19:58:36 2026] drbd p12: role( Primary -> Secondary ) [umount:308464 auto-demote]
+--- dmesg -T | grep 'drbd p12' | tail -n 80 [dv-2]
+[Tue Nov 17 19:56:41 2026] drbd p12 lima-dv-1: Connection closed
+[Tue Nov 17 19:56:41 2026] drbd p12 lima-dv-1: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:56:41 2026] drbd p12 lima-dv-1: Terminating receiver thread
+[Tue Nov 17 19:56:41 2026] drbd p12 lima-dv-1: Terminating sender thread
+[Tue Nov 17 19:56:41 2026] drbd p12/0 drbd1012: disk( UpToDate -> Detaching ) [down]
+[Tue Nov 17 19:56:41 2026] drbd p12/0 drbd1012: disk( Detaching -> Diskless ) [go-diskless]
+[Tue Nov 17 19:56:41 2026] drbd p12/0 drbd1012: Freeing bitmap of size 224 KiB
+[Tue Nov 17 19:57:29 2026] drbd p12: Starting worker thread (node-id 1)
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-4: Starting sender thread (peer-node-id 3)
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: meta-data IO uses: blk-bio
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: disk( Diskless -> Attaching ) [attach]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: Maximum number of peer devices = 7
+[Tue Nov 17 19:57:29 2026] drbd p12: Method to ensure write ordering: flush
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: Allocating 224 KiB for new bitmap
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: resync bitmap: bits=262079 bits_4k=262079 words=28665 pages=56
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: Suspended AL updates
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: attached to current UUID: 0000000000000004
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: Starting receiver thread (peer-node-id 0)
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-4: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-4: Starting receiver thread (peer-node-id 3)
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-4: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: Handshake to peer 0 successful: Agreed network protocol version 125
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:57:29 2026] drbd p12: Preparing remote state change 189311018: 0->1 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-1: drbd_sync_handshake:
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-1: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:24
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-1: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262079 flags:24
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-1: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: Committing remote state change 189311018 (primary_nodes=0)
+[Tue Nov 17 19:57:29 2026] drbd p12 lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: quorum( no -> yes ) [remote]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012 lima-dv-1: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 19:57:29 2026] drbd p12/0 drbd1012: Resumed AL updates
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-4: Handshake to peer 3 successful: Agreed network protocol version 125
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-4: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:57:31 2026] drbd p12: Preparing cluster-wide state change 2728758467: 1->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-4: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:0
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-4: peer's exposed UUID: 0000000000000000
+[Tue Nov 17 19:57:31 2026] drbd p12: State change 2728758467: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:57:31 2026] drbd p12: Committing cluster-wide state change 2728758467 (20ms)
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-4: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-4: pdsk( DUnknown -> Diskless ) repl( Off -> Established ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:57:31 2026] drbd p12: Preparing remote state change 3961225815: 0->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-1: Committing remote state change 3961225815 (primary_nodes=0)
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: Accepted new current UUID, preparing to skip initial sync
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: disk( Inconsistent -> UpToDate ) [skip-initial-sync]
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-1: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [skip-initial-sync]
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: persisting effective size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-1: receiver updated UUIDs to AB82BC22D5C387A6:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing remote state change 3125187760: 0->all role( Primary )
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: Committing remote state change 3125187760 (primary_nodes=1)
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing remote state change 1572212466: 0->all role( Secondary )
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: Committing remote state change 1572212466 (primary_nodes=0)
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: peer( Primary -> Secondary ) [remote]
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing remote state change 2113764521: 0->all role( Primary )
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: Committing remote state change 2113764521 (primary_nodes=1)
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:57:59 2026] drbd p12: Preparing remote state change 424661837: 0->3 conn( Disconnecting ) pdsk( Outdated )
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: Committing remote state change 424661837 (primary_nodes=1)
+[Tue Nov 17 19:58:01 2026] drbd p12: Preparing cluster-wide state change 451120797: 1->3 conn( Disconnecting )
+[Tue Nov 17 19:58:02 2026] drbd p12: State change 451120797: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFFE
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: Cluster is now split
+[Tue Nov 17 19:58:02 2026] drbd p12: Committing cluster-wide state change 451120797 (20ms)
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: conn( Connected -> Disconnecting ) peer( Secondary -> Unknown ) [del-peer]
+[Tue Nov 17 19:58:02 2026] drbd p12/0 drbd1012 lima-dv-4: pdsk( Diskless -> DUnknown ) repl( Established -> Off ) [del-peer]
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: Terminating sender thread
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: Starting sender thread (peer-node-id 3)
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: Connection closed
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: Terminating receiver thread
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-4: Terminating sender thread
+[Tue Nov 17 19:58:36 2026] drbd p12: Preparing remote state change 1953616839: 0->all role( Secondary )
+[Tue Nov 17 19:58:36 2026] drbd p12 lima-dv-1: Committing remote state change 1953616839 (primary_nodes=0)
+[Tue Nov 17 19:58:36 2026] drbd p12 lima-dv-1: peer( Primary -> Secondary ) [remote]
+--- dmesg -T | grep 'drbd p12' | tail -n 80 [dv-4]
+[Tue Nov 17 19:57:30 2026] drbd p12: Starting worker thread (node-id 3)
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-1: Starting receiver thread (peer-node-id 0)
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-2: Starting receiver thread (peer-node-id 1)
+[Tue Nov 17 19:57:30 2026] drbd p12 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:57:31 2026] drbd p12: Preparing remote state change 2728758467: 1->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-1: Handshake to peer 0 successful: Agreed network protocol version 125
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-1: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012: size = 1024 MB (1048316 KB)
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-2: my exposed UUID: 0000000000000000
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-2: peer 0000000000000004:FFFFFFFFFFFFFFFF:0000000000000000:0000000000000000 bits:0 flags:24
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-2: Committing remote state change 2728758467 (primary_nodes=0)
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-2: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) [remote]
+[Tue Nov 17 19:57:31 2026] drbd p12: Preparing remote state change 3961225815: 0->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-1: my exposed UUID: 0000000000000000
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-1: peer 0000000000000004:FFFFFFFFFFFFFFFF:0000000000000000:0000000000000000 bits:0 flags:24
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-1: Committing remote state change 3961225815 (primary_nodes=0)
+[Tue Nov 17 19:57:31 2026] drbd p12 lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012: quorum( no -> yes ) [remote]
+[Tue Nov 17 19:57:31 2026] drbd p12/0 drbd1012 lima-dv-1: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) [remote]
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012: Setting exposed data uuid: AB82BC22D5C387A6
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-1: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [peer-state]
+[Tue Nov 17 19:57:38 2026] drbd p12/0 drbd1012 lima-dv-2: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [peer-state]
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing remote state change 3125187760: 0->all role( Primary )
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: Committing remote state change 3125187760 (primary_nodes=1)
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing remote state change 1572212466: 0->all role( Secondary )
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: Committing remote state change 1572212466 (primary_nodes=0)
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: peer( Primary -> Secondary ) [remote]
+[Tue Nov 17 19:57:44 2026] drbd p12: Preparing remote state change 2113764521: 0->all role( Primary )
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: Committing remote state change 2113764521 (primary_nodes=1)
+[Tue Nov 17 19:57:44 2026] drbd p12 lima-dv-1: peer( Secondary -> Primary ) [remote]
+[Tue Nov 17 19:57:59 2026] drbd p12: Preparing remote state change 424661837: 0->3 conn( Disconnecting ) pdsk( Outdated )
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: Committing remote state change 424661837 (primary_nodes=1)
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: conn( Connected -> TearDown ) peer( Primary -> Unknown ) [remote]
+[Tue Nov 17 19:57:59 2026] drbd p12/0 drbd1012 lima-dv-1: pdsk( UpToDate -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: Terminating sender thread
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: Connection closed
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: Restarting receiver thread
+[Tue Nov 17 19:57:59 2026] drbd p12 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:58:02 2026] drbd p12: Preparing remote state change 451120797: 1->3 conn( Disconnecting )
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: Committing remote state change 451120797 (primary_nodes=1)
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 19:58:02 2026] drbd p12/0 drbd1012: quorum( yes -> no ) [remote]
+[Tue Nov 17 19:58:02 2026] drbd p12/0 drbd1012 lima-dv-2: pdsk( UpToDate -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: Terminating sender thread
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: Connection closed
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 19:58:02 2026] drbd p12 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-1: conn( Connecting -> Disconnecting ) [down]
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-1: Terminating sender thread
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-1: Connection closed
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-1: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-1: Terminating receiver thread
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-1: Terminating sender thread
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-2: conn( Connecting -> Disconnecting ) [down]
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-2: Terminating sender thread
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-2: Connection closed
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-2: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-2: Terminating receiver thread
+[Tue Nov 17 19:58:20 2026] drbd p12 lima-dv-2: Terminating sender thread
+exit=0
+```
+
+### P13. Слоты битовой карты при смене сторон
+
+Ресурс `p13`: `dv-1`, `dv-2` с копией, `--max-peers=1`, port 7013, minor 1013, 64 МиБ случайных данных.
+
+```bash
+stand/spike/pre-2b.sh p13
+```
+
+```text
+### P13 run 1: no forget-peer
+$ [dv-1] drbdadm create-md --force --max-peers=1 p13
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=1 p13
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p13
+rc=0
+$ [dv-2] drbdadm up p13
+rc=0
+wait: dv-1: 1 connections Connected after 2 s at most
+wait: dv-2: 1 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p13/0
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] dd if=/dev/urandom of=/dev/drbd1013 bs=1M count=64 oflag=direct status=none
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose --statistics
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:0 written:65536 al-writes:16 bm-writes:8 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:65536 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+
+### P13 step 1: dv-2 leaves (down on dv-2, p13.res without dv-2 on dv-1, adjust on dv-1)
+@ 20:00:11.881 down on dv-2
+$ [dv-2] drbdadm down p13
+rc=0
+$ [dv-1] drbdadm adjust p13
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no blocked:no
+
+rc=0
+
+### P13 step 2: dv-3 (node-id 2) joins with a copy
+$ [dv-3] drbdadm create-md --force --max-peers=1 p13
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p13
+rc=0
+@ 20:00:22.459 adjust on dv-1
+$ [dv-1] drbdadm adjust p13
+p13: Failure: (162) Invalid configuration request
+Command 'drbdsetup connect p13 2' terminated with exit code 10
+rc=1
+$ [dv-1] drbdsetup status p13 --verbose --statistics
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:0 written:65536 al-writes:16 bm-writes:8 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-3 node-id:2 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p13 --verbose --statistics
+p13 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+      open:no
+      size:1048508 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
+      lower-pending:0 al-suspended:yes blocked:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+
+rc=0
+--- dmesg -T | grep 'drbd p13' | tail -n 80 [dv-1]
+[Tue Nov 17 19:59:56 2026] drbd p13: Starting worker thread (node-id 0)
+[Tue Nov 17 19:59:56 2026] drbd p13 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: meta-data IO uses: blk-bio
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: disk( Diskless -> Attaching ) [attach]
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: Maximum number of peer devices = 1
+[Tue Nov 17 19:59:56 2026] drbd p13: Method to ensure write ordering: flush
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: Allocating 32 KiB for new bitmap
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: resync bitmap: bits=262127 bits_4k=262127 words=4096 pages=8
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: size = 1024 MB (1048508 KB)
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: Suspended AL updates
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 19:59:56 2026] drbd p13/0 drbd1013: attached to current UUID: 0000000000000004
+[Tue Nov 17 19:59:56 2026] drbd p13 lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 19:59:56 2026] drbd p13 lima-dv-2: Starting receiver thread (peer-node-id 1)
+[Tue Nov 17 19:59:56 2026] drbd p13 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 19:59:57 2026] drbd p13 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 19:59:57 2026] drbd p13 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 19:59:57 2026] drbd p13: Preparing cluster-wide state change 3766067413: 0->1 role( Secondary ) conn( Connected )
+[Tue Nov 17 19:59:57 2026] drbd p13/0 drbd1013 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 19:59:57 2026] drbd p13/0 drbd1013 lima-dv-2: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262127 flags:24
+[Tue Nov 17 19:59:57 2026] drbd p13/0 drbd1013 lima-dv-2: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262127 flags:24
+[Tue Nov 17 19:59:57 2026] drbd p13/0 drbd1013 lima-dv-2: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 19:59:57 2026] drbd p13: State change 3766067413: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 19:59:57 2026] drbd p13: Committing cluster-wide state change 3766067413 (16ms)
+[Tue Nov 17 19:59:57 2026] drbd p13 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 19:59:57 2026] drbd p13/0 drbd1013: quorum( no -> yes ) [connected]
+[Tue Nov 17 19:59:57 2026] drbd p13/0 drbd1013 lima-dv-2: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 19:59:57 2026] drbd p13/0 drbd1013: Resumed AL updates
+[Tue Nov 17 20:00:03 2026] drbd p13/0 drbd1013 lima-dv-2: Preparing to skip initial sync
+[Tue Nov 17 20:00:03 2026] drbd p13/0 drbd1013: Bitmap UUID for initial resync: 03184198FB78E7DD
+[Tue Nov 17 20:00:03 2026] drbd p13/0 drbd1013: new current UUID: 4C02FE6748EB8B2C weak: FFFFFFFFFFFFFFFD
+[Tue Nov 17 20:00:03 2026] drbd p13/0 drbd1013 lima-dv-2: cleared bitmap UUID 4C02FE6748EB8B2C:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 20:00:03 2026] drbd p13/0 drbd1013: disk( Inconsistent -> UpToDate ) [new-c-uuid]
+[Tue Nov 17 20:00:03 2026] drbd p13/0 drbd1013 lima-dv-2: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [new-c-uuid]
+[Tue Nov 17 20:00:03 2026] drbd p13/0 drbd1013: persisting effective size = 1024 MB (1048508 KB)
+[Tue Nov 17 20:00:08 2026] drbd p13: Preparing cluster-wide state change 3697426417: 0->all role( Primary )
+[Tue Nov 17 20:00:08 2026] drbd p13: State change 3697426417: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFFC
+[Tue Nov 17 20:00:08 2026] drbd p13: Committing cluster-wide state change 3697426417 (0ms)
+[Tue Nov 17 20:00:08 2026] drbd p13: role( Secondary -> Primary ) [dd:315322 auto-promote]
+[Tue Nov 17 20:00:08 2026] drbd p13/0 drbd1013: gen-obligation: NONE -> ARMED(promoted)
+[Tue Nov 17 20:00:08 2026] drbd p13/0 drbd1013: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 20:00:08 2026] drbd p13/0 drbd1013: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 20:00:08 2026] drbd p13: Preparing cluster-wide state change 4182745138: 0->all role( Secondary )
+[Tue Nov 17 20:00:08 2026] drbd p13: State change 4182745138: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:00:08 2026] drbd p13: Committing cluster-wide state change 4182745138 (0ms)
+[Tue Nov 17 20:00:08 2026] drbd p13: role( Primary -> Secondary ) [dd:315322 auto-demote]
+[Tue Nov 17 20:00:10 2026] drbd p13: Preparing remote state change 1863920746: 1->0 conn( Disconnecting )
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: Committing remote state change 1863920746 (primary_nodes=0)
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 20:00:10 2026] drbd p13/0 drbd1013 lima-dv-2: pdsk( UpToDate -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: Connection closed
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 20:00:10 2026] drbd p13 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:00:12 2026] drbd p13 lima-dv-2: conn( Connecting -> Disconnecting ) [del-peer]
+[Tue Nov 17 20:00:12 2026] drbd p13 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:00:12 2026] drbd p13 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:00:12 2026] drbd p13 lima-dv-2: Connection closed
+[Tue Nov 17 20:00:12 2026] drbd p13 lima-dv-2: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 20:00:12 2026] drbd p13 lima-dv-2: Terminating receiver thread
+[Tue Nov 17 20:00:12 2026] drbd p13 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:00:21 2026] drbd p13 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 20:00:21 2026] drbd p13/0 drbd1013 lima-dv-3: Not enough free bitmap slots
+--- dmesg -T | grep 'drbd p13' | tail -n 80 [dv-3]
+[Tue Nov 17 20:00:19 2026] drbd p13: Starting worker thread (node-id 2)
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: meta-data IO uses: blk-bio
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: disk( Diskless -> Attaching ) [attach]
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: Maximum number of peer devices = 1
+[Tue Nov 17 20:00:19 2026] drbd p13: Method to ensure write ordering: flush
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: Allocating 32 KiB for new bitmap
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: resync bitmap: bits=262127 bits_4k=262127 words=4096 pages=8
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: size = 1024 MB (1048508 KB)
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: Suspended AL updates
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: attached to current UUID: 0000000000000004
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: Starting receiver thread (peer-node-id 0)
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+
+### P13 step 4: UpToDate on dv-3 (up to 120 s more), then the hashes
+t+1 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+7 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+14 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+20 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+26 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+32 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+38 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+44 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+50 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+57 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+63 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+69 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+75 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+82 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+88 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+94 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+100 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+107 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+113 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+119 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+t+125 s [dv-3]
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+  volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+  received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+NOT UpToDate on dv-3 after 120 s
+P13: dv-3 did not reach UpToDate, no hash comparison
+$ [dv-1] drbdsetup status p13 --verbose --statistics
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:0 written:65536 al-writes:16 bm-writes:8 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-3 node-id:2 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p13 --verbose --statistics
+p13 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:Inconsistent backing_dev:/dev/ambar-exp/p13 quorum:no
+      open:no
+      size:1048508 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
+      lower-pending:0 al-suspended:yes blocked:no
+  lima-dv-1 node-id:0 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:DUnknown resync-suspended:no
+        received:0 sent:0 out-of-sync:1048508 pending:0 unacked:0
+
+rc=0
+
+### P13 run 2: forget-peer p13 1 on dv-1 after the node left
+$ [dv-1] drbdadm create-md --force --max-peers=1 p13
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=1 p13
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p13
+rc=0
+$ [dv-2] drbdadm up p13
+rc=0
+wait: dv-1: 1 connections Connected after 2 s at most
+wait: dv-2: 1 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p13/0
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] dd if=/dev/urandom of=/dev/drbd1013 bs=1M count=64 oflag=direct status=none
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose --statistics
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:0 written:65536 al-writes:16 bm-writes:8 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:65536 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+
+### P13 step 1: dv-2 leaves (down on dv-2, p13.res without dv-2 on dv-1, adjust on dv-1)
+@ 20:04:03.270 down on dv-2
+$ [dv-2] drbdadm down p13
+rc=0
+$ [dv-1] drbdadm adjust p13
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no blocked:no
+
+rc=0
+@ 20:04:10.344 forget-peer 1 on dv-1
+$ [dv-1] drbdsetup forget-peer p13 1
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no blocked:no
+
+rc=0
+
+### P13 step 2: dv-3 (node-id 2) joins with a copy
+$ [dv-3] drbdadm create-md --force --max-peers=1 p13
+initializing bitmap (32 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p13
+rc=0
+@ 20:04:16.655 adjust on dv-1
+$ [dv-1] drbdadm adjust p13
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose --statistics
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:1048508 written:65536 al-writes:16 bm-writes:29 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:1048508 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p13 --verbose --statistics
+p13 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:0 written:1048508 al-writes:0 bm-writes:21 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:1048508 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+--- dmesg -T | grep 'drbd p13' | tail -n 80 [dv-1]
+[Tue Nov 17 20:03:47 2026] drbd p13/0 drbd1013: resync bitmap: bits=262127 bits_4k=262127 words=4096 pages=8
+[Tue Nov 17 20:03:47 2026] drbd p13/0 drbd1013: size = 1024 MB (1048508 KB)
+[Tue Nov 17 20:03:47 2026] drbd p13/0 drbd1013: Suspended AL updates
+[Tue Nov 17 20:03:47 2026] drbd p13/0 drbd1013: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 20:03:47 2026] drbd p13/0 drbd1013: attached to current UUID: 0000000000000004
+[Tue Nov 17 20:03:47 2026] drbd p13 lima-dv-2: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:03:47 2026] drbd p13 lima-dv-2: Starting receiver thread (peer-node-id 1)
+[Tue Nov 17 20:03:47 2026] drbd p13 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:03:48 2026] drbd p13 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 20:03:48 2026] drbd p13 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:03:48 2026] drbd p13: Preparing cluster-wide state change 1613293733: 0->1 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:03:48 2026] drbd p13/0 drbd1013 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 20:03:48 2026] drbd p13/0 drbd1013 lima-dv-2: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262127 flags:24
+[Tue Nov 17 20:03:48 2026] drbd p13/0 drbd1013 lima-dv-2: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262127 flags:24
+[Tue Nov 17 20:03:48 2026] drbd p13/0 drbd1013 lima-dv-2: uuid_compare()=no-sync by rule=just-created-both
+[Tue Nov 17 20:03:48 2026] drbd p13: State change 1613293733: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:03:48 2026] drbd p13: Committing cluster-wide state change 1613293733 (16ms)
+[Tue Nov 17 20:03:48 2026] drbd p13 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:03:48 2026] drbd p13/0 drbd1013: quorum( no -> yes ) [connected]
+[Tue Nov 17 20:03:48 2026] drbd p13/0 drbd1013 lima-dv-2: pdsk( DUnknown -> Inconsistent ) repl( Off -> Established ) replication( yes -> no ) peer_replication( yes -> no ) [connected]
+[Tue Nov 17 20:03:48 2026] drbd p13/0 drbd1013: Resumed AL updates
+[Tue Nov 17 20:03:54 2026] drbd p13/0 drbd1013 lima-dv-2: Preparing to skip initial sync
+[Tue Nov 17 20:03:54 2026] drbd p13/0 drbd1013: Bitmap UUID for initial resync: 4B66B2FB4DFBD70E
+[Tue Nov 17 20:03:54 2026] drbd p13/0 drbd1013: new current UUID: 839B35B91FAFEA94 weak: FFFFFFFFFFFFFFFD
+[Tue Nov 17 20:03:54 2026] drbd p13/0 drbd1013 lima-dv-2: cleared bitmap UUID 839B35B91FAFEA94:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 20:03:54 2026] drbd p13/0 drbd1013: disk( Inconsistent -> UpToDate ) [new-c-uuid]
+[Tue Nov 17 20:03:54 2026] drbd p13/0 drbd1013 lima-dv-2: pdsk( Inconsistent -> UpToDate ) replication( no -> yes ) [new-c-uuid]
+[Tue Nov 17 20:03:54 2026] drbd p13/0 drbd1013: persisting effective size = 1024 MB (1048508 KB)
+[Tue Nov 17 20:03:59 2026] drbd p13: Preparing cluster-wide state change 1491886064: 0->all role( Primary )
+[Tue Nov 17 20:03:59 2026] drbd p13: State change 1491886064: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFFC
+[Tue Nov 17 20:03:59 2026] drbd p13: Committing cluster-wide state change 1491886064 (0ms)
+[Tue Nov 17 20:03:59 2026] drbd p13: role( Secondary -> Primary ) [dd:322680 auto-promote]
+[Tue Nov 17 20:03:59 2026] drbd p13/0 drbd1013: gen-obligation: NONE -> ARMED(promoted)
+[Tue Nov 17 20:03:59 2026] drbd p13/0 drbd1013: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 20:03:59 2026] drbd p13/0 drbd1013: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 20:03:59 2026] drbd p13: Preparing cluster-wide state change 2821345583: 0->all role( Secondary )
+[Tue Nov 17 20:03:59 2026] drbd p13: State change 2821345583: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:03:59 2026] drbd p13: Committing cluster-wide state change 2821345583 (0ms)
+[Tue Nov 17 20:03:59 2026] drbd p13: role( Primary -> Secondary ) [dd:322680 auto-demote]
+[Tue Nov 17 20:04:02 2026] drbd p13: Preparing remote state change 2931775133: 1->0 conn( Disconnecting )
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: Committing remote state change 2931775133 (primary_nodes=0)
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 20:04:02 2026] drbd p13/0 drbd1013 lima-dv-2: pdsk( UpToDate -> DUnknown ) repl( Established -> Off ) [remote]
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: Connection closed
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 20:04:02 2026] drbd p13 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:04:03 2026] drbd p13 lima-dv-2: conn( Connecting -> Disconnecting ) [del-peer]
+[Tue Nov 17 20:04:03 2026] drbd p13 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:04:03 2026] drbd p13 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:04:03 2026] drbd p13 lima-dv-2: Connection closed
+[Tue Nov 17 20:04:03 2026] drbd p13 lima-dv-2: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 20:04:03 2026] drbd p13 lima-dv-2: Terminating receiver thread
+[Tue Nov 17 20:04:03 2026] drbd p13 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:04:15 2026] drbd p13 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 20:04:15 2026] drbd p13 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:04:15 2026] drbd p13 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 20:04:15 2026] drbd p13 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:04:15 2026] drbd p13 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 20:04:15 2026] drbd p13 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:04:15 2026] drbd p13: Preparing cluster-wide state change 2702460548: 0->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: self 839B35B91FAFEA94:4B66B2FB4DFBD70E:0000000000000000:0000000000000000 bits:262127 flags:20
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262127 flags:24
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 20:04:15 2026] drbd p13: State change 2702460548: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:04:15 2026] drbd p13: Committing cluster-wide state change 2702460548 (20ms)
+[Tue Nov 17 20:04:15 2026] drbd p13 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) replication( yes -> no ) [connected]
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: repl( WFBitMapS -> SyncSource ) [receive-bitmap]
+[Tue Nov 17 20:04:15 2026] drbd p13/0 drbd1013 lima-dv-3: Began resync as SyncSource (will sync 1048508 KB [262127 bits set]).
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-3: updated UUIDs 839B35B91FAFEA94:0000000000000000:4B66B2FB4DFBD70E:0000000000000000
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-3: Resync done (total 11 sec; paused 0 sec; 95316 K/sec)
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+--- dmesg -T | grep 'drbd p13' | tail -n 80 [dv-3]
+[Tue Nov 17 20:00:19 2026] drbd p13: Starting worker thread (node-id 2)
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: meta-data IO uses: blk-bio
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: disk( Diskless -> Attaching ) [attach]
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: Maximum number of peer devices = 1
+[Tue Nov 17 20:00:19 2026] drbd p13: Method to ensure write ordering: flush
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: Allocating 32 KiB for new bitmap
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: resync bitmap: bits=262127 bits_4k=262127 words=4096 pages=8
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: size = 1024 MB (1048508 KB)
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: Suspended AL updates
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 20:00:19 2026] drbd p13/0 drbd1013: attached to current UUID: 0000000000000004
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: Starting receiver thread (peer-node-id 0)
+[Tue Nov 17 20:00:19 2026] drbd p13 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:03:25 2026] drbd p13 lima-dv-1: conn( Connecting -> Disconnecting ) [down]
+[Tue Nov 17 20:03:25 2026] drbd p13 lima-dv-1: Terminating sender thread
+[Tue Nov 17 20:03:25 2026] drbd p13 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 20:03:25 2026] drbd p13 lima-dv-1: Connection closed
+[Tue Nov 17 20:03:25 2026] drbd p13 lima-dv-1: conn( Disconnecting -> StandAlone ) [disconnected]
+[Tue Nov 17 20:03:25 2026] drbd p13 lima-dv-1: Terminating receiver thread
+[Tue Nov 17 20:03:25 2026] drbd p13 lima-dv-1: Terminating sender thread
+[Tue Nov 17 20:03:25 2026] drbd p13/0 drbd1013: disk( Inconsistent -> Detaching ) quorum( no -> yes ) [down]
+[Tue Nov 17 20:03:25 2026] drbd p13/0 drbd1013: disk( Detaching -> Diskless ) quorum( yes -> no ) [go-diskless]
+[Tue Nov 17 20:03:25 2026] drbd p13/0 drbd1013: Freeing bitmap of size 32 KiB
+[Tue Nov 17 20:04:13 2026] drbd p13: Starting worker thread (node-id 2)
+[Tue Nov 17 20:04:13 2026] drbd p13 lima-dv-1: Starting sender thread (peer-node-id 0)
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: meta-data IO uses: blk-bio
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: disk( Diskless -> Attaching ) [attach]
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: Maximum number of peer devices = 1
+[Tue Nov 17 20:04:13 2026] drbd p13: Method to ensure write ordering: flush
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: Allocating 32 KiB for new bitmap
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: resync bitmap: bits=262127 bits_4k=262127 words=4096 pages=8
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: size = 1024 MB (1048508 KB)
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: Suspended AL updates
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: disk( Attaching -> Inconsistent ) [attach]
+[Tue Nov 17 20:04:13 2026] drbd p13/0 drbd1013: attached to current UUID: 0000000000000004
+[Tue Nov 17 20:04:13 2026] drbd p13 lima-dv-1: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:04:13 2026] drbd p13 lima-dv-1: Starting receiver thread (peer-node-id 0)
+[Tue Nov 17 20:04:13 2026] drbd p13 lima-dv-1: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:04:16 2026] drbd p13 lima-dv-1: Handshake to peer 0 successful: Agreed network protocol version 125
+[Tue Nov 17 20:04:16 2026] drbd p13 lima-dv-1: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:04:16 2026] drbd p13: Preparing remote state change 2702460548: 0->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: drbd_sync_handshake:
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: self 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:262127 flags:24
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: peer 839B35B91FAFEA94:4B66B2FB4DFBD70E:0000000000000000:0000000000000000 bits:262127 flags:20
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: uuid_compare()=target-set-bitmap by rule=just-created-self
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: Setting and writing the whole bitmap, fresh node
+[Tue Nov 17 20:04:16 2026] drbd p13 lima-dv-1: Committing remote state change 2702460548 (primary_nodes=0)
+[Tue Nov 17 20:04:16 2026] drbd p13 lima-dv-1: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [remote]
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013: quorum( no -> yes ) [remote]
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: pdsk( DUnknown -> UpToDate ) repl( Off -> WFBitMapT ) peer_replication( yes -> no ) [remote]
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013: Resumed AL updates
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013: Setting exposed data uuid: 839B35B91FAFEA94
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013: persisting effective size = 1024 MB (1048508 KB)
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: setting UUIDs to 4B66B2FB4DFBD70E:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: repl( WFBitMapT -> SyncTarget ) [receive-bitmap]
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013: Setting exposed data uuid: 839B35B91FAFEA94
+[Tue Nov 17 20:04:16 2026] drbd p13/0 drbd1013 lima-dv-1: Began resync as SyncTarget (will sync 1048508 KB [262127 bits set]).
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-1: peer_replication( no -> yes ) [enable-peer-replication]
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-1: Resync done (total 11 sec; paused 0 sec; 95316 K/sec)
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-1: updated UUIDs 839B35B91FAFEA94:0000000000000000:0000000000000000:0000000000000000
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013: disk( Inconsistent -> UpToDate ) [resync-finished]
+[Tue Nov 17 20:04:27 2026] drbd p13/0 drbd1013 lima-dv-1: repl( SyncTarget -> Established ) [resync-finished]
+
+### P13 step 4: UpToDate on dv-3 (up to 120 s more), then the hashes
+t+1 s [dv-3]
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+  volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  received:1048508 sent:0 out-of-sync:0 pending:0 unacked:0
+UpToDate on dv-3: t+1 s after the mark (poll step 5 s plus the call latency)
+$ [dv-1] dd if=/dev/drbd1013 bs=1M count=64 iflag=direct status=none | sha256sum
+abc698ca27e9875612391be953337219270cbf8090a14a76a64e5ad7caca6770  -
+rc=0
+$ [dv-3] drbdadm primary p13
+rc=0
+$ [dv-3] dd if=/dev/drbd1013 bs=1M count=64 iflag=direct status=none | sha256sum
+abc698ca27e9875612391be953337219270cbf8090a14a76a64e5ad7caca6770  -
+rc=0
+$ [dv-3] drbdadm secondary p13
+rc=0
+$ [dv-1] drbdsetup status p13 --verbose --statistics
+p13 node-id:0 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:1114044 written:65536 al-writes:16 bm-writes:29 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:1048508 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p13 --verbose --statistics
+p13 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1013 disk:UpToDate backing_dev:/dev/ambar-exp/p13 quorum:yes
+      open:no
+      size:1048508 read:65536 written:1048508 al-writes:0 bm-writes:21 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:1048508 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+exit=0
+```
+
+### P14. Кворум при синхронизирующейся копии Inconsistent
+
+Ресурс `p14`: том 4 ГиБ (2 ГиБ данных, непрерывная запись), port 7014, minor 1014; прогоны со свидетелем (`dv-4`) и без свидетеля.
+
+```bash
+stand/spike/pre-2b.sh p14
+```
+
+```text
+### P14 variant with a witness, run 1
+$ [dv-1] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p14
+rc=0
+$ [dv-2] drbdadm up p14
+rc=0
+$ [dv-4] drbdadm up p14
+rc=0
+wait: dv-1: 2 connections Connected after 2 s at most
+wait: dv-2: 2 connections Connected after 2 s at most
+wait: dv-4: 2 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p14/0
+rc=0
+$ [dv-1] drbdsetup status p14 --verbose
+p14 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-1] dd if=/dev/urandom of=/dev/drbd1014 bs=1M count=2048 oflag=direct status=none
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1014
+rc=0
+20:06:51.390
+2373
+started
+free space on dv-1 after the 2 GiB write: /dev/vda1        20G  4.4G   15G  24% /
+
+### P14: dv-3 joins with a copy
+$ [dv-3] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p14
+rc=0
+@ 20:06:56.801 up on dv-3 (UP_T0)
+$ [dv-1] drbdadm adjust p14
+rc=0
+$ [dv-2] drbdadm adjust p14
+rc=0
+$ [dv-4] drbdadm adjust p14
+rc=0
+
+### P14: wait for dv-3 Inconsistent, then down on dv-2
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:51245 written:2339144 al-writes:522 bm-writes:455
+      upper-pending:1 lower-pending:2 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:24 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:2207980 out-of-sync:0 pending:1 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:1.18
+        resync-suspended:no
+        received:0 sent:49440 out-of-sync:4143932 pending:0 unacked:1 dbdt1:19.59 eta:207
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+@ 20:07:03.045 dv-3 seen Inconsistent (t+6 s after up); down on dv-2
+$ [dv-2] drbdadm down p14
+rc=0
+@ 20:07:06.085 down on dv-2 returned
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:53357 written:2399940 al-writes:522 bm-writes:458
+      upper-pending:0 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:39272 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:1.23
+        resync-suspended:no
+        received:0 sent:51552 out-of-sync:4141820 pending:0 unacked:1 dbdt1:0.43 eta:9380
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+@ 20:07:27.307 20 s after down on dv-2
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:108301 written:2762356 al-writes:522 bm-writes:471
+      upper-pending:0 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:65700 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:2048
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:2.52
+        resync-suspended:no
+        received:0 sent:106496 out-of-sync:4087912 pending:1 unacked:1 dbdt1:2.67
+        eta:1494
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:Inconsistent backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:115200 al-writes:0 bm-writes:248 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncTarget peer-disk:UpToDate done:2.75 resync-suspended:no
+        received:115200 sent:0 out-of-sync:4078184 pending:9 unacked:0 dbdt1:4.17 eta:954
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:dependency
+        received:0 sent:0 out-of-sync:4185180 pending:0 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:dependency
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+
+### P14: dv-2 returns
+$ [dv-2] drbdadm up p14
+rc=0
+@ 20:07:30.554 up on dv-2
+wait: dv-2 UpToDate after 112 s at most
+wait: dv-3 UpToDate after 254 s at most
+@ 20:16:48.830 all copies UpToDate
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:4362873 written:7461660 al-writes:522 bm-writes:1004
+      upper-pending:1 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:24 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:4632000 out-of-sync:0 pending:1 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:24 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:4311988 out-of-sync:0 pending:1 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p14 --verbose --statistics
+p14 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:4634052 al-writes:18 bm-writes:392 upper-pending:0
+      lower-pending:2 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:4634060 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:111228 pending:0 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:4316064 al-writes:7 bm-writes:918 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:4316068 sent:0 out-of-sync:0 pending:0 unacked:1
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:110580 pending:0 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-4] drbdsetup status p14 --verbose --statistics
+p14 node-id:3 role:Secondary suspended:no force-io-failures:no
+    write-ordering:none
+  volume:0 minor:1014 disk:Diskless client:yes backing_dev:none quorum:yes open:no
+      size:4193372 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+@ 20:16:56.627 stop the writer
+acked=326613 on-volume=326614
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=1196 probe=alive:R=90 probe=alive:S=1106 longest-gap-without-new-acked=0.7s (from 20:13:37.085)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+20:06:52.942 - 20:16:57.241  "quorum": true  x602
+--- dmesg -T | grep 'drbd p14' | tail -n 80 [dv-1]
+[Tue Nov 17 20:06:44 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 20:06:44 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 20:06:44 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 20:06:57 2026] drbd p14 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 20:06:57 2026] drbd p14 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:06:57 2026] drbd p14 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 20:06:57 2026] drbd p14 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:06:58 2026] drbd p14 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 20:06:58 2026] drbd p14 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:06:58 2026] drbd p14: Preparing cluster-wide state change 2401650196: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: self 23C2AA16826F4B7E:C65DF829CB93522B:0000000000000000:0000000000000000 bits:532511 flags:20
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:1048343 flags:2024
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 20:06:58 2026] drbd p14: State change 2401650196: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF0
+[Tue Nov 17 20:06:58 2026] drbd p14: Committing cluster-wide state change 2401650196 (16ms)
+[Tue Nov 17 20:06:58 2026] drbd p14 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) replication( yes -> no ) [connected]
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: repl( WFBitMapS -> SyncSource ) [receive-bitmap]
+[Tue Nov 17 20:06:58 2026] drbd p14/0 drbd1014 lima-dv-3: Began resync as SyncSource (will sync 4193372 KB [1048343 bits set]).
+[Tue Nov 17 20:06:59 2026] drbd p14: Preparing remote state change 2720487814: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:06:59 2026] drbd p14 lima-dv-2: Committing remote state change 2720487814 (primary_nodes=1)
+[Tue Nov 17 20:07:00 2026] drbd p14: Preparing remote state change 1026419957: 2->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:07:00 2026] drbd p14 lima-dv-3: Committing remote state change 1026419957 (primary_nodes=1)
+[Tue Nov 17 20:07:01 2026] drbd p14: Preparing remote state change 1339369820: 1->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: Committing remote state change 1339369820 (primary_nodes=1)
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 20:07:01 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( UpToDate -> Outdated ) repl( Established -> Off ) [remote]
+[Tue Nov 17 20:07:01 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(peer-data-lost)
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:07:01 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(peer-data-lost) -> MINTING(peer-data-lost)
+[Tue Nov 17 20:07:01 2026] drbd p14/0 drbd1014: new current UUID: E5DFAAFD812639C3 weak: FFFFFFFFFFFFFFFA
+[Tue Nov 17 20:07:01 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(peer-data-lost) -> DISCHARGED(peer-data-lost)
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: Connection closed
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 20:07:01 2026] drbd p14 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:07:01 2026] drbd p14: Preparing remote state change 2585014869: 1->3 conn( Disconnecting )
+[Tue Nov 17 20:07:02 2026] drbd p14 lima-dv-3: Duplicate prepare for remote state change 2585014869
+[Tue Nov 17 20:07:02 2026] drbd p14 lima-dv-4: Committing remote state change 2585014869 (primary_nodes=1)
+[Tue Nov 17 20:07:03 2026] drbd p14: Preparing remote state change 1186503039: 1->2 conn( Disconnecting )
+[Tue Nov 17 20:07:04 2026] drbd p14 lima-dv-3: Committing remote state change 1186503039 (primary_nodes=1)
+[Tue Nov 17 20:07:19 2026] drbd p14/0 drbd1014: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 20:07:28 2026] drbd p14 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 20:07:28 2026] drbd p14 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:07:28 2026] drbd p14: Preparing remote state change 2697809335: 1->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:07:28 2026] drbd p14 lima-dv-4: Committing remote state change 2697809335 (primary_nodes=1)
+[Tue Nov 17 20:07:28 2026] drbd p14: Preparing cluster-wide state change 1154136345: 0->1 role( Primary ) conn( Connected )
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: self E5DFAAFD812639C3:23C2AA16826F4B7E:0000000000000000:0000000000000000 bits:16428 flags:2120
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: peer 23C2AA16826F4B7E:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:20
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Tue Nov 17 20:07:28 2026] drbd p14: State change 1154136345: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF0
+[Tue Nov 17 20:07:28 2026] drbd p14: Committing cluster-wide state change 1154136345 (16ms)
+[Tue Nov 17 20:07:28 2026] drbd p14 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: repl( Off -> WFBitMapS ) [connected]
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 40(1), total 40; compression: 100.0%
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 40(1), total 40; compression: 100.0%
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Outdated -> Inconsistent ) repl( WFBitMapS -> SyncSource ) replication( yes -> no ) [receive-bitmap]
+[Tue Nov 17 20:07:28 2026] drbd p14/0 drbd1014 lima-dv-2: Began resync as SyncSource (will sync 65712 KB [16428 bits set]).
+[Tue Nov 17 20:07:28 2026] drbd p14: Preparing remote state change 2853836342: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:07:28 2026] drbd p14 lima-dv-2: Committing remote state change 2853836342 (primary_nodes=1)
+[Tue Nov 17 20:07:35 2026] drbd p14/0 drbd1014 lima-dv-2: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:10:15 2026] drbd p14/0 drbd1014 lima-dv-2: updated UUIDs E5DFAAFD812639C3:0000000000000000:23C2AA16826F4B7E:0000000000000000
+[Tue Nov 17 20:10:15 2026] drbd p14/0 drbd1014 lima-dv-2: Resync done (total 167 sec; paused 0 sec; 628 K/sec)
+[Tue Nov 17 20:10:15 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:16:38 2026] drbd p14/0 drbd1014 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:16:39 2026] drbd p14/0 drbd1014 lima-dv-3: updated UUIDs E5DFAAFD812639C3:0000000000000000:23C2AA16826F4B7E:0000000000000000
+[Tue Nov 17 20:16:39 2026] drbd p14/0 drbd1014 lima-dv-3: Resync done (total 581 sec; paused 0 sec; 7392 K/sec)
+[Tue Nov 17 20:16:39 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:16:55 2026] drbd p14: Preparing cluster-wide state change 4153388161: 0->all role( Secondary )
+[Tue Nov 17 20:16:55 2026] drbd p14: State change 4153388161: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:16:55 2026] drbd p14: Committing cluster-wide state change 4153388161 (0ms)
+[Tue Nov 17 20:16:55 2026] drbd p14: role( Primary -> Secondary ) [umount:690777 auto-demote]
+[Tue Nov 17 20:16:55 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( UpToDate -> Outdated ) [peer-state]
+[Tue Nov 17 20:16:55 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( Outdated -> Inconsistent ) resync-susp( no -> peer ) replication( yes -> no ) [peer-state]
+
+### P14 variant with a witness, run 2
+$ [dv-1] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p14
+rc=0
+$ [dv-2] drbdadm up p14
+rc=0
+$ [dv-4] drbdadm up p14
+rc=0
+wait: dv-1: 2 connections Connected after 2 s at most
+wait: dv-2: 2 connections Connected after 2 s at most
+wait: dv-4: 2 connections Connected after 2 s at most
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p14/0
+rc=0
+$ [dv-1] drbdsetup status p14 --verbose
+p14 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+
+rc=0
+$ [dv-1] dd if=/dev/urandom of=/dev/drbd1014 bs=1M count=2048 oflag=direct status=none
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1014
+rc=0
+20:18:13.924
+2361
+started
+free space on dv-1 after the 2 GiB write: /dev/vda1        20G  4.4G   15G  24% /
+
+### P14: dv-3 joins with a copy
+$ [dv-3] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p14
+rc=0
+@ 20:18:18.472 up on dv-3 (UP_T0)
+$ [dv-1] drbdadm adjust p14
+rc=0
+$ [dv-2] drbdadm adjust p14
+rc=0
+$ [dv-4] drbdadm adjust p14
+rc=0
+
+### P14: wait for dv-3 Inconsistent, then down on dv-2
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:15757 written:2344168 al-writes:522 bm-writes:453
+      upper-pending:1 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:2213000 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:0.33
+        resync-suspended:no
+        received:0 sent:13952 out-of-sync:4179420 pending:0 unacked:1 dbdt1:6.14 eta:665
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+@ 20:18:23.856 dv-3 seen Inconsistent (t+5 s after up); down on dv-2
+$ [dv-2] drbdadm down p14
+rc=0
+@ 20:18:27.342 down on dv-2 returned
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:18541 written:2402940 al-writes:522 bm-writes:456
+      upper-pending:0 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:26324 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:0.40
+        resync-suspended:no
+        received:0 sent:16736 out-of-sync:4176636 pending:0 unacked:1 dbdt1:0.36
+        eta:11227
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+@ 20:18:48.367 20 s after down on dv-2
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:75533 written:2787604 al-writes:522 bm-writes:469
+      upper-pending:1 lower-pending:2 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:65708 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:1.76
+        resync-suspended:no
+        received:0 sent:73728 out-of-sync:4119656 pending:0 unacked:1 dbdt1:1.53 eta:2629
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:Inconsistent backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:81920 al-writes:0 bm-writes:244 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncTarget peer-disk:UpToDate done:1.95 resync-suspended:no
+        received:81920 sent:0 out-of-sync:4111464 pending:9 unacked:0 dbdt1:3.01 eta:1336
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:dependency
+        received:0 sent:0 out-of-sync:4189276 pending:0 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:dependency
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+
+### P14: dv-2 returns
+$ [dv-2] drbdadm up p14
+rc=0
+@ 20:18:51.312 up on dv-2
+wait: dv-2 UpToDate after 88 s at most
+wait: dv-3 UpToDate after 144 s at most
+@ 20:24:50.159 all copies UpToDate
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:4392669 written:5304964 al-writes:522 bm-writes:876
+      upper-pending:0 lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:2415988 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:4859548 out-of-sync:0 pending:0 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p14 --verbose --statistics
+p14 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:2421856 al-writes:18 bm-writes:379 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:2421860 sent:0 out-of-sync:0 pending:0 unacked:1
+  lima-dv-3 node-id:2 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:81684 pending:0 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:4871148 al-writes:18 bm-writes:741 upper-pending:0
+      lower-pending:1 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:4871152 sent:0 out-of-sync:0 pending:0 unacked:1
+  lima-dv-2 node-id:1 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:81684 pending:0 unacked:0
+  lima-dv-4 node-id:3 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:Diskless peer-client:yes
+        resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-4] drbdsetup status p14 --verbose --statistics
+p14 node-id:3 role:Secondary suspended:no force-io-failures:no
+    write-ordering:none
+  volume:0 minor:1014 disk:Diskless client:yes backing_dev:none quorum:yes open:no
+      size:4193372 read:0 written:0 al-writes:0 bm-writes:0 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+@ 20:24:54.035 stop the writer
+acked=192945 on-volume=192946
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=793 probe=alive:R=66 probe=alive:S=727 longest-gap-without-new-acked=0.7s (from 20:21:36.030)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+20:18:15.121 - 20:24:55.280  "quorum": true  x399
+--- dmesg -T | grep 'drbd p14' | tail -n 80 [dv-1]
+[Tue Nov 17 20:18:06 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 20:18:06 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 20:18:06 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 20:18:18 2026] drbd p14 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 20:18:18 2026] drbd p14 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:18:18 2026] drbd p14 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 20:18:18 2026] drbd p14 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:18:19 2026] drbd p14 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 20:18:19 2026] drbd p14 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:18:19 2026] drbd p14: Preparing cluster-wide state change 807019812: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: self 7F149FDE6D00D0E0:F84A6487D0F99171:0000000000000000:0000000000000000 bits:532511 flags:20
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:1048343 flags:2024
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 20:18:19 2026] drbd p14: State change 807019812: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF0
+[Tue Nov 17 20:18:19 2026] drbd p14: Committing cluster-wide state change 807019812 (16ms)
+[Tue Nov 17 20:18:19 2026] drbd p14 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) replication( yes -> no ) [connected]
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: repl( WFBitMapS -> SyncSource ) [receive-bitmap]
+[Tue Nov 17 20:18:19 2026] drbd p14/0 drbd1014 lima-dv-3: Began resync as SyncSource (will sync 4193372 KB [1048343 bits set]).
+[Tue Nov 17 20:18:20 2026] drbd p14: Preparing remote state change 395868828: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:18:20 2026] drbd p14 lima-dv-2: Committing remote state change 395868828 (primary_nodes=1)
+[Tue Nov 17 20:18:21 2026] drbd p14: Preparing remote state change 3701276143: 2->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:18:22 2026] drbd p14 lima-dv-2: Rejecting concurrent remote state change 196304226 because of state change 3701276143
+[Tue Nov 17 20:18:22 2026] drbd p14 lima-dv-2: Rejecting concurrent remote state change 3038753799 because of state change 3701276143
+[Tue Nov 17 20:18:22 2026] drbd p14 lima-dv-3: Committing remote state change 3701276143 (primary_nodes=1)
+[Tue Nov 17 20:18:23 2026] drbd p14: Preparing remote state change 963252877: 1->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: Committing remote state change 963252877 (primary_nodes=1)
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 20:18:23 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( UpToDate -> Outdated ) repl( Established -> Off ) [remote]
+[Tue Nov 17 20:18:23 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(peer-data-lost)
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:18:23 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(peer-data-lost) -> MINTING(peer-data-lost)
+[Tue Nov 17 20:18:23 2026] drbd p14/0 drbd1014: new current UUID: 2BB675C5D66A8875 weak: FFFFFFFFFFFFFFFA
+[Tue Nov 17 20:18:23 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(peer-data-lost) -> DISCHARGED(peer-data-lost)
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: Connection closed
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 20:18:23 2026] drbd p14 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:18:24 2026] drbd p14: Preparing remote state change 2714837418: 1->3 conn( Disconnecting )
+[Tue Nov 17 20:18:24 2026] drbd p14 lima-dv-3: Duplicate prepare for remote state change 2714837418
+[Tue Nov 17 20:18:24 2026] drbd p14 lima-dv-4: Committing remote state change 2714837418 (primary_nodes=1)
+[Tue Nov 17 20:18:24 2026] drbd p14: Preparing remote state change 1354255287: 1->2 conn( Disconnecting )
+[Tue Nov 17 20:18:25 2026] drbd p14 lima-dv-3: Committing remote state change 1354255287 (primary_nodes=1)
+[Tue Nov 17 20:18:31 2026] drbd p14/0 drbd1014: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 20:18:49 2026] drbd p14 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 20:18:49 2026] drbd p14 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:18:49 2026] drbd p14: Preparing cluster-wide state change 1363876714: 0->1 role( Primary ) conn( Connected )
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: self 2BB675C5D66A8875:7F149FDE6D00D0E0:0000000000000000:0000000000000000 bits:16430 flags:2120
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: peer 7F149FDE6D00D0E0:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:20
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Tue Nov 17 20:18:49 2026] drbd p14: State change 1363876714: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF0
+[Tue Nov 17 20:18:49 2026] drbd p14: Committing cluster-wide state change 1363876714 (16ms)
+[Tue Nov 17 20:18:49 2026] drbd p14 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: repl( Off -> WFBitMapS ) [connected]
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 47(1), total 47; compression: 100.0%
+[Tue Nov 17 20:18:49 2026] drbd p14: Preparing remote state change 3831557618: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 47(1), total 47; compression: 100.0%
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Outdated -> Inconsistent ) repl( WFBitMapS -> SyncSource ) replication( yes -> no ) [receive-bitmap]
+[Tue Nov 17 20:18:49 2026] drbd p14/0 drbd1014 lima-dv-2: Began resync as SyncSource (will sync 65720 KB [16430 bits set]).
+[Tue Nov 17 20:18:49 2026] drbd p14 lima-dv-2: Aborting remote state change 3831557618
+[Tue Nov 17 20:18:49 2026] drbd p14: Preparing remote state change 920034239: 1->3 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:18:49 2026] drbd p14 lima-dv-2: Committing remote state change 920034239 (primary_nodes=1)
+[Tue Nov 17 20:18:57 2026] drbd p14/0 drbd1014 lima-dv-2: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:20:58 2026] drbd p14/0 drbd1014 lima-dv-2: updated UUIDs 2BB675C5D66A8875:0000000000000000:7F149FDE6D00D0E0:0000000000000000
+[Tue Nov 17 20:20:58 2026] drbd p14/0 drbd1014 lima-dv-2: Resync done (total 128 sec; paused 0 sec; 820 K/sec)
+[Tue Nov 17 20:20:58 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:23:16 2026] drbd p14/0 drbd1014 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:24:44 2026] drbd p14/0 drbd1014 lima-dv-3: updated UUIDs 2BB675C5D66A8875:0000000000000000:7F149FDE6D00D0E0:0000000000000000
+[Tue Nov 17 20:24:44 2026] drbd p14/0 drbd1014 lima-dv-3: Resync done (total 385 sec; paused 0 sec; 11240 K/sec)
+[Tue Nov 17 20:24:44 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:24:53 2026] drbd p14: Preparing cluster-wide state change 1088711679: 0->all role( Secondary )
+[Tue Nov 17 20:24:53 2026] drbd p14: State change 1088711679: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:24:53 2026] drbd p14: Committing cluster-wide state change 1088711679 (0ms)
+[Tue Nov 17 20:24:53 2026] drbd p14: role( Primary -> Secondary ) [umount:909627 auto-demote]
+
+### P14 variant without a witness, run 1
+$ [dv-1] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p14
+rc=0
+$ [dv-2] drbdadm up p14
+rc=0
+wait: dv-1: 1 connections Connected after 1 s
+wait: dv-2: 1 connections Connected after 1 s
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p14/0
+rc=0
+$ [dv-1] drbdsetup status p14 --verbose
+p14 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] dd if=/dev/urandom of=/dev/drbd1014 bs=1M count=2048 oflag=direct status=none
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1014
+rc=0
+20:39:42.124
+1724
+started
+free space on dv-1 after the 2 GiB write: /dev/vda1        20G  4.4G   15G  24% /
+
+### P14: dv-3 joins with a copy
+$ [dv-3] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p14
+rc=0
+@ 20:39:47.275 up on dv-3 (UP_T0)
+$ [dv-1] drbdadm adjust p14
+rc=0
+$ [dv-2] drbdadm adjust p14
+rc=0
+
+### P14: wait for dv-3 Inconsistent, then down on dv-2
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:65293 written:2304552 al-writes:522 bm-writes:452
+      upper-pending:0 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:2173388 out-of-sync:0 pending:1 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:1.51
+        resync-suspended:no
+        received:0 sent:63488 out-of-sync:4129884 pending:0 unacked:1 dbdt1:38.56 eta:105
+@ 20:39:51.866 dv-3 seen Inconsistent (t+4 s after up); down on dv-2
+$ [dv-2] drbdadm down p14
+rc=0
+@ 20:39:53.736 down on dv-2 returned
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:87821 written:2328548 al-writes:522 bm-writes:459
+      upper-pending:1 lower-pending:2 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:13772 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:2.05
+        resync-suspended:no
+        received:0 sent:86016 out-of-sync:4107356 pending:0 unacked:1 dbdt1:17.98 eta:223
+
+rc=0
+@ 20:40:15.002 20 s after down on dv-2
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:151565 written:2616280 al-writes:522 bm-writes:472
+      upper-pending:1 lower-pending:3 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:65664 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:3.57
+        resync-suspended:no
+        received:0 sent:149760 out-of-sync:4043624 pending:0 unacked:1 dbdt1:5.16 eta:766
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:Inconsistent backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:150080 al-writes:0 bm-writes:249 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncTarget peer-disk:UpToDate done:3.58 resync-suspended:no
+        received:150080 sent:0 out-of-sync:4043304 pending:3 unacked:0 dbdt1:4.21 eta:938
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:dependency
+        received:0 sent:0 out-of-sync:4176988 pending:0 unacked:0
+
+rc=0
+
+### P14: dv-2 returns
+$ [dv-2] drbdadm up p14
+rc=0
+@ 20:40:18.434 up on dv-2
+wait: dv-2 UpToDate after 59 s
+wait: dv-3 UpToDate after 118 s
+@ 20:43:18.985 all copies UpToDate
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:4354433 written:3475520 al-writes:522 bm-writes:827
+      upper-pending:1 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:824556 out-of-sync:0 pending:1 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:8 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:4412732 out-of-sync:0 pending:1 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p14 --verbose --statistics
+p14 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:830604 al-writes:19 bm-writes:338 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:830604 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:126924 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:4424844 al-writes:18 bm-writes:633 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:4424844 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:0 out-of-sync:126920 pending:0 unacked:0
+
+rc=0
+@ 20:43:21.906 stop the writer
+acked=78462 on-volume=78463
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=438 probe=alive:R=25 probe=alive:S=413 longest-gap-without-new-acked=0.6s (from 20:42:23.851)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+20:39:43.544 - 20:43:23.092  "quorum": true  x219
+--- dmesg -T | grep 'drbd p14' | tail -n 80 [dv-1]
+[Tue Nov 17 20:39:34 2026] drbd p14: State change 2972968910: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:39:34 2026] drbd p14: Committing cluster-wide state change 2972968910 (0ms)
+[Tue Nov 17 20:39:34 2026] drbd p14: role( Primary -> Secondary ) [mkfs.ext4:1250183 auto-demote]
+[Tue Nov 17 20:39:34 2026] drbd p14: Preparing cluster-wide state change 2661660735: 0->all role( Primary )
+[Tue Nov 17 20:39:34 2026] drbd p14: State change 2661660735: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFFC
+[Tue Nov 17 20:39:34 2026] drbd p14: Committing cluster-wide state change 2661660735 (0ms)
+[Tue Nov 17 20:39:34 2026] drbd p14: role( Secondary -> Primary ) [mount:1250208 auto-promote]
+[Tue Nov 17 20:39:34 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 20:39:34 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 20:39:34 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 20:39:47 2026] drbd p14 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 20:39:47 2026] drbd p14 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:39:47 2026] drbd p14 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 20:39:47 2026] drbd p14 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:39:47 2026] drbd p14 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 20:39:47 2026] drbd p14 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:39:47 2026] drbd p14: Preparing cluster-wide state change 1176290708: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: self 9A4210003A0A9AA4:DEA4C78192375721:0000000000000000:0000000000000000 bits:532511 flags:20
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:1048343 flags:2024
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 20:39:47 2026] drbd p14: State change 1176290708: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 20:39:47 2026] drbd p14: Committing cluster-wide state change 1176290708 (20ms)
+[Tue Nov 17 20:39:47 2026] drbd p14 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) replication( yes -> no ) [connected]
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: repl( WFBitMapS -> SyncSource ) [receive-bitmap]
+[Tue Nov 17 20:39:47 2026] drbd p14/0 drbd1014 lima-dv-3: Began resync as SyncSource (will sync 4193372 KB [1048343 bits set]).
+[Tue Nov 17 20:39:48 2026] drbd p14: Preparing remote state change 1947659335: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:39:49 2026] drbd p14 lima-dv-2: Committing remote state change 1947659335 (primary_nodes=1)
+[Tue Nov 17 20:39:50 2026] drbd p14: Preparing remote state change 2943788509: 1->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: Committing remote state change 2943788509 (primary_nodes=1)
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 20:39:50 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( UpToDate -> Outdated ) repl( Established -> Off ) [remote]
+[Tue Nov 17 20:39:50 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(peer-data-lost)
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:39:50 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(peer-data-lost) -> MINTING(peer-data-lost)
+[Tue Nov 17 20:39:50 2026] drbd p14/0 drbd1014: new current UUID: 2F3F4B60C4F7A117 weak: FFFFFFFFFFFFFFFA
+[Tue Nov 17 20:39:50 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(peer-data-lost) -> DISCHARGED(peer-data-lost)
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: Connection closed
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 20:39:50 2026] drbd p14 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:39:51 2026] drbd p14: Preparing remote state change 1912131793: 1->2 conn( Disconnecting )
+[Tue Nov 17 20:39:51 2026] drbd p14 lima-dv-3: Committing remote state change 1912131793 (primary_nodes=1)
+[Tue Nov 17 20:40:02 2026] drbd p14/0 drbd1014: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 20:40:16 2026] drbd p14 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 20:40:16 2026] drbd p14 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:40:16 2026] drbd p14: Preparing cluster-wide state change 1812084286: 0->1 role( Primary ) conn( Connected )
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: self 2F3F4B60C4F7A117:9A4210003A0A9AA4:0000000000000000:0000000000000000 bits:16419 flags:2120
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: peer 9A4210003A0A9AA4:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:20
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Tue Nov 17 20:40:16 2026] drbd p14: State change 1812084286: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 20:40:16 2026] drbd p14: Committing cluster-wide state change 1812084286 (16ms)
+[Tue Nov 17 20:40:16 2026] drbd p14 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: repl( Off -> WFBitMapS ) [connected]
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 47(1), total 47; compression: 100.0%
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 47(1), total 47; compression: 100.0%
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Outdated -> Inconsistent ) repl( WFBitMapS -> SyncSource ) replication( yes -> no ) [receive-bitmap]
+[Tue Nov 17 20:40:16 2026] drbd p14/0 drbd1014 lima-dv-2: Began resync as SyncSource (will sync 65676 KB [16419 bits set]).
+[Tue Nov 17 20:40:16 2026] drbd p14: Preparing remote state change 1595628039: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:40:16 2026] drbd p14 lima-dv-2: Committing remote state change 1595628039 (primary_nodes=1)
+[Tue Nov 17 20:40:23 2026] drbd p14/0 drbd1014 lima-dv-2: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:41:13 2026] drbd p14/0 drbd1014 lima-dv-2: updated UUIDs 2F3F4B60C4F7A117:0000000000000000:9A4210003A0A9AA4:0000000000000000
+[Tue Nov 17 20:41:13 2026] drbd p14/0 drbd1014 lima-dv-2: Resync done (total 56 sec; paused 0 sec; 1816 K/sec)
+[Tue Nov 17 20:41:13 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:42:51 2026] drbd p14/0 drbd1014 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:43:11 2026] drbd p14/0 drbd1014 lima-dv-3: updated UUIDs 2F3F4B60C4F7A117:0000000000000000:9A4210003A0A9AA4:0000000000000000
+[Tue Nov 17 20:43:11 2026] drbd p14/0 drbd1014 lima-dv-3: Resync done (total 203 sec; paused 0 sec; 21124 K/sec)
+[Tue Nov 17 20:43:11 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:43:21 2026] drbd p14: Preparing cluster-wide state change 1700696975: 0->all role( Secondary )
+[Tue Nov 17 20:43:21 2026] drbd p14: State change 1700696975: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:43:21 2026] drbd p14: Committing cluster-wide state change 1700696975 (4ms)
+[Tue Nov 17 20:43:21 2026] drbd p14: role( Primary -> Secondary ) [umount:1340465 auto-demote]
+[Tue Nov 17 20:43:21 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( UpToDate -> Outdated ) [peer-state]
+[Tue Nov 17 20:43:21 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( Outdated -> Inconsistent ) resync-susp( no -> peer ) replication( yes -> no ) [peer-state]
+
+### P14 variant without a witness, run 2
+$ [dv-1] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-2] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-1] drbdadm up p14
+rc=0
+$ [dv-2] drbdadm up p14
+rc=0
+wait: dv-1: 1 connections Connected after 1 s
+wait: dv-2: 1 connections Connected after 1 s
+$ [dv-1] drbdadm new-current-uuid --clear-bitmap p14/0
+rc=0
+$ [dv-1] drbdsetup status p14 --verbose
+p14 node-id:0 role:Secondary suspended:no force-io-failures:no
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+
+rc=0
+$ [dv-1] dd if=/dev/urandom of=/dev/drbd1014 bs=1M count=2048 oflag=direct status=none
+rc=0
+$ [dv-1] mkfs.ext4 -q -F -E nodiscard /dev/drbd1014
+rc=0
+20:44:34.966
+2136
+started
+free space on dv-1 after the 2 GiB write: /dev/vda1        20G  4.4G   15G  24% /
+
+### P14: dv-3 joins with a copy
+$ [dv-3] drbdadm create-md --force --max-peers=7 p14
+initializing bitmap (896 KB) to all zero
+initializing activity log
+Writing meta data...
+New drbd meta data block successfully created.
+rc=0
+$ [dv-3] drbdadm up p14
+rc=0
+@ 20:44:39.558 up on dv-3 (UP_T0)
+$ [dv-1] drbdadm adjust p14
+rc=0
+$ [dv-2] drbdadm adjust p14
+rc=0
+
+### P14: wait for dv-3 Inconsistent, then down on dv-2
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:45837 written:2321272 al-writes:522 bm-writes:452
+      upper-pending:0 lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:2190104 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:1.05
+        resync-suspended:no
+        received:0 sent:44032 out-of-sync:4149340 pending:0 unacked:0 dbdt1:31.43 eta:129
+@ 20:44:44.221 dv-3 seen Inconsistent (t+5 s after up); down on dv-2
+$ [dv-2] drbdadm down p14
+rc=0
+@ 20:44:45.478 down on dv-2 returned
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:47629 written:2350688 al-writes:522 bm-writes:456
+      upper-pending:1 lower-pending:2 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:15404 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:1.09
+        resync-suspended:no
+        received:0 sent:45824 out-of-sync:4147548 pending:0 unacked:1 dbdt1:12.38 eta:327
+
+rc=0
+@ 20:45:06.510 20 s after down on dv-2
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:93773 written:2730788 al-writes:522 bm-writes:468
+      upper-pending:0 lower-pending:1 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:65696 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncSource peer-disk:Inconsistent done:2.19
+        resync-suspended:no
+        received:0 sent:91968 out-of-sync:4101416 pending:0 unacked:1 dbdt1:0.44 eta:9003
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:Inconsistent backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:92072 al-writes:0 bm-writes:244 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:SyncTarget peer-disk:UpToDate done:2.20 resync-suspended:no
+        received:92072 sent:0 out-of-sync:4101312 pending:5 unacked:0 dbdt1:0.38
+        eta:10648
+  lima-dv-2 node-id:1 connection:Connecting role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:dependency
+        received:0 sent:0 out-of-sync:4193372 pending:0 unacked:0
+
+rc=0
+
+### P14: dv-2 returns
+$ [dv-2] drbdadm up p14
+rc=0
+@ 20:45:09.427 up on dv-2
+wait: dv-2 UpToDate after 71 s
+wait: dv-3 UpToDate after 84 s
+@ 20:47:47.974 all copies UpToDate
+$ [dv-1] drbdsetup status p14 --verbose --statistics
+p14 node-id:0 role:Primary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:yes
+      size:4193372 read:4329149 written:3499000 al-writes:522 bm-writes:806
+      upper-pending:0 lower-pending:0 al-suspended:no blocked:no
+  lima-dv-2 node-id:1 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:669668 out-of-sync:0 pending:0 unacked:0
+  lima-dv-3 node-id:2 connection:Connected role:Secondary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:0 sent:4271476 out-of-sync:0 pending:0 unacked:0
+
+rc=0
+$ [dv-2] drbdsetup status p14 --verbose --statistics
+p14 node-id:1 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:672560 al-writes:18 bm-writes:321 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:672560 sent:0 out-of-sync:0 pending:0 unacked:2
+  lima-dv-3 node-id:2 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:91212 pending:0 unacked:0
+
+rc=0
+$ [dv-3] drbdsetup status p14 --verbose --statistics
+p14 node-id:2 role:Secondary suspended:no force-io-failures:no
+    write-ordering:flush
+  volume:0 minor:1014 disk:UpToDate backing_dev:/dev/ambar-exp/p14 quorum:yes
+      open:no
+      size:4193372 read:0 written:4277076 al-writes:6 bm-writes:618 upper-pending:0
+      lower-pending:0 al-suspended:no blocked:no
+  lima-dv-1 node-id:0 connection:Connected role:Primary tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Established peer-disk:UpToDate resync-suspended:no
+        received:4277076 sent:0 out-of-sync:0 pending:0 unacked:0
+  lima-dv-2 node-id:1 connection:StandAlone role:Unknown tls:no congested:no
+      ap-in-flight:0 rs-in-flight:0
+    volume:0 replication:Off peer-disk:Outdated resync-suspended:no
+        received:0 sent:0 out-of-sync:91212 pending:0 unacked:0
+
+rc=0
+@ 20:47:53.025 stop the writer
+acked=79475 on-volume=79476
+--- probe.sh log (stdout and stderr)
+--- watch.sh log
+samples=395 probe=alive:R=30 probe=alive:S=365 longest-gap-without-new-acked=0.6s (from 20:47:25.727)
+--- quorum log of dv-1 (runs of equal values: first - last  value  samples)
+20:44:36.393 - 20:47:54.135  "quorum": true  x197
+--- dmesg -T | grep 'drbd p14' | tail -n 80 [dv-1]
+[Tue Nov 17 20:44:27 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 20:44:27 2026] drbd p14: Preparing cluster-wide state change 262455620: 0->all role( Secondary )
+[Tue Nov 17 20:44:27 2026] drbd p14: State change 262455620: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:44:27 2026] drbd p14: Committing cluster-wide state change 262455620 (0ms)
+[Tue Nov 17 20:44:27 2026] drbd p14: role( Primary -> Secondary ) [mkfs.ext4:1344574 auto-demote]
+[Tue Nov 17 20:44:27 2026] drbd p14: Preparing cluster-wide state change 2235419928: 0->all role( Primary )
+[Tue Nov 17 20:44:27 2026] drbd p14: State change 2235419928: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFFC
+[Tue Nov 17 20:44:27 2026] drbd p14: Committing cluster-wide state change 2235419928 (0ms)
+[Tue Nov 17 20:44:27 2026] drbd p14: role( Secondary -> Primary ) [mount:1344600 auto-promote]
+[Tue Nov 17 20:44:27 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(promoted)
+[Tue Nov 17 20:44:27 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(promoted) -> MINTING(promoted)
+[Tue Nov 17 20:44:27 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(promoted) -> DISCHARGED(promoted)
+[Tue Nov 17 20:44:39 2026] drbd p14 lima-dv-3: Starting sender thread (peer-node-id 2)
+[Tue Nov 17 20:44:39 2026] drbd p14 lima-dv-3: conn( StandAlone -> Unconnected ) [connect]
+[Tue Nov 17 20:44:39 2026] drbd p14 lima-dv-3: Starting receiver thread (peer-node-id 2)
+[Tue Nov 17 20:44:39 2026] drbd p14 lima-dv-3: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:44:40 2026] drbd p14 lima-dv-3: Handshake to peer 2 successful: Agreed network protocol version 125
+[Tue Nov 17 20:44:40 2026] drbd p14 lima-dv-3: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:44:40 2026] drbd p14: Preparing cluster-wide state change 2833258330: 0->2 role( Primary ) conn( Connected )
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: drbd_sync_handshake:
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: self FC722A84D21B340A:A523D67895C262A6:0000000000000000:0000000000000000 bits:532511 flags:20
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: peer 0000000000000004:0000000000000000:0000000000000000:0000000000000000 bits:1048343 flags:2024
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: uuid_compare()=source-set-bitmap by rule=just-created-peer
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: Setting and writing one bitmap slot, after drbd_sync_handshake
+[Tue Nov 17 20:44:40 2026] drbd p14: State change 2833258330: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 20:44:40 2026] drbd p14: Committing cluster-wide state change 2833258330 (20ms)
+[Tue Nov 17 20:44:40 2026] drbd p14 lima-dv-3: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( DUnknown -> Inconsistent ) repl( Off -> WFBitMapS ) replication( yes -> no ) [connected]
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 21(1), total 21; compression: 100.0%
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: repl( WFBitMapS -> SyncSource ) [receive-bitmap]
+[Tue Nov 17 20:44:40 2026] drbd p14/0 drbd1014 lima-dv-3: Began resync as SyncSource (will sync 4193372 KB [1048343 bits set]).
+[Tue Nov 17 20:44:41 2026] drbd p14: Preparing remote state change 2104196946: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:44:41 2026] drbd p14 lima-dv-2: Committing remote state change 2104196946 (primary_nodes=1)
+[Tue Nov 17 20:44:42 2026] drbd p14: Preparing remote state change 1406889565: 1->0 conn( Disconnecting ) disk( Outdated )
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: Committing remote state change 1406889565 (primary_nodes=1)
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: conn( Connected -> TearDown ) peer( Secondary -> Unknown ) [remote]
+[Tue Nov 17 20:44:42 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( UpToDate -> Outdated ) repl( Established -> Off ) [remote]
+[Tue Nov 17 20:44:42 2026] drbd p14/0 drbd1014: gen-obligation: DISCHARGED(promoted) -> ARMED(peer-data-lost)
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: Terminating sender thread
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: Starting sender thread (peer-node-id 1)
+[Tue Nov 17 20:44:42 2026] drbd p14/0 drbd1014: gen-obligation: ARMED(peer-data-lost) -> MINTING(peer-data-lost)
+[Tue Nov 17 20:44:42 2026] drbd p14/0 drbd1014: new current UUID: CD284E691A7D3A19 weak: FFFFFFFFFFFFFFFA
+[Tue Nov 17 20:44:42 2026] drbd p14/0 drbd1014: gen-obligation: MINTING(peer-data-lost) -> DISCHARGED(peer-data-lost)
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: Connection closed
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: conn( TearDown -> Unconnected ) [disconnected]
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: Restarting receiver thread
+[Tue Nov 17 20:44:42 2026] drbd p14 lima-dv-2: conn( Unconnected -> Connecting ) [connecting]
+[Tue Nov 17 20:44:43 2026] drbd p14: Preparing remote state change 3556844296: 1->2 conn( Disconnecting )
+[Tue Nov 17 20:44:43 2026] drbd p14 lima-dv-3: Committing remote state change 3556844296 (primary_nodes=1)
+[Tue Nov 17 20:44:57 2026] drbd p14/0 drbd1014: md_sync_timer expired! Worker calls drbd_md_sync().
+[Tue Nov 17 20:45:07 2026] drbd p14 lima-dv-2: Handshake to peer 1 successful: Agreed network protocol version 125
+[Tue Nov 17 20:45:07 2026] drbd p14 lima-dv-2: Feature flags enabled on protocol level: 0x7ff TRIM THIN_RESYNC WRITE_SAME WRITE_ZEROES RESYNC_DAGTAG WRITE_POSTPONE
+[Tue Nov 17 20:45:07 2026] drbd p14: Preparing cluster-wide state change 2689707577: 0->1 role( Primary ) conn( Connected )
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: drbd_sync_handshake:
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: self CD284E691A7D3A19:FC722A84D21B340A:0000000000000000:0000000000000000 bits:16428 flags:2120
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: peer FC722A84D21B340A:0000000000000000:0000000000000000:0000000000000000 bits:0 flags:20
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: uuid_compare()=source-use-bitmap by rule=bitmap-self
+[Tue Nov 17 20:45:07 2026] drbd p14: State change 2689707577: primary_nodes=1, weak_nodes=FFFFFFFFFFFFFFF8
+[Tue Nov 17 20:45:07 2026] drbd p14: Committing cluster-wide state change 2689707577 (16ms)
+[Tue Nov 17 20:45:07 2026] drbd p14 lima-dv-2: conn( Connecting -> Connected ) peer( Unknown -> Secondary ) [connected]
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: repl( Off -> WFBitMapS ) [connected]
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: send bitmap stats [Bytes(packets)]: plain 0(0), RLE 47(1), total 47; compression: 100.0%
+[Tue Nov 17 20:45:07 2026] drbd p14: Preparing remote state change 2961952057: 1->2 role( Secondary ) conn( Connected )
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: receive bitmap stats [Bytes(packets)]: plain 0(0), RLE 47(1), total 47; compression: 100.0%
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Outdated -> Inconsistent ) repl( WFBitMapS -> SyncSource ) replication( yes -> no ) [receive-bitmap]
+[Tue Nov 17 20:45:07 2026] drbd p14/0 drbd1014 lima-dv-2: Began resync as SyncSource (will sync 65712 KB [16428 bits set]).
+[Tue Nov 17 20:45:07 2026] drbd p14 lima-dv-2: Aborting remote state change 2961952057
+[Tue Nov 17 20:45:15 2026] drbd p14/0 drbd1014 lima-dv-2: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:46:16 2026] drbd p14/0 drbd1014 lima-dv-2: updated UUIDs CD284E691A7D3A19:0000000000000000:FC722A84D21B340A:0000000000000000
+[Tue Nov 17 20:46:16 2026] drbd p14/0 drbd1014 lima-dv-2: Resync done (total 68 sec; paused 0 sec; 1536 K/sec)
+[Tue Nov 17 20:46:16 2026] drbd p14/0 drbd1014 lima-dv-2: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:47:36 2026] drbd p14/0 drbd1014 lima-dv-3: replication( no -> yes ) [enable-replication]
+[Tue Nov 17 20:47:41 2026] drbd p14/0 drbd1014 lima-dv-3: updated UUIDs CD284E691A7D3A19:0000000000000000:FC722A84D21B340A:0000000000000000
+[Tue Nov 17 20:47:41 2026] drbd p14/0 drbd1014 lima-dv-3: Resync done (total 181 sec; paused 0 sec; 23544 K/sec)
+[Tue Nov 17 20:47:41 2026] drbd p14/0 drbd1014 lima-dv-3: pdsk( Inconsistent -> UpToDate ) repl( SyncSource -> Established ) [resync-finished]
+[Tue Nov 17 20:47:52 2026] drbd p14: Preparing cluster-wide state change 3088165589: 0->all role( Secondary )
+[Tue Nov 17 20:47:52 2026] drbd p14: State change 3088165589: primary_nodes=0, weak_nodes=0
+[Tue Nov 17 20:47:52 2026] drbd p14: Committing cluster-wide state change 3088165589 (4ms)
+[Tue Nov 17 20:47:52 2026] drbd p14: role( Primary -> Secondary ) [umount:1434485 auto-demote]
+exit=0
+```
+
+
 ## Проверки агента на стенде
 
 Первые две проверки выполнены 2026-11-13 на стенде в поде `toolbox`, по одному прогону. Третья
