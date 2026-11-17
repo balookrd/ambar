@@ -39,6 +39,33 @@ fn the_lowest_diskful_node_id_leads_the_initial_sync() {
 }
 
 #[test]
+fn retiring_node_does_not_lead_initial_sync() {
+    let mut spec = sample();
+    spec.nodes[0].retiring = true;
+    assert_eq!(spec.initial_sync_leader().map(|n| n.name.as_str()), Some("lima-dv-2"));
+}
+
+#[test]
+fn phase1_json_without_retiring_defaults_to_false() {
+    let json_str = r#"{
+        "name": "vol-1",
+        "sizeBytes": 1073741824,
+        "protocol": "C",
+        "minor": 1000,
+        "port": 7900,
+        "maxPeers": 2,
+        "initialSync": "Skip",
+        "nodes": [
+            {"name": "n1", "nodeId": 0, "address": "192.0.2.1", "diskful": true},
+            {"name": "n2", "nodeId": 1, "address": "192.0.2.2", "diskful": true}
+        ]
+    }"#;
+    let spec = VolumeSpec::from_json(json_str).unwrap();
+    assert!(!spec.nodes[0].retiring);
+    assert!(!spec.nodes[1].retiring);
+}
+
+#[test]
 fn rejects_a_single_copy() {
     let mut spec = sample();
     spec.nodes[1].diskful = false;
@@ -169,6 +196,7 @@ fn replica_count_edges() {
                 address: "192.168.104.5".parse().unwrap(),
                 node_id: 5,
                 diskful: false,
+                retiring: false,
             });
         }),
         Err(SpecError::Replicas(1))

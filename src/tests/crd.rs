@@ -57,6 +57,37 @@ fn client_is_diskless() {
 }
 
 #[test]
+fn retiring_node_converts_to_diskful_retiring() {
+    let spec = spec_with(|v| {
+        v["nodes"].as_array_mut().unwrap().push(json!(
+            {"name": "n4", "nodeId": 3, "address": "192.0.2.4", "kind": "Retiring"}
+        ));
+        v["maxPeers"] = json!(3);
+    });
+    let volume = to_volume_spec("pvc-1", &spec).unwrap();
+    assert_eq!(volume.nodes[3].name, "n4");
+    assert!(volume.nodes[3].diskful);
+    assert!(volume.nodes[3].retiring);
+    assert!(!volume.nodes[0].retiring);
+    assert!(!volume.nodes[1].retiring);
+    assert!(!volume.nodes[2].retiring);
+}
+
+#[test]
+fn single_replica_and_single_retiring_passes_validation() {
+    let spec = spec_with(|v| {
+        v["nodes"] = json!([
+            {"name": "n1", "nodeId": 0, "address": "192.0.2.1", "kind": "Replica"},
+            {"name": "n2", "nodeId": 1, "address": "192.0.2.2", "kind": "Retiring"},
+        ]);
+        v["maxPeers"] = json!(2);
+    });
+    let volume = to_volume_spec("pvc-1", &spec).unwrap();
+    assert_eq!(volume.diskful_nodes().count(), 2);
+    assert!(volume.nodes[1].retiring);
+}
+
+#[test]
 fn bad_address_is_reported_with_node() {
     let spec = spec_with(|v| v["nodes"][1]["address"] = json!("not-an-ip"));
     assert_eq!(
@@ -137,24 +168,40 @@ fn spec_carries_transition_and_create_rules_and_default() {
         messages,
         [
             "sizeBytes, minor, port, maxPeers and protocol are immutable",
-            "the set of Replica and Witness nodes is immutable",
-            "a member node cannot change nodeId, address or kind",
+            "a member node cannot change nodeId or address",
+            "this change of a node's kind is not allowed",
+            "a node can become Retiring only from Replica",
+            "a Replica node is removed only through Retiring",
+            "the set of Replica, Retiring and Witness nodes changes only when initialSync is Done",
             "initialSync cannot go back to Skip",
             "at least two Replica nodes are required",
+            "at most one node can be Retiring",
             "nodeId must be unique among nodes",
             "address must be unique among nodes",
             "sizeBytes must be a multiple of 4096",
             "maxPeers must be at least the number of other nodes",
         ]
     );
-    // The first four are transition rules, the rest run on create too.
-    for (rule, message) in &rules[..4] {
+    // The first seven are transition rules, the rest run on create too.
+    for (rule, message) in &rules[..7] {
         assert!(rule.contains("oldSelf"), "{message}");
     }
-    for (rule, message) in &rules[4..] {
+    for (rule, message) in &rules[7..] {
         assert!(!rule.contains("oldSelf"), "{message}");
     }
     assert_eq!(spec_schema(&crd)["properties"]["initialSync"]["default"], "Done");
+}
+
+#[test]
+fn node_kind_schema_has_four_variants() {
+    let crd = crd_value();
+    let kind = &spec_schema(&crd)["properties"]["nodes"]["items"]["properties"]["kind"];
+    let variants = kind["enum"].as_array().unwrap();
+    assert_eq!(variants.len(), 4);
+    assert_eq!(
+        variants,
+        &[json!("Replica"), json!("Retiring"), json!("Witness"), json!("Client")]
+    );
 }
 
 #[test]

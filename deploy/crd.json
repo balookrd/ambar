@@ -54,6 +54,7 @@
                         "kind": {
                           "enum": [
                             "Replica",
+                            "Retiring",
                             "Witness",
                             "Client"
                           ],
@@ -119,12 +120,24 @@
                     "rule": "self.sizeBytes == oldSelf.sizeBytes && self.minor == oldSelf.minor && self.port == oldSelf.port && self.maxPeers == oldSelf.maxPeers && self.protocol == oldSelf.protocol"
                   },
                   {
-                    "message": "the set of Replica and Witness nodes is immutable",
-                    "rule": "self.nodes.filter(n, n.kind != 'Client').size() == oldSelf.nodes.filter(o, o.kind != 'Client').size() && self.nodes.filter(n, n.kind != 'Client').all(n, oldSelf.nodes.exists(o, o.name == n.name && o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind)) && oldSelf.nodes.filter(o, o.kind != 'Client').all(o, self.nodes.exists(n, o.name == n.name && o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind))"
+                    "message": "a member node cannot change nodeId or address",
+                    "rule": "self.nodes.all(n, oldSelf.nodes.all(o, o.name != n.name || (o.nodeId == n.nodeId && o.address == n.address)))"
                   },
                   {
-                    "message": "a member node cannot change nodeId, address or kind",
-                    "rule": "self.nodes.all(n, oldSelf.nodes.all(o, o.name != n.name || (o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind)))"
+                    "message": "this change of a node's kind is not allowed",
+                    "rule": "self.nodes.all(n, oldSelf.nodes.all(o, o.name != n.name || o.kind == n.kind || (o.kind == 'Witness' && n.kind == 'Replica') || (o.kind == 'Client' && n.kind == 'Replica') || (o.kind == 'Replica' && n.kind == 'Retiring') || (o.kind == 'Client' && n.kind == 'Witness') || (o.kind == 'Witness' && n.kind == 'Client')))"
+                  },
+                  {
+                    "message": "a node can become Retiring only from Replica",
+                    "rule": "self.nodes.all(n, n.kind != 'Retiring' || oldSelf.nodes.exists(o, o.name == n.name))"
+                  },
+                  {
+                    "message": "a Replica node is removed only through Retiring",
+                    "rule": "oldSelf.nodes.all(o, o.kind == 'Client' || o.kind == 'Witness' || o.kind == 'Retiring' || self.nodes.exists(n, n.name == o.name))"
+                  },
+                  {
+                    "message": "the set of Replica, Retiring and Witness nodes changes only when initialSync is Done",
+                    "rule": "(self.nodes.filter(n, n.kind != 'Client').map(n, n.name + '/' + n.kind) == oldSelf.nodes.filter(o, o.kind != 'Client').map(o, o.name + '/' + o.kind)) || (self.initialSync == 'Done' && oldSelf.initialSync == 'Done')"
                   },
                   {
                     "message": "initialSync cannot go back to Skip",
@@ -133,6 +146,10 @@
                   {
                     "message": "at least two Replica nodes are required",
                     "rule": "self.nodes.filter(n, n.kind == 'Replica').size() >= 2"
+                  },
+                  {
+                    "message": "at most one node can be Retiring",
+                    "rule": "self.nodes.filter(n, n.kind == 'Retiring').size() <= 1"
                   },
                   {
                     "message": "nodeId must be unique among nodes",

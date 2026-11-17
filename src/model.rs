@@ -49,6 +49,9 @@ pub struct VolumeNode {
     pub node_id: u32,
     /// `true`: the node holds a copy; `false`: it attaches without a disk.
     pub diskful: bool,
+    /// `true`: the node holds a copy that is being removed (`Retiring`).
+    #[serde(default)]
+    pub retiring: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,10 +162,10 @@ impl VolumeSpec {
         self.nodes.iter().filter(|n| n.diskful)
     }
 
-    /// The diskful node with the lowest node id runs the one-time
+    /// The diskful, non-retiring node with the lowest node id runs the one-time
     /// "skip initial sync" command for a freshly created volume.
     pub fn initial_sync_leader(&self) -> Option<&VolumeNode> {
-        self.diskful_nodes().min_by_key(|n| n.node_id)
+        self.diskful_nodes().filter(|n| !n.retiring).min_by_key(|n| n.node_id)
     }
 }
 
