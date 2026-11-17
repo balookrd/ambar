@@ -22,6 +22,7 @@
 //! | 3 | no object, or the object is being deleted | `NOT_FOUND` |
 //! | 4 | the staging path already has `/dev/drbd<minor>` mounted: done, also when the object is being deleted or gone (checked before step 3). Another source there | `FAILED_PRECONDITION` |
 //! | 5 | this node is not in `spec.nodes`: add it as a `Client` (`join_as_client`, a JSON patch with uid and node-list tests). Not in `ambar-nodes` | `FAILED_PRECONDITION` |
+//! | 5 | this node is `Retiring` in `spec.nodes` | `UNAVAILABLE` |
 //! | 5 | no room (`maxPeers`), `nodeId` or address taken by another member | `RESOURCE_EXHAUSTED` |
 //! | 6 | `Agent::reconcile_one` refuses the volume | `FAILED_PRECONDITION` |
 //! | 6, 7 | the API server or the pass fails; the resource is not usable within `stage_wait` (`reconcile_one` is repeated between the polls while the last pass reported progress) | `UNAVAILABLE` |
@@ -592,6 +593,9 @@ impl NodeService {
         for _ in 0..EDIT_ATTEMPTS {
             let object = self.live_object(volume).await?;
             if let Some(member) = object.spec.nodes.iter().find(|n| n.name == *node) {
+                if member.kind == NodeKind::Retiring {
+                    return Err(Status::unavailable("the copy on this node is being removed"));
+                }
                 return Ok(Join::AlreadyMember(member.kind));
             }
             let cluster = self
