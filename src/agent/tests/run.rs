@@ -12,7 +12,8 @@ use super::*;
 use crate::agent::kube::{
     Objects, initial_sync_done_ops, patch_retrying, patch_status_retrying, remove_finalizer_ops, remove_node_entry_ops,
 };
-use crate::crd::ReplicatedVolumeSpec;
+use crate::crd::{MemberNode, ReplicatedVolumeSpec};
+use crate::drbd::status::DiskState;
 use crate::exec::Output;
 use crate::model::InitialSync;
 use crate::tests::volumes::FakeVolumes;
@@ -2820,5 +2821,415 @@ async fn shutdown_waits_for_the_pass_in_progress() {
     assert!(
         e.volumes.entry_of(VOLUME, DV1).is_some(),
         "the pass ran to its end, status included"
+    );
+}
+
+// ---- retire_reasons (Task 6) ----
+
+#[test]
+fn retire_reasons_checks_all_rules() {
+    let spec: ReplicatedVolumeSpec = serde_json::from_value(json!({
+        "sizeBytes": 1073741824u64, "protocol": "C", "minor": 1000, "port": 7000, "maxPeers": 7,
+        "initialSync": "Done",
+        "nodes": [
+            {"name": "dv-1", "nodeId": 0, "address": "192.168.104.1", "kind": "Retiring"},
+            {"name": "dv-2", "nodeId": 1, "address": "192.168.104.3", "kind": "Replica"},
+            {"name": "dv-3", "nodeId": 2, "address": "192.168.104.4", "kind": "Witness"},
+            {"name": "dv-4", "nodeId": 3, "address": "192.168.104.5", "kind": "Client"},
+        ],
+    }))
+    .unwrap();
+
+    let build_status = |role: Role,
+                        dv2_state: ConnectionState,
+                        dv2_disk: DiskState,
+                        dv3_state: ConnectionState,
+                        dv4: Option<ConnectionState>|
+     -> ResourceStatus {
+        let dv2_conn = crate::drbd::status::Connection {
+            name: "dv-2".to_string(),
+            peer_node_id: 1,
+            connection_state: dv2_state,
+            peer_role: Role::Primary, // peer Primary does NOT prevent retiring
+            peer_devices: vec![crate::drbd::status::PeerDevice {
+                volume: 0,
+                replication_state: "Established".to_string(),
+                peer_disk_state: dv2_disk,
+                peer_client: false,
+                out_of_sync: 0,
+            }],
+        };
+        let dv3_conn = crate::drbd::status::Connection {
+            name: "dv-3".to_string(),
+            peer_node_id: 2,
+            connection_state: dv3_state,
+            peer_role: Role::Secondary,
+            peer_devices: vec![crate::drbd::status::PeerDevice {
+                volume: 0,
+                replication_state: "Established".to_string(),
+                peer_disk_state: DiskState::Diskless,
+                peer_client: true,
+                out_of_sync: 0,
+            }],
+        };
+        let mut connections = vec![dv2_conn, dv3_conn];
+        if let Some(dv4_state) = dv4 {
+            connections.push(crate::drbd::status::Connection {
+                name: "dv-4".to_string(),
+                peer_node_id: 3,
+                connection_state: dv4_state,
+                peer_role: Role::Secondary,
+                peer_devices: vec![crate::drbd::status::PeerDevice {
+                    volume: 0,
+                    replication_state: "Established".to_string(),
+                    peer_disk_state: DiskState::Diskless,
+                    peer_client: true,
+                    out_of_sync: 0,
+                }],
+            });
+        }
+        ResourceStatus {
+            name: "spike".to_string(),
+            node_id: 0,
+            role,
+            suspended: false,
+            devices: vec![crate::drbd::status::Device {
+                volume: 0,
+                minor: 1000,
+                disk_state: DiskState::UpToDate,
+                client: false,
+                open: false,
+                quorum: true,
+                size: 1048576,
+            }],
+            connections,
+        }
+    };
+
+    // 1. All conditions met: this node Secondary, Replica Connected+UpToDate (even if peer is Primary!),
+    //    Witness Connected, Client Connected -> no reasons.
+    let ok_status = build_status(
+        Role::Secondary,
+        ConnectionState::Connected,
+        DiskState::UpToDate,
+        ConnectionState::Connected,
+        Some(ConnectionState::Connected),
+    );
+    assert_eq!(retire_reasons(&spec, "dv-1", &ok_status), Vec::<String>::new());
+
+    // 2. This node is Primary -> reason.
+    let mut primary_status = ok_status.clone();
+    primary_status.role = Role::Primary;
+    assert_eq!(retire_reasons(&spec, "dv-1", &primary_status), ["this node is Primary"]);
+
+    // 3. Witness in Connecting -> reason.
+    let witness_connecting = build_status(
+        Role::Secondary,
+        ConnectionState::Connected,
+        DiskState::UpToDate,
+        ConnectionState::Connecting,
+        Some(ConnectionState::Connected),
+    );
+    assert_eq!(
+        retire_reasons(&spec, "dv-1", &witness_connecting),
+        ["peer dv-3 is not connected"]
+    );
+
+    // 4. Replica with peer-disk Inconsistent -> reason.
+    let replica_inconsistent = build_status(
+        Role::Secondary,
+        ConnectionState::Connected,
+        DiskState::Inconsistent,
+        ConnectionState::Connected,
+        Some(ConnectionState::Connected),
+    );
+    assert_eq!(
+        retire_reasons(&spec, "dv-1", &replica_inconsistent),
+        ["peer dv-2 disk is Inconsistent"]
+    );
+
+    // 5. Peer Primary, Connected, UpToDate -> NO reason (already checked in ok_status, peer_role is Primary).
+    assert!(ok_status.connections[0].peer_role == Role::Primary);
+    assert_eq!(retire_reasons(&spec, "dv-1", &ok_status), Vec::<String>::new());
+
+    // 6. Client Connected, diskless -> NO reason (checked in ok_status).
+
+    // 7. Member of spec.nodes without a connection in status -> reason.
+    let missing_conn = build_status(
+        Role::Secondary,
+        ConnectionState::Connected,
+        DiskState::UpToDate,
+        ConnectionState::Connected,
+        None, // dv-4 has no connection
+    );
+    assert_eq!(
+        retire_reasons(&spec, "dv-1", &missing_conn),
+        ["peer dv-4 is not connected"]
+    );
+}
+
+// ---- retire_replica execution tests (Task 6) ----
+
+fn spike_retiring(retiring_node: &str) -> ReplicatedVolume {
+    let mut spec = spec_json("Done", 1000, 7000);
+    for n in &mut spec.nodes {
+        if n.name == retiring_node {
+            n.kind = NodeKind::Retiring;
+        }
+    }
+    let mut vol = ReplicatedVolume::new(VOLUME, spec);
+    vol.metadata.finalizers = Some(vec![replica_finalizer(DV1), replica_finalizer(DV2)]);
+    vol
+}
+
+#[tokio::test]
+async fn retire_replica_settled_resource_proceeds_in_order() {
+    let kernel = Arc::new(Mutex::new(kernel_json(DV1, |_| {})));
+    let runner = node_with_status(kernel.clone(), true);
+    let e = env(DV1, runner);
+    prepare_copy(&e.paths, true, true);
+    let mut vol = spike_retiring(DV1);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV1), reported(DV2)],
+    });
+    e.volumes.put(vol);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+
+    // 1. Files deleted
+    assert!(!e.paths.image(VOLUME).exists());
+    assert!(!e.paths.ready_marker(VOLUME).exists());
+
+    // 2. Status entry removed
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+
+    // 3. Finalizer dropped
+    assert_eq!(e.volumes.finalizers(VOLUME), vec![replica_finalizer(DV2)]);
+
+    // 4. Removed from spec.nodes
+    let current_nodes = e.volumes.object(VOLUME).unwrap().spec.nodes;
+    assert_eq!(current_nodes.len(), 2);
+    assert!(!current_nodes.iter().any(|n| n.name == DV1));
+
+    // Verify order of calls
+    assert!(e.runner.calls().iter().any(|c| c.starts_with("drbdadm down")));
+    let calls = e.volumes.calls();
+    let status_pos = calls
+        .iter()
+        .position(|c| c.contains("status") && c.contains("removed"))
+        .expect("status removed");
+    let fin_patch_pos = calls.iter().position(|c| c == "patch spike").expect("patch finalizer");
+    let members_patch_pos = calls.iter().rposition(|c| c == "patch spike").expect("patch members");
+    assert!(status_pos < fin_patch_pos);
+    assert!(fin_patch_pos < members_patch_pos);
+}
+
+#[tokio::test]
+async fn retire_replica_applies_when_member_is_missing_before_retire_reasons() {
+    let kernel = Arc::new(Mutex::new(kernel_json(DV1, |_| {})));
+    let kernel_for_adjust = kernel.clone();
+    let runner = FakeRunner::new(move |program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+        ("drbdadm", ["adjust", _]) => {
+            let mut all: Value = serde_json::from_str(&kernel_for_adjust.lock().unwrap()).unwrap();
+            let mut conn = all[0]["connections"][0].clone();
+            conn["name"] = json!("dv-4");
+            conn["peer-node-id"] = json!(3);
+            conn["connection-state"] = json!("Connected");
+            all[0]["connections"].as_array_mut().unwrap().push(conn);
+            *kernel_for_adjust.lock().unwrap() = serde_json::to_string(&all).unwrap();
+            out(0, "", "")
+        }
+        ("drbdsetup", _) => out(0, &kernel_for_adjust.lock().unwrap(), ""),
+        _ => out(0, "", ""),
+    });
+    let e = env(DV1, runner);
+    prepare_copy(&e.paths, true, true);
+    let mut vol = spike_retiring(DV1);
+    vol.spec.nodes.push(MemberNode {
+        name: "dv-4".to_string(),
+        node_id: 3,
+        address: "192.168.104.5".to_string(),
+        kind: NodeKind::Client,
+    });
+    e.volumes.put(vol);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.volumes.finalizers(VOLUME).contains(&replica_finalizer(DV1)));
+    let current_nodes = e.volumes.object(VOLUME).unwrap().spec.nodes;
+    assert!(current_nodes.iter().any(|n| n.name == DV1));
+    assert!(e.runner.calls().iter().any(|c| c.starts_with("drbdadm adjust")));
+}
+
+#[tokio::test]
+async fn retire_replica_kept_drbd_when_reasons_present() {
+    let kernel = Arc::new(Mutex::new(kernel_of(
+        DV1,
+        "Secondary",
+        &[
+            (DV2, "Connecting", "Secondary"),
+            ("lima-dv-3", "Connected", "Secondary"),
+        ],
+    )));
+    let runner = node_with_status(kernel.clone(), true);
+    let e = env(DV1, runner);
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike_retiring(DV1));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.volumes.finalizers(VOLUME).contains(&replica_finalizer(DV1)));
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("entry written");
+    assert!(
+        entry.message.contains("peer lima-dv-2 is not connected"),
+        "{}",
+        entry.message
+    );
+}
+
+#[tokio::test]
+async fn retire_replica_guard_refuses_when_reasons_appear_under_lock() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = reads.clone();
+    let calm = kernel_json(DV1, |_| {});
+    let mut busy: Value = serde_json::from_str(&calm).unwrap();
+    busy[0]["role"] = json!("Primary");
+    let busy = serde_json::to_string(&busy).unwrap();
+
+    let runner = FakeRunner::new(move |program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+        ("drbdsetup", _) => out(
+            0,
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                &calm
+            } else {
+                &busy
+            },
+            "",
+        ),
+        _ => out(0, "", ""),
+    });
+    let e = env(DV1, runner);
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike_retiring(DV1));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::KeptDrbd);
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.volumes.finalizers(VOLUME).contains(&replica_finalizer(DV1)));
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("entry written");
+    assert!(entry.message.contains("this node is Primary"), "{}", entry.message);
+}
+
+#[tokio::test]
+async fn retire_replica_brings_up_ready_file_when_unconfigured() {
+    let runner = node_coming_up(crate::tests::THREE_INCONSISTENT.to_string(), || {});
+    let e = env(DV1, runner);
+    prepare_copy(&e.paths, true, true);
+    e.volumes.put(spike_retiring(DV1));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.volumes.finalizers(VOLUME).contains(&replica_finalizer(DV1)));
+    assert!(e.runner.calls().iter().any(|c| c.starts_with("drbdadm up")));
+}
+
+#[tokio::test]
+async fn retire_replica_removes_unconfigured_when_no_data() {
+    let kernel = Arc::new(Mutex::new(EMPTY_KERNEL.to_string()));
+    let runner = node_with_status(kernel.clone(), false);
+    let e = env(DV1, runner);
+    fs::create_dir_all(&e.paths.res_dir).unwrap();
+    fs::write(e.paths.res_file(VOLUME), "resource spike {}").unwrap();
+    let mut vol = spike_retiring(DV1);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV1)],
+    });
+    e.volumes.put(vol);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(!e.paths.res_file(VOLUME).exists());
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+    assert_eq!(e.volumes.finalizers(VOLUME), vec![replica_finalizer(DV2)]);
+    assert!(
+        !e.volumes
+            .object(VOLUME)
+            .unwrap()
+            .spec
+            .nodes
+            .iter()
+            .any(|n| n.name == DV1)
+    );
+}
+
+#[tokio::test]
+async fn retire_replica_conflict_on_replace_members_yields_progress() {
+    let volumes = Arc::new(FakeVolumes::default());
+    let hook_volumes = volumes.clone();
+    let kernel = Arc::new(Mutex::new(kernel_json(DV1, |_| {})));
+    let kernel_for_runner = kernel.clone();
+    let runner = FakeRunner::new(move |program, args| match (program, args) {
+        ("losetup", ["-j", _]) => out(0, "/dev/loop7: [0048]:131 (image)\n", ""),
+        ("drbdadm", ["down", _]) => {
+            *kernel_for_runner.lock().unwrap() = EMPTY_KERNEL.to_string();
+            let mut obj = hook_volumes.object(VOLUME).unwrap();
+            obj.spec.nodes[0].node_id = 99;
+            hook_volumes.put(obj);
+            out(0, "", "")
+        }
+        ("drbdsetup", _) => out(0, &kernel_for_runner.lock().unwrap(), ""),
+        _ => out(0, "", ""),
+    });
+    let e = env_sharing(DV1, runner, true, volumes.clone());
+    prepare_copy(&e.paths, true, true);
+    volumes.put(spike_retiring(DV1));
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(!e.paths.image(VOLUME).exists());
+    assert_eq!(volumes.finalizers(VOLUME), vec![replica_finalizer(DV2)]);
+    assert!(volumes.object(VOLUME).unwrap().spec.nodes.iter().any(|n| n.name == DV1));
+}
+
+#[tokio::test]
+async fn finish_retire_cleans_status_drops_finalizer_and_removes_member() {
+    let e = env(DV1, fake_node());
+    let mut vol = spike_retiring(DV1);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV1), reported(DV2)],
+    });
+    e.volumes.put(vol);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+
+    assert!(e.runner.calls().is_empty());
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+    assert_eq!(e.volumes.finalizers(VOLUME), vec![replica_finalizer(DV2)]);
+    let current_nodes = e.volumes.object(VOLUME).unwrap().spec.nodes;
+    assert_eq!(current_nodes.len(), 2);
+    assert!(!current_nodes.iter().any(|n| n.name == DV1));
+}
+
+#[tokio::test]
+async fn finish_retire_keeps_when_status_clear_fails() {
+    let e = env(DV1, fake_node());
+    let mut vol = spike_retiring(DV1);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV1)],
+    });
+    e.volumes.put(vol);
+    e.volumes.co_owned.store(true, Ordering::SeqCst);
+    e.volumes.fail_status_patch.store(true, Ordering::SeqCst);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+
+    assert!(e.volumes.finalizers(VOLUME).contains(&replica_finalizer(DV1)));
+    assert!(
+        e.volumes
+            .object(VOLUME)
+            .unwrap()
+            .spec
+            .nodes
+            .iter()
+            .any(|n| n.name == DV1)
     );
 }

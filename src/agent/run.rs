@@ -12,6 +12,8 @@
 //! |---|---|---|---|
 //! | `delete_replica`, peer checks | `DeleteReplica`, resource configured in the kernel, any file state | the DRBD status can be read; rules 1-3 below on the object read at the start of the pass | the DRBD status is read again; rules 1-3a below; 3b uses the same object |
 //! | `delete_replica`, no data | `DeleteReplica`, resource not configured, and `prove_no_data` shows the node holds no data (rows 3 and 5 of the table below) | the resource is not configured; `prove_no_data` | the DRBD status is read again and the resource is still not configured; `prove_no_data` again; then `Reconciler::remove_unconfigured` reads the status once more and refuses a resource that has appeared |
+//! | `retire_replica`, R26 | `RetireReplica`, resource configured in the kernel, any file state | resource matches description (otherwise `apply` first); DRBD status read; R26 (2)–(4) below | DRBD status is read again; R26 (2)–(4) verified under lock |
+//! | `retire_replica`, no data | `RetireReplica`, resource not configured, and `prove_no_data` shows the node holds no data | the resource is not configured; `prove_no_data` | the DRBD status is read again and resource still not configured; `prove_no_data` again; `remove_unconfigured` |
 //! | `clean_diskless` | `CleanDiskless` | nothing | no backing file exists |
 //!
 //! `DeleteReplica` by what this node holds. The first matching row applies;
@@ -90,6 +92,20 @@
 //!    is `Primary` blocks in every connection state and whatever the entries
 //!    say: that is the old R18 check and 3b does not weaken it.
 //!
+//! `Task::RetireReplica` (R26). The copy is deleted only if:
+//! 1. The resource is brought to the description first: if the file differs,
+//!    is not applied, or the status does not match `spec`, `apply` runs with
+//!    `initialSync: Done` and the pass makes `Progress`.
+//! 2. Once the resource matches the description:
+//!    (a) this node is not `Primary`;
+//!    (b) every other member of `spec.nodes` is `Connected`;
+//!    (c) every other `Replica` member has its peer-disk `UpToDate`.
+//! 3. Order of completion:
+//!    (1) local copy is removed (`remove_checked` / `remove_unconfigured`);
+//!    (2) status entry is removed and confirmed (`clear_entry`);
+//!    (3) finalizer is dropped (`drop_finalizer`);
+//!    (4) this node's entry is removed from `spec.nodes` (`replace_members`).
+//!
 //! Known limit: a node that is dead for good keeps its entry and so blocks the
 //! deletion of the copies of the others (they see it not connected with its
 //! entry present). The way out is manual and deliberate: the operator checks
@@ -145,14 +161,14 @@ use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use crate::backing::loop_holders;
-use crate::crd::{NodeStatus, ReplicatedVolume, ReplicatedVolumeSpec, to_volume_spec};
+use crate::crd::{MemberNode, NodeKind, NodeStatus, ReplicatedVolume, ReplicatedVolumeSpec, to_volume_spec};
 use crate::drbd::adm::{Drbd, Metadata};
-use crate::drbd::status::{ConnectionState, ResourceStatus, Role};
+use crate::drbd::status::{ConnectionState, DiskState, ResourceStatus, Role};
 use crate::exec::Runner;
 use crate::membership::{collisions, replica_finalizer};
 use crate::model::{InitialSync, valid_volume_name};
 use crate::paths::Paths;
-use crate::reconcile::{FileState, ReconcileError, Reconciler};
+use crate::reconcile::{FileState, ReconcileError, Reconciler, status_matches_spec};
 
 use super::decide::{Local, ObjectView, Refusal, Task, decide};
 use super::kube::{ApiError, Volumes};
@@ -329,6 +345,44 @@ fn keep_reasons(
     reasons
 }
 
+/// R26: What has to hold before the copy of a Retiring node can be removed.
+///
+/// Returns reasons the copy cannot be removed yet:
+/// (2) this node must not be Primary;
+/// (3) every other member of `spec.nodes` must be Connected;
+/// (4) every other `Replica` member must have its peer-disk UpToDate.
+pub(crate) fn retire_reasons(spec: &ReplicatedVolumeSpec, node: &str, status: &ResourceStatus) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if status.role == Role::Primary {
+        reasons.push("this node is Primary".to_string());
+    }
+    for member in spec.nodes.iter().filter(|m| m.name != node) {
+        let connection = status.connections.iter().find(|c| c.name == member.name);
+        let Some(connection) = connection else {
+            reasons.push(format!("peer {} is not connected", member.name));
+            continue;
+        };
+        if connection.connection_state != ConnectionState::Connected {
+            reasons.push(format!("peer {} is not connected", member.name));
+            continue;
+        }
+        if member.kind == NodeKind::Replica {
+            let disk = connection
+                .peer_devices
+                .iter()
+                .find(|p| p.volume == 0)
+                .map(|p| p.peer_disk_state);
+            if disk != Some(DiskState::UpToDate) {
+                reasons.push(match disk {
+                    Some(state) => format!("peer {} disk is {state}", member.name),
+                    None => format!("peer {} has no volume 0 device", member.name),
+                });
+            }
+        }
+    }
+    reasons
+}
+
 /// What has to hold before the copy of a deleting volume is deleted (module doc).
 enum Check {
     /// The resource is configured, or the copy is a ready one: rules 2 and 3,
@@ -336,6 +390,12 @@ enum Check {
     Peers(Vec<NodeStatus>),
     /// The resource is not configured and `prove_no_data` shows the node holds
     /// no data, for a backing file in this state.
+    NoData(FileState),
+}
+
+/// What has to hold before the copy of a Retiring node is removed (R26).
+enum CheckRetire {
+    Peers,
     NoData(FileState),
 }
 
@@ -661,14 +721,14 @@ impl Agent {
                 None => Ok(Outcome::Settled),
             },
             Task::CleanDiskless => self.clean_diskless(volume, object.as_ref()).await,
-            Task::RetireReplica => {
-                log_info(volume, "retire replica not implemented yet");
-                Ok(Outcome::Kept)
-            }
-            Task::FinishRetire => {
-                log_info(volume, "finish retire not implemented yet");
-                Ok(Outcome::Kept)
-            }
+            Task::RetireReplica => match object.as_ref() {
+                Some(object) => self.retire_replica(volume, object).await,
+                None => Ok(Outcome::Settled),
+            },
+            Task::FinishRetire => match object.as_ref() {
+                Some(object) => self.finish_retire(volume, object).await,
+                None => Ok(Outcome::Settled),
+            },
             Task::Refuse(refusal) => {
                 log_error(volume, format!("refused: {refusal}"));
                 self.report_message(volume, object.as_ref(), &refusal.to_string())
@@ -904,6 +964,214 @@ impl Agent {
                 Ok(Outcome::Kept)
             }
         }
+    }
+
+    async fn retire_replica(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
+        let file = {
+            let name = volume.to_string();
+            self.blocking(move |paths, _| file_state(paths, &name)).await?
+        };
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => {
+                return self
+                    .keep(
+                        volume,
+                        object,
+                        None,
+                        &format!("cannot inspect the backing file: {error}"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        let status = match self.read_status(volume).await {
+            Ok(status) => status,
+            Err(error) => {
+                return self
+                    .keep(
+                        volume,
+                        object,
+                        None,
+                        &format!("cannot read the DRBD status: {error}"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        let check = if let Some(ref st) = status {
+            // R26: If the resource differs from the description, not applied, or
+            // status does not match spec, apply the description first.
+            let mut spec = match to_volume_spec(volume, &object.spec) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    let message = format!("the local copy is kept: {error}");
+                    if self.report_message(volume, Some(object), &message).await? {
+                        log_error(volume, &message);
+                    }
+                    return Ok(Outcome::Kept);
+                }
+            };
+            spec.initial_sync = InitialSync::Done;
+            let node = self.node.clone();
+            let spec_obs = spec.clone();
+            let obs = self
+                .blocking(move |paths, runner| Reconciler { paths, runner }.observe(&spec_obs, &node))
+                .await?;
+            let obs = match obs {
+                Ok(obs) => obs,
+                Err(error) => {
+                    let message = format!("the local copy is kept: {error}");
+                    if self.report_message(volume, Some(object), &message).await? {
+                        log_error(volume, &message);
+                    }
+                    return Ok(Outcome::Kept);
+                }
+            };
+            let matches = obs.res_matches && obs.res_applied && status_matches_spec(&spec, &self.node, st);
+            if !matches {
+                let node = self.node.clone();
+                let applied = self
+                    .blocking(move |paths, runner| Reconciler { paths, runner }.apply(&spec, &node))
+                    .await?;
+                match applied {
+                    Ok(actions) => {
+                        log_info(volume, format!("retiring copy: brought resource to spec {actions:?}"));
+                        return Ok(Outcome::Progress);
+                    }
+                    Err(ReconcileError::Busy { .. }) => return Ok(Outcome::Progress),
+                    Err(error) => {
+                        let message = format!("the local copy is kept: {error}");
+                        if self.report_message(volume, Some(object), &message).await? {
+                            log_error(volume, &message);
+                        }
+                        return Ok(Outcome::Kept);
+                    }
+                }
+            }
+            let reasons = retire_reasons(&object.spec, &self.node, st);
+            if !reasons.is_empty() {
+                return self.keep(volume, object, Some(st), &reasons.join("; "), true).await;
+            }
+            CheckRetire::Peers
+        } else {
+            match file {
+                FileState::Ready => return self.bring_up(volume, object).await,
+                FileState::Absent | FileState::Pending => {
+                    let name = volume.to_string();
+                    let proof = self
+                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file))
+                        .await?;
+                    if let Err(why) = proof {
+                        return self.keep(volume, object, None, &why, false).await;
+                    }
+                    CheckRetire::NoData(file)
+                }
+            }
+        };
+
+        let name = volume.to_string();
+        let node = self.node.clone();
+        let spec_crd = object.spec.clone();
+        let removed = self
+            .blocking(move |paths, runner| {
+                let drbd_state = Cell::new(false);
+                let guard = || {
+                    let status = Drbd { runner }
+                        .status(&name)
+                        .map_err(|e| format!("cannot read the DRBD status: {e}"))?;
+                    match &check {
+                        CheckRetire::Peers => {
+                            let Some(ref status) = status else {
+                                return Err("the resource has disappeared since the decision".to_string());
+                            };
+                            let reasons = retire_reasons(&spec_crd, &node, status);
+                            if reasons.is_empty() {
+                                Ok(())
+                            } else {
+                                drbd_state.set(true);
+                                Err(reasons.join("; "))
+                            }
+                        }
+                        CheckRetire::NoData(file) => {
+                            if status.is_some() {
+                                return Err(
+                                    "the resource has been configured in the kernel since the decision".to_string()
+                                );
+                            }
+                            prove_no_data(paths, runner, &name, *file)
+                        }
+                    }
+                };
+                let reconciler = Reconciler { paths, runner };
+                let result = match &check {
+                    CheckRetire::NoData(_) => reconciler.remove_unconfigured(&name, &guard),
+                    CheckRetire::Peers => reconciler.remove_checked(&name, &guard),
+                };
+                (result, drbd_state.get())
+            })
+            .await?;
+        let (removed, refused_by_drbd_state) = removed;
+        match removed {
+            Ok(steps) => {
+                log_info(volume, format!("retired the local copy {steps:?}"));
+                self.finish_retire(volume, object).await
+            }
+            Err(ReconcileError::Busy { .. }) => Ok(Outcome::Progress),
+            Err(ReconcileError::Refused { reason, .. }) => {
+                let message = format!("the local copy is kept: {reason}");
+                if self.report_message(volume, Some(object), &message).await? {
+                    log_error(volume, &message);
+                }
+                Ok(if refused_by_drbd_state {
+                    Outcome::KeptDrbd
+                } else {
+                    Outcome::Kept
+                })
+            }
+            Err(error) => {
+                let message = format!("the local copy is kept: {error}");
+                if self.report_message(volume, Some(object), &message).await? {
+                    log_error(volume, &message);
+                }
+                Ok(Outcome::Kept)
+            }
+        }
+    }
+
+    async fn finish_retire(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
+        if has_entry(object, &self.node) && !self.clear_entry(volume, object).await? {
+            return Ok(Outcome::Kept);
+        }
+        if object
+            .metadata
+            .finalizers
+            .as_ref()
+            .is_some_and(|f| f.contains(&replica_finalizer(&self.node)))
+        {
+            self.drop_finalizer(volume, object).await?;
+        }
+        let uid = uid_of(object)?;
+        let remaining: Vec<MemberNode> = object
+            .spec
+            .nodes
+            .iter()
+            .filter(|n| n.name != self.node)
+            .cloned()
+            .collect();
+        if remaining.len() != object.spec.nodes.len() {
+            let replaced = self
+                .volumes
+                .replace_members(volume, &uid, &object.spec.nodes, &remaining)
+                .await?;
+            if !replaced {
+                log_info(
+                    volume,
+                    "replace_members conflict while removing Retiring member, retrying",
+                );
+            }
+        }
+        Ok(Outcome::Progress)
     }
 
     /// A copy with data whose resource is not configured here (after a reboot
