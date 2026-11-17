@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::crd::to_volume_spec;
+use crate::crd::{MemberNode, NodeKind, ReplicatedVolume, ReplicatedVolumeSpec, to_volume_spec};
+use crate::model::InitialSync;
 
 /// Nodes `n1..` with the given capacities; node ids 0.., addresses 192.0.2.1...
 fn cluster(caps: &[u64]) -> ClusterNodes {
@@ -372,4 +373,69 @@ fn every_successful_placement_passes_the_crd_validation() {
         }
     }
     assert!(succeeded > 100, "generator produced too few successes: {succeeded}");
+}
+
+#[test]
+fn existing_of_counts_both_replica_and_retiring() {
+    let spec = ReplicatedVolumeSpec {
+        size_bytes: 10 * GIB,
+        protocol: Protocol::C,
+        minor: 1005,
+        port: 7005,
+        max_peers: 3,
+        initial_sync: InitialSync::Done,
+        nodes: vec![
+            MemberNode {
+                name: "a".into(),
+                node_id: 0,
+                address: "192.0.2.1".into(),
+                kind: NodeKind::Replica,
+            },
+            MemberNode {
+                name: "b".into(),
+                node_id: 1,
+                address: "192.0.2.2".into(),
+                kind: NodeKind::Retiring,
+            },
+            MemberNode {
+                name: "c".into(),
+                node_id: 2,
+                address: "192.0.2.3".into(),
+                kind: NodeKind::Witness,
+            },
+        ],
+    };
+    let rv = ReplicatedVolume::new("vol-1", spec);
+    let existing = existing_of(&rv);
+    assert_eq!(existing.minor, 1005);
+    assert_eq!(existing.port, 7005);
+    assert_eq!(existing.size_bytes, 10 * GIB);
+    assert_eq!(existing.replica_nodes, ["a", "b"]);
+}
+
+#[test]
+fn pick_witness_rules() {
+    let nodes = cluster(&[10 * GIB, 20 * GIB, 50 * GIB, 5 * GIB]);
+    // n1 (10G), n2 (20G), n3 (50G), n4 (5G)
+    let free = free_budgets(&nodes, &[]);
+
+    // 1. Client is picked before a node with a larger budget:
+    assert_eq!(pick_witness(&nodes, &free, &["n1"], &["n4"]), Some("n4".into()));
+
+    // Multiple clients: picked in alphabetical order:
+    assert_eq!(pick_witness(&nodes, &free, &[], &["n4", "n2"]), Some("n2".into()));
+
+    // 2. Client in exclude is not picked:
+    assert_eq!(pick_witness(&nodes, &free, &["n1", "n4"], &["n4"]), Some("n3".into()));
+
+    // 3. Without clients: highest free budget:
+    assert_eq!(pick_witness(&nodes, &free, &["n1"], &[]), Some("n3".into()));
+
+    // Breaking ties by name ascending:
+    let tied_nodes = cluster(&[20 * GIB, 20 * GIB]);
+    let tied_free = free_budgets(&tied_nodes, &[]);
+    assert_eq!(pick_witness(&tied_nodes, &tied_free, &[], &[]), Some("n1".into()));
+
+    // 4. All nodes excluded -> None:
+    assert_eq!(pick_witness(&nodes, &free, &["n1", "n2", "n3", "n4"], &[]), None);
 }

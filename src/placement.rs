@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::config::{ClusterNode, ClusterNodes};
-use crate::crd::{MemberNode, NodeKind, ReplicatedVolumeSpec};
+use crate::crd::{MemberNode, NodeKind, ReplicatedVolume, ReplicatedVolumeSpec};
 use crate::model::{InitialSync, MAX_MINOR, MAX_NODE_ID, MAX_SIZE_BYTES, Protocol};
 
 pub const FIRST_MINOR: u32 = 1000;
@@ -37,6 +37,21 @@ pub struct Existing {
     pub port: u16,
     pub replica_nodes: Vec<String>,
     pub size_bytes: u64,
+}
+
+pub fn existing_of(object: &ReplicatedVolume) -> Existing {
+    Existing {
+        minor: object.spec.minor,
+        port: object.spec.port,
+        replica_nodes: object
+            .spec
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Replica | NodeKind::Retiring))
+            .map(|n| n.name.clone())
+            .collect(),
+        size_bytes: object.spec.size_bytes,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -128,7 +143,7 @@ pub fn round_up_size(required_bytes: i64) -> Result<u64, ParamError> {
 
 /// Free budget of every node: capacity minus the sizes of the volumes that
 /// keep a copy on it, saturating at zero.
-fn free_budgets<'a>(nodes: &'a ClusterNodes, existing: &[Existing]) -> HashMap<&'a str, u64> {
+pub fn free_budgets<'a>(nodes: &'a ClusterNodes, existing: &[Existing]) -> HashMap<&'a str, u64> {
     let mut used: HashMap<&str, u64> = HashMap::new();
     for volume in existing {
         for name in &volume.replica_nodes {
@@ -171,6 +186,34 @@ fn by_budget(free: &HashMap<&str, u64>, list: &mut [&ClusterNode]) {
             .cmp(&free[a.name.as_str()])
             .then_with(|| a.name.cmp(&b.name))
     });
+}
+
+/// Picks a node for a witness:
+/// 1. First by name from `clients` that is not in `exclude`.
+/// 2. Otherwise a node from `nodes` not in `exclude` and not in `clients` with the
+///    highest free budget, breaking ties by name ascending.
+/// 3. `None` if no such node exists.
+pub fn pick_witness(
+    nodes: &ClusterNodes,
+    free: &HashMap<&str, u64>,
+    exclude: &[&str],
+    clients: &[&str],
+) -> Option<String> {
+    let mut eligible_clients: Vec<&str> = clients.iter().copied().filter(|c| !exclude.contains(c)).collect();
+    if !eligible_clients.is_empty() {
+        eligible_clients.sort_unstable();
+        return Some(eligible_clients[0].to_string());
+    }
+
+    let mut eligible_nodes: Vec<&ClusterNode> = nodes
+        .iter()
+        .filter(|n| !exclude.contains(&n.name.as_str()) && !clients.contains(&n.name.as_str()))
+        .collect();
+    if eligible_nodes.is_empty() {
+        return None;
+    }
+    by_budget(free, &mut eligible_nodes);
+    eligible_nodes.first().map(|n| n.name.clone())
 }
 
 pub fn place(req: &Request, nodes: &ClusterNodes, existing: &[Existing]) -> Result<ReplicatedVolumeSpec, PlaceError> {
@@ -233,12 +276,8 @@ pub fn place(req: &Request, nodes: &ClusterNodes, existing: &[Existing]) -> Resu
 
     // A witness holds no data, so it needs no budget.
     let witness = if req.replicas.is_multiple_of(2) {
-        let mut rest: Vec<&ClusterNode> = nodes
-            .iter()
-            .filter(|n| !chosen.iter().any(|c| c.name == n.name))
-            .collect();
-        by_budget(&free, &mut rest);
-        rest.first().copied()
+        let exclude: Vec<&str> = chosen.iter().map(|c| c.name.as_str()).collect();
+        pick_witness(nodes, &free, &exclude, &[]).and_then(|name| nodes.get(&name))
     } else {
         None
     };

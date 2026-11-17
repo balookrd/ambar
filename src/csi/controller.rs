@@ -74,7 +74,9 @@ use crate::crd::{NodeKind, ReplicatedVolume, ReplicatedVolumeStatus};
 use crate::drbd::status::DiskState;
 use crate::membership::initial_finalizers;
 use crate::model::valid_volume_name;
-use crate::placement::{Existing, PlaceError, Request as PlaceRequest, parse_parameters, place, round_up_size};
+use crate::placement::{
+    Existing, PlaceError, Request as PlaceRequest, existing_of, parse_parameters, place, round_up_size,
+};
 
 /// Key of the topology segment that carries the Kubernetes node name.
 pub const TOPOLOGY_KEY: &str = "ambar.balookrd.github.io/node";
@@ -177,21 +179,6 @@ fn place_status(error: &PlaceError) -> Status {
         | PlaceError::UnknownSelectedNode(_)
         | PlaceError::MaxPeers { .. } => Status::invalid_argument(error.to_string()),
         PlaceError::NoCapacity { .. } | PlaceError::NoFreeIndex => Status::resource_exhausted(error.to_string()),
-    }
-}
-
-fn existing_of(object: &ReplicatedVolume) -> Existing {
-    Existing {
-        minor: object.spec.minor,
-        port: object.spec.port,
-        replica_nodes: object
-            .spec
-            .nodes
-            .iter()
-            .filter(|n| n.kind == NodeKind::Replica)
-            .map(|n| n.name.clone())
-            .collect(),
-        size_bytes: object.spec.size_bytes,
     }
 }
 
