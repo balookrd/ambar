@@ -36,6 +36,9 @@ fn drop_format(schema: &mut schemars::Schema) {
 pub enum NodeKind {
     /// Holds a copy of the data.
     Replica,
+    /// Holds a copy that is being removed; the node's agent deletes it and then
+    /// removes this entry.
+    Retiring,
     /// Diskless; only takes part in the quorum.
     Witness,
     /// Diskless; attaches the volume to run a workload.
@@ -59,11 +62,9 @@ pub struct MemberNode {
     pub kind: NodeKind,
 }
 
-// The first four rules are transition rules (`oldSelf`): they run on update only.
-// The last five run on create and update, so a bad object is refused up front
-// instead of becoming permanent under the immutability rules. The set of Replica and
-// Witness members is compared in both directions plus by size, so that
-// swapping one member for another in a single update is rejected too.
+// The first seven rules are transition rules (`oldSelf`): they run on update only.
+// The last six run on create and update, so a bad object is refused up front
+// instead of becoming permanent under the transition rules.
 #[derive(CustomResource, Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "ambar.balookrd.github.io",
@@ -79,12 +80,24 @@ pub struct MemberNode {
         "message": "sizeBytes, minor, port, maxPeers and protocol are immutable"
     },
     {
-        "rule": "self.nodes.filter(n, n.kind != 'Client').size() == oldSelf.nodes.filter(o, o.kind != 'Client').size() && self.nodes.filter(n, n.kind != 'Client').all(n, oldSelf.nodes.exists(o, o.name == n.name && o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind)) && oldSelf.nodes.filter(o, o.kind != 'Client').all(o, self.nodes.exists(n, o.name == n.name && o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind))",
-        "message": "the set of Replica and Witness nodes is immutable"
+        "rule": "self.nodes.all(n, oldSelf.nodes.all(o, o.name != n.name || (o.nodeId == n.nodeId && o.address == n.address)))",
+        "message": "a member node cannot change nodeId or address"
     },
     {
-        "rule": "self.nodes.all(n, oldSelf.nodes.all(o, o.name != n.name || (o.nodeId == n.nodeId && o.address == n.address && o.kind == n.kind)))",
-        "message": "a member node cannot change nodeId, address or kind"
+        "rule": "self.nodes.all(n, oldSelf.nodes.all(o, o.name != n.name || o.kind == n.kind || (o.kind == 'Witness' && n.kind == 'Replica') || (o.kind == 'Client' && n.kind == 'Replica') || (o.kind == 'Replica' && n.kind == 'Retiring') || (o.kind == 'Client' && n.kind == 'Witness') || (o.kind == 'Witness' && n.kind == 'Client')))",
+        "message": "this change of a node's kind is not allowed"
+    },
+    {
+        "rule": "self.nodes.all(n, n.kind != 'Retiring' || oldSelf.nodes.exists(o, o.name == n.name))",
+        "message": "a node can become Retiring only from Replica"
+    },
+    {
+        "rule": "oldSelf.nodes.all(o, o.kind == 'Client' || o.kind == 'Witness' || o.kind == 'Retiring' || self.nodes.exists(n, n.name == o.name))",
+        "message": "a Replica node is removed only through Retiring"
+    },
+    {
+        "rule": "(self.nodes.filter(n, n.kind != 'Client').map(n, n.name + '/' + n.kind) == oldSelf.nodes.filter(o, o.kind != 'Client').map(o, o.name + '/' + o.kind)) || (self.initialSync == 'Done' && oldSelf.initialSync == 'Done')",
+        "message": "the set of Replica, Retiring and Witness nodes changes only when initialSync is Done"
     },
     {
         "rule": "!(oldSelf.initialSync == 'Done' && self.initialSync == 'Skip')",
@@ -93,6 +106,10 @@ pub struct MemberNode {
     {
         "rule": "self.nodes.filter(n, n.kind == 'Replica').size() >= 2",
         "message": "at least two Replica nodes are required"
+    },
+    {
+        "rule": "self.nodes.filter(n, n.kind == 'Retiring').size() <= 1",
+        "message": "at most one node can be Retiring"
     },
     {
         "rule": "self.nodes.all(a, self.nodes.exists_one(b, b.nodeId == a.nodeId))",
@@ -184,7 +201,8 @@ pub fn to_volume_spec(name: &str, spec: &ReplicatedVolumeSpec) -> Result<VolumeS
                 name: node.name.clone(),
                 address,
                 node_id: node.node_id,
-                diskful: node.kind == NodeKind::Replica,
+                diskful: matches!(node.kind, NodeKind::Replica | NodeKind::Retiring),
+                retiring: node.kind == NodeKind::Retiring,
             })
         })
         .collect::<Result<Vec<_>, CrdError>>()?;
