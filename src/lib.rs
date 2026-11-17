@@ -15,6 +15,7 @@ pub mod mount;
 pub mod paths;
 pub mod placement;
 pub mod reconcile;
+pub mod replicas;
 
 #[cfg(test)]
 mod tests;
