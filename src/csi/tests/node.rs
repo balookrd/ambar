@@ -809,6 +809,25 @@ async fn stage_row5_a_replica_keeps_its_membership() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn stage_row5_a_retiring_node_is_unavailable() {
+    let e = env_for("n1");
+    let mut object = volume_object(VOLUME, MINOR, 7000);
+    object.spec.nodes[0].kind = NodeKind::Retiring;
+    e.volumes.put(object);
+    e.replica_files();
+    e.set_device(Dev::Ext4);
+    let before = e.volumes.object(VOLUME).unwrap().spec.nodes;
+
+    let status = e.stage().await.unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable);
+    assert_eq!(status.message(), "the copy on this node is being removed");
+    assert_eq!(e.volumes.object(VOLUME).unwrap().spec.nodes, before);
+    assert_eq!(e.patches(), 0);
+    assert!(e.calls(&["drbdadm"]).is_empty());
+    assert!(e.sim.mounted_at(&e.staging).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn stage_row5_a_node_missing_from_the_node_map_is_failed_precondition() {
     let e = env_for("zz");
     e.volumes.put(volume_object(VOLUME, MINOR, 7000));
@@ -1606,6 +1625,21 @@ async fn unstage_on_a_replica_keeps_the_membership_and_runs_no_down() {
     e.unstage().await.unwrap();
     assert!(e.calls(&["drbdadm"]).is_empty());
     assert!(e.members().contains(&("n1".to_string(), NodeKind::Replica)));
+    assert!(e.paths.image(VOLUME).exists(), "the copy stays");
+    assert_eq!(e.patches(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unstage_on_a_retiring_node_keeps_the_membership_and_runs_no_down() {
+    let e = env_for("n1");
+    let mut object = volume_object(VOLUME, MINOR, 7000);
+    object.spec.nodes[0].kind = NodeKind::Retiring;
+    e.volumes.put(object);
+    e.replica_files();
+    e.stage_mount();
+    e.unstage().await.unwrap();
+    assert!(e.calls(&["drbdadm"]).is_empty());
+    assert!(e.members().contains(&("n1".to_string(), NodeKind::Retiring)));
     assert!(e.paths.image(VOLUME).exists(), "the copy stays");
     assert_eq!(e.patches(), 0);
 }

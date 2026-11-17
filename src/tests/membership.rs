@@ -244,7 +244,7 @@ fn leave_removes_a_client() {
 
 #[test]
 fn leave_keeps_replicas_and_witnesses() {
-    for kind in [NodeKind::Replica, NodeKind::Witness] {
+    for kind in [NodeKind::Replica, NodeKind::Witness, NodeKind::Retiring] {
         let mut s = base(3);
         s.nodes.push(member("n3", 2, "192.0.2.3", kind));
         let before = s.clone();
