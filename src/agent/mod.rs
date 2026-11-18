@@ -4,6 +4,7 @@
 //! to `reconcile::Reconciler`. `nodes` reads the node map ConfigMap for the
 //! CSI Controller.
 
+pub mod cleanup;
 pub mod decide;
 pub mod kube;
 pub mod local;

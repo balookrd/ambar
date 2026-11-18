@@ -171,6 +171,13 @@ pub trait Volumes: Send + Sync {
         volume: &str,
         mounted_uids: &[String],
     ) -> Result<Vec<String>, ApiError>;
+    /// Returns `true` if there is at least one pod on `node` using `volume`.
+    async fn has_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<bool, ApiError>;
     /// Names of the objects that were added, changed or deleted, starting
     /// with every existing object. Call once; the stream does not end.
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>>;
@@ -726,6 +733,23 @@ impl Volumes for KubeVolumes {
             }
         }
         Ok(deleted)
+    }
+
+    async fn has_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<bool, ApiError> {
+        let params = ListParams::default().fields(&format!("spec.nodeName={node}"));
+        let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(self.client.clone());
+        let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
+        for pod in list.items {
+            if pod_uses_volume(&pod, volume, mounted_uids) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>> {

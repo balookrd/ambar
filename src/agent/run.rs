@@ -170,6 +170,7 @@ use crate::model::{InitialSync, valid_volume_name};
 use crate::paths::Paths;
 use crate::reconcile::{FileState, ReconcileError, Reconciler, status_matches_spec};
 
+use super::cleanup;
 use super::decide::{Local, ObjectView, Refusal, Task, decide};
 use super::kube::{ApiError, Volumes};
 use super::local::{file_state, local, local_volumes, loops_holding, synced_marker_present};
@@ -1345,6 +1346,49 @@ impl Agent {
             Err(error) => {
                 let message = format!("cleaning leftovers failed: {error}");
                 if self.report_message(volume, object, &message).await.unwrap_or(false) {
+                    log_error(volume, &message);
+                }
+                Err(Self::reconcile_error(volume, error))
+            }
+        }
+    }
+
+    pub(crate) async fn cleanup_stale_client(
+        &self,
+        volume: &str,
+        object: &ReplicatedVolume,
+    ) -> Result<Outcome, AgentError> {
+        let name = volume.to_string();
+        let removed = self
+            .blocking(move |paths, runner| {
+                let guard = || match local(paths, &name) {
+                    Ok(state) if state.image => Err("a backing file exists on this node".to_string()),
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(format!("cannot inspect the backing file: {e}")),
+                };
+                Reconciler { paths, runner }.remove_checked(&name, &guard)
+            })
+            .await?;
+        match removed {
+            Ok(steps) => {
+                log_info(volume, format!("cleaned stale client {steps:?}"));
+                if !self.clear_entry(volume, object).await? {
+                    return Ok(Outcome::Kept);
+                }
+                cleanup::leave_client(&*self.volumes, &self.node, volume).await?;
+                Ok(Outcome::Progress)
+            }
+            Err(ReconcileError::Busy { .. }) => Ok(Outcome::Progress),
+            Err(ReconcileError::Refused { reason, .. }) => {
+                let message = format!("stale client cleanup refused: {reason}");
+                if self.report_message(volume, Some(object), &message).await? {
+                    log_error(volume, &message);
+                }
+                Ok(Outcome::Kept)
+            }
+            Err(error) => {
+                let message = format!("stale client cleanup failed: {error}");
+                if self.report_message(volume, Some(object), &message).await? {
                     log_error(volume, &message);
                 }
                 Err(Self::reconcile_error(volume, error))

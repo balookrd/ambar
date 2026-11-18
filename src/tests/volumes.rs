@@ -542,6 +542,25 @@ impl Volumes for FakeVolumes {
         Ok(deleted)
     }
 
+    async fn has_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<bool, ApiError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(ApiError::Other("fake API failure".to_string()));
+        }
+        let pods = self.pods.lock().unwrap();
+        for pod in pods.iter() {
+            let on_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node);
+            if on_node && crate::agent::kube::pod_uses_volume(pod, volume, mounted_uids) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>> {
         match self.events.lock().unwrap().take() {
             Some(rx) => stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|name| (Ok(name), rx)) }).boxed(),
