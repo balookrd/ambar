@@ -101,10 +101,10 @@
 - Modify: `deploy/daemonset.yaml`
 - Modify: `src/tests/` (тесты парсинга CLI аргументов)
 
-- [ ] **Step 1: тесты парсинга новых CLI параметров агента.**
-- [ ] **Step 2: реализация параметров в `src/main.rs`.**
-- [ ] **Step 3: обновление `deploy/rbac.yaml` и `deploy/daemonset.yaml`.**
-- [ ] **Step 4: гейт и коммит.**
+- [x] **Step 1: тесты парсинга новых CLI параметров агента.**
+- [x] **Step 2: реализация параметров в `src/main.rs`.**
+- [x] **Step 3: обновление `deploy/rbac.yaml` и `deploy/daemonset.yaml`.**
+- [x] **Step 4: гейт и коммит.**
 
 ---
 
