@@ -136,10 +136,10 @@
 - Modify: `src/agent/kube.rs`
 - Modify: `src/tests/volumes.rs` (фейк для taints)
 
-- [ ] **Step 1: unit-тесты чистой функции расчёта taint.**
-- [ ] **Step 2: методы `ensure_node_taint` и `remove_node_taint` в `KubeVolumes`.**
-- [ ] **Step 3: интеграция в фейки и проверка идемпотентности.**
-- [ ] **Step 4: гейт и коммит.**
+- [x] **Step 1: unit-тесты чистой функции расчёта taint.**
+- [x] **Step 2: методы `ensure_node_taint` и `remove_node_taint` в `KubeVolumes`.**
+- [x] **Step 3: интеграция в фейки и проверка идемпотентности.**
+- [x] **Step 4: гейт и коммит.**
 
 ---
 
