@@ -169,10 +169,10 @@
 - Create: `src/agent/tests/standalone.rs`
 - Modify: `src/agent/run.rs`
 
-- [ ] **Step 1: unit-тесты счётчика попыток `adjust` и фиксации состояния.**
-- [ ] **Step 2: реализация вызова `adjust` и перехода в `manual_check_needed`.**
-- [ ] **Step 3: автоматический сброс при переходе в `Connected`.**
-- [ ] **Step 4: гейт и коммит.**
+- [x] **Step 1: unit-тесты счётчика попыток `adjust` и фиксации состояния.**
+- [x] **Step 2: реализация вызова `adjust` и перехода в `manual_check_needed`.**
+- [x] **Step 3: автоматический сброс при переходе в `Connected`.**
+- [x] **Step 4: гейт и коммит.**
 
 ---
 
