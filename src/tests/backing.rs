@@ -188,6 +188,22 @@ fn attaches_with_direct_io_and_detaches() {
 }
 
 #[test]
+fn attaches_read_only() {
+    let runner = FakeRunner::new(|_, args| {
+        if args[0] == "--find" {
+            out(0, "/dev/loop3\n", "")
+        } else {
+            out(0, "", "")
+        }
+    });
+    assert_eq!(
+        attach_loop_read_only(&runner, Path::new("/v/spike.img")).unwrap(),
+        "/dev/loop3"
+    );
+    assert_eq!(runner.calls(), ["losetup --find --show --read-only /v/spike.img"]);
+}
+
+#[test]
 fn a_failing_losetup_is_an_error() {
     let runner = FakeRunner::new(|_, _| out(1, "", "losetup: cannot find an unused loop device\n"));
     let err = attach_loop(&runner, Path::new("/v/spike.img")).unwrap_err();
@@ -462,4 +478,15 @@ fn a_failed_inode_lookup_is_an_error_not_no_holder() {
     });
     let err = loop_holders(&runner, &image).unwrap_err();
     assert!(err.to_string().contains("denied"), "{err}");
+}
+
+#[test]
+fn has_any_loop_reference_finds_unconfirmed_and_ignores_absent() {
+    let tmp = TempDir::new().unwrap();
+    let image = image_in(&tmp, true);
+    let runner_with_ref = FakeRunner::new(|_, _| out(0, "/dev/loop0 /vol.img\n", ""));
+    assert!(crate::backing::has_any_loop_reference(&runner_with_ref, &image).unwrap());
+
+    let runner_without_ref = FakeRunner::new(|_, _| out(0, "/dev/loop0 /other.img\n", ""));
+    assert!(!crate::backing::has_any_loop_reference(&runner_without_ref, &image).unwrap());
 }

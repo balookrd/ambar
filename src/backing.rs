@@ -171,7 +171,8 @@ pub struct LoopHolder {
 /// line that is not a device followed by a backing file, and a backing file
 /// ending in `*` (util-linux cuts long names that way, so the line may be
 /// this image's).
-pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>, BackingError> {
+/// Lists loop devices that hold `image`, without verifying inode for name-only matches.
+fn raw_loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>, BackingError> {
     let mut candidates = vec![image.to_string_lossy().into_owned()];
     let mut detached_form = None;
     if let (Some(parent), Some(name)) = (image.parent(), image.file_name()) {
@@ -215,6 +216,16 @@ pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>
             });
         }
     }
+    Ok(holders)
+}
+
+/// Returns true if `losetup --list` mentions `image` by path or name, confirmed or not.
+pub fn has_any_loop_reference(runner: &dyn Runner, image: &Path) -> Result<bool, BackingError> {
+    raw_loop_holders(runner, image).map(|h| !h.is_empty())
+}
+
+pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>, BackingError> {
+    let holders = raw_loop_holders(runner, image)?;
     // The inode confirms a name-only match of a live line while the image exists.
     if !holders.iter().any(|holder| !holder.confirmed && !holder.deleted) {
         return Ok(holders);
@@ -249,6 +260,15 @@ pub fn loop_holders(runner: &dyn Runner, image: &Path) -> Result<Vec<LoopHolder>
 pub fn attach_loop(runner: &dyn Runner, file: &Path) -> Result<String, BackingError> {
     let path = file.to_string_lossy();
     let args = ["--find", "--show", "--direct-io=on", &path];
+    let out = checked(runner, "losetup", &args)?;
+    let printed = out.trim();
+    device_name("losetup", &args, printed, printed)
+}
+
+/// Attaches a file to a free loop device in read-only mode; returns the device.
+pub fn attach_loop_read_only(runner: &dyn Runner, file: &Path) -> Result<String, BackingError> {
+    let path = file.to_string_lossy();
+    let args = ["--find", "--show", "--read-only", &path];
     let out = checked(runner, "losetup", &args)?;
     let printed = out.trim();
     device_name("losetup", &args, printed, printed)
