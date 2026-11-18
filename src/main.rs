@@ -23,11 +23,61 @@ use tokio_util::sync::CancellationToken;
 
 const EXIT_CODES: &str = "Exit codes:\n  0   done\n  75  the volume is locked by another ambar process; try again later\n  1   any other error";
 
+const REPLICA_AFTER_HELP: &str = "\
+Exit codes:
+  0   the replica change is complete
+  1   the change failed, timed out, or was rejected
+
+Example:
+  kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica add my-vol node-2";
+
 #[derive(Parser)]
 #[command(name = "ambar", version, about = "Replicated volumes for k3s on top of DRBD 9")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Subcommand)]
+enum ReplicaCommand {
+    /// Add a replica copy of a volume on a node.
+    #[command(after_help = REPLICA_AFTER_HELP)]
+    Add {
+        /// Name of the volume.
+        volume: String,
+        /// Name of the node where the replica copy will be added.
+        node: String,
+        #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
+        namespace: String,
+        #[arg(long, default_value = "0")]
+        timeout: u64,
+    },
+    /// Remove a replica copy of a volume from a node.
+    #[command(after_help = REPLICA_AFTER_HELP)]
+    Remove {
+        /// Name of the volume.
+        volume: String,
+        /// Name of the node whose replica copy will be removed.
+        node: String,
+        #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
+        namespace: String,
+        #[arg(long, default_value = "0")]
+        timeout: u64,
+    },
+    /// Move a replica copy of a volume from one node to another.
+    #[command(after_help = REPLICA_AFTER_HELP)]
+    Move {
+        /// Name of the volume.
+        volume: String,
+        /// Source node whose replica copy will be moved.
+        from: String,
+        /// Destination node where the replica copy will be moved.
+        to: String,
+        #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
+        namespace: String,
+        #[arg(long, default_value = "0")]
+        timeout: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -49,6 +99,7 @@ enum Command {
     /// of its data: the backing file, its markers and the resource files.
     #[command(after_help = EXIT_CODES)]
     Remove {
+        /// Name of the volume.
         #[arg(long)]
         name: String,
     },
@@ -70,6 +121,9 @@ enum Command {
         #[arg(long, default_value = "/opt/ambar/modules")]
         modules_dir: PathBuf,
     },
+    /// Manage volume replicas: add, remove, or move copies.
+    #[command(subcommand, after_help = REPLICA_AFTER_HELP)]
+    Replica(ReplicaCommand),
     /// Print the CustomResourceDefinition of `ReplicatedVolume` as JSON.
     Crd,
     /// Print the DRBD state of a volume on this node.
@@ -120,6 +174,7 @@ fn run(cli: Cli) -> Result<()> {
             .remove(&name)?;
             println!("{name}: {steps:?}");
         }
+        Command::Replica(cmd) => run_replica_cmd(cmd)?,
         Command::Crd => print!("{}", ambar::crd::crd_json()),
         Command::Status { name } => match status_of(&runner, &name)? {
             None => println!("{name}: not configured"),
@@ -249,4 +304,59 @@ fn status_of(runner: &SystemRunner, name: &str) -> Result<Option<ResourceStatus>
 fn read_trimmed(path: &Path) -> Result<String> {
     let text = fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     Ok(text.trim().to_string())
+}
+
+fn run_replica_cmd(cmd: ReplicaCommand) -> Result<()> {
+    let (action, namespace, timeout) = match cmd {
+        ReplicaCommand::Add {
+            volume,
+            node,
+            namespace,
+            timeout,
+        } => (
+            ambar::agent::replica_cmd::ReplicaAction::Add { volume, node },
+            namespace,
+            timeout,
+        ),
+        ReplicaCommand::Remove {
+            volume,
+            node,
+            namespace,
+            timeout,
+        } => (
+            ambar::agent::replica_cmd::ReplicaAction::Remove { volume, node },
+            namespace,
+            timeout,
+        ),
+        ReplicaCommand::Move {
+            volume,
+            from,
+            to,
+            namespace,
+            timeout,
+        } => (
+            ambar::agent::replica_cmd::ReplicaAction::Move { volume, from, to },
+            namespace,
+            timeout,
+        ),
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("cannot start the async runtime")?;
+
+    runtime.block_on(async {
+        let client = kube::Client::try_default()
+            .await
+            .context("cannot configure the Kubernetes client (in-cluster configuration or kubeconfig)")?;
+        let volumes = KubeVolumes::new(client.clone());
+        let nodes = ConfigMapNodes::new(client, &namespace);
+        let shutdown = CancellationToken::new();
+        tokio::spawn(cancel_on_signal(shutdown.clone()));
+        let mut stdout = std::io::stdout();
+        ambar::agent::replica_cmd::run_replica(&volumes, &nodes, &action, timeout, &mut stdout, shutdown)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    })
 }

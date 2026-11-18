@@ -94,3 +94,101 @@ async fn an_edit_that_reads_first_ends_with_the_timeout_error() {
     // reported as "no such object" or "nothing to change".
     expires(volumes().remove_finalizer("v", "uid", "f")).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn edit_members_has_a_time_limit() {
+    expires(volumes().edit_members(
+        "v",
+        "uid",
+        &[],
+        &crate::replicas::Edit {
+            nodes: vec![],
+            add_finalizer: None,
+        },
+    ))
+    .await;
+}
+
+#[test]
+fn edit_members_ops_returns_none_when_expected_differs() {
+    use crate::crd::{MemberNode, NodeKind};
+    let obj = object();
+    let diff = vec![MemberNode {
+        name: "n1".into(),
+        node_id: 1,
+        address: "192.0.2.1".into(),
+        kind: NodeKind::Replica,
+    }];
+    let edit = crate::replicas::Edit {
+        nodes: vec![],
+        add_finalizer: None,
+    };
+    assert_eq!(edit_members_ops(&obj, &diff, &edit), None);
+}
+
+#[test]
+fn edit_members_ops_without_finalizer_has_two_ops() {
+    let obj = object();
+    let edit = crate::replicas::Edit {
+        nodes: vec![],
+        add_finalizer: None,
+    };
+    let ops = edit_members_ops(&obj, &[], &edit).unwrap();
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0], json!({"op": "test", "path": "/spec/nodes", "value": []}));
+    assert_eq!(ops[1], json!({"op": "replace", "path": "/spec/nodes", "value": []}));
+}
+
+#[test]
+fn edit_members_ops_with_new_finalizer_and_existing_list_has_four_ops() {
+    let mut obj = object();
+    obj.metadata.finalizers = Some(vec!["f1".into()]);
+    let edit = crate::replicas::Edit {
+        nodes: vec![],
+        add_finalizer: Some("f2".into()),
+    };
+    let ops = edit_members_ops(&obj, &[], &edit).unwrap();
+    assert_eq!(ops.len(), 4);
+    assert_eq!(ops[0], json!({"op": "test", "path": "/spec/nodes", "value": []}));
+    assert_eq!(ops[1], json!({"op": "replace", "path": "/spec/nodes", "value": []}));
+    assert_eq!(
+        ops[2],
+        json!({"op": "test", "path": "/metadata/finalizers", "value": ["f1"]})
+    );
+    assert_eq!(
+        ops[3],
+        json!({"op": "add", "path": "/metadata/finalizers/-", "value": "f2"})
+    );
+}
+
+#[test]
+fn edit_members_ops_with_missing_finalizers_field_has_three_ops() {
+    let mut obj = object();
+    obj.metadata.finalizers = None;
+    let edit = crate::replicas::Edit {
+        nodes: vec![],
+        add_finalizer: Some("f1".into()),
+    };
+    let ops = edit_members_ops(&obj, &[], &edit).unwrap();
+    assert_eq!(ops.len(), 3);
+    assert_eq!(ops[0], json!({"op": "test", "path": "/spec/nodes", "value": []}));
+    assert_eq!(ops[1], json!({"op": "replace", "path": "/spec/nodes", "value": []}));
+    assert_eq!(
+        ops[2],
+        json!({"op": "add", "path": "/metadata/finalizers", "value": ["f1"]})
+    );
+}
+
+#[test]
+fn edit_members_ops_when_finalizer_already_present_has_two_ops() {
+    let mut obj = object();
+    obj.metadata.finalizers = Some(vec!["f1".into()]);
+    let edit = crate::replicas::Edit {
+        nodes: vec![],
+        add_finalizer: Some("f1".into()),
+    };
+    let ops = edit_members_ops(&obj, &[], &edit).unwrap();
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0], json!({"op": "test", "path": "/spec/nodes", "value": []}));
+    assert_eq!(ops[1], json!({"op": "replace", "path": "/spec/nodes", "value": []}));
+}
