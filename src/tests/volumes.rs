@@ -97,6 +97,7 @@ pub(crate) struct FakeVolumes {
     /// not reached the object.
     pub(crate) drop_status_writes: AtomicBool,
     pub(crate) node_taints: Mutex<BTreeMap<String, Vec<(String, String)>>>,
+    pub(crate) pods: Mutex<Vec<k8s_openapi::api::core::v1::Pod>>,
 }
 
 /// A one-shot action of the fake on its own state.
@@ -513,6 +514,32 @@ impl Volumes for FakeVolumes {
         } else {
             Ok(false)
         }
+    }
+
+    async fn delete_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<Vec<String>, ApiError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(ApiError::Other("fake API failure".to_string()));
+        }
+        let mut deleted = Vec::new();
+        let mut pods = self.pods.lock().unwrap();
+        pods.retain(|pod| {
+            let on_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node);
+            if on_node && crate::agent::kube::pod_uses_volume(pod, volume, mounted_uids) {
+                if let Some(name) = &pod.metadata.name {
+                    deleted.push(name.clone());
+                    self.log(format!("delete-pod {node} {volume} {name}"));
+                }
+                false
+            } else {
+                true
+            }
+        });
+        Ok(deleted)
     }
 
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>> {

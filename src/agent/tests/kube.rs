@@ -266,3 +266,70 @@ async fn ensure_node_taint_has_a_time_limit() {
 async fn remove_node_taint_has_a_time_limit() {
     expires(volumes().remove_node_taint("n", "k", "NoSchedule")).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn delete_node_pods_for_volume_has_a_time_limit() {
+    expires(volumes().delete_node_pods_for_volume("n", "v", &[])).await;
+}
+
+#[test]
+fn pod_uses_volume_matches_volume_name() {
+    let pod = k8s_openapi::api::core::v1::Pod {
+        spec: Some(k8s_openapi::api::core::v1::PodSpec {
+            volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
+                name: "v1".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(pod_uses_volume(&pod, "v1", &[]));
+    assert!(!pod_uses_volume(&pod, "other", &[]));
+}
+
+#[test]
+fn pod_uses_volume_matches_claim_name() {
+    let pod = k8s_openapi::api::core::v1::Pod {
+        spec: Some(k8s_openapi::api::core::v1::PodSpec {
+            volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
+                name: "data".to_string(),
+                persistent_volume_claim: Some(k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource {
+                    claim_name: "v1".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(pod_uses_volume(&pod, "v1", &[]));
+    assert!(!pod_uses_volume(&pod, "other", &[]));
+}
+
+#[test]
+fn pod_uses_volume_matches_mounted_uids() {
+    let pod = k8s_openapi::api::core::v1::Pod {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            uid: Some("uid-123".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(pod_uses_volume(&pod, "v1", &["uid-123".to_string()]));
+    assert!(!pod_uses_volume(&pod, "v1", &["uid-999".to_string()]));
+}
+
+#[test]
+fn mounted_pod_uids_scans_kubelet_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pod_dir = tmp.path().join("pod-abc/volumes/kubernetes.io~csi/vol1");
+    std::fs::create_dir_all(&pod_dir).unwrap();
+
+    let uids = mounted_pod_uids_for_volume(tmp.path(), "vol1");
+    assert_eq!(uids, ["pod-abc"]);
+
+    let empty = mounted_pod_uids_for_volume(tmp.path(), "other");
+    assert!(empty.is_empty());
+}

@@ -242,6 +242,14 @@ impl Volumes for ConflictOnceVolumes<'_> {
     async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
         self.inner.remove_node_taint(node, key, effect).await
     }
+    async fn delete_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<Vec<String>, ApiError> {
+        self.inner.delete_node_pods_for_volume(node, volume, mounted_uids).await
+    }
     fn watch(&self) -> futures_util::stream::BoxStream<'static, Result<String, ApiError>> {
         self.inner.watch()
     }

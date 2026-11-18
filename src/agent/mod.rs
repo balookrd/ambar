@@ -8,6 +8,7 @@ pub mod decide;
 pub mod kube;
 pub mod local;
 pub mod nodes;
+pub mod quorum;
 pub mod replica_cmd;
 pub mod run;
 pub mod status;
