@@ -272,6 +272,11 @@ async fn delete_node_pods_for_volume_has_a_time_limit() {
     expires(volumes().delete_node_pods_for_volume("n", "v", &[])).await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn has_node_pods_for_volume_has_a_time_limit() {
+    expires(volumes().has_node_pods_for_volume("n", "v", &[])).await;
+}
+
 #[test]
 fn pod_uses_volume_matches_volume_name() {
     let pod = k8s_openapi::api::core::v1::Pod {

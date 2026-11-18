@@ -250,6 +250,14 @@ impl Volumes for ConflictOnceVolumes<'_> {
     ) -> Result<Vec<String>, ApiError> {
         self.inner.delete_node_pods_for_volume(node, volume, mounted_uids).await
     }
+    async fn has_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<bool, ApiError> {
+        self.inner.has_node_pods_for_volume(node, volume, mounted_uids).await
+    }
     fn watch(&self) -> futures_util::stream::BoxStream<'static, Result<String, ApiError>> {
         self.inner.watch()
     }

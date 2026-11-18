@@ -3342,3 +3342,55 @@ async fn finish_retire_keeps_when_status_clear_fails() {
             .any(|n| n.name == DV1)
     );
 }
+
+#[tokio::test]
+async fn stale_client_without_pods_is_cleaned_up_and_removed_from_spec() {
+    let e = env(DV3, fake_node());
+    let mut vol = spike_with_third("Client", &[DV1, DV2]);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV3)],
+    });
+    e.volumes.put(vol.clone());
+
+    let res = crate::agent::cleanup::check_and_cleanup_client(&e.agent, VOLUME, &vol)
+        .await
+        .unwrap();
+    assert_eq!(res, Some(Outcome::Progress));
+
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_none());
+    let current_nodes = e.volumes.object(VOLUME).unwrap().spec.nodes;
+    assert!(!current_nodes.iter().any(|n| n.name == DV3));
+}
+
+#[tokio::test]
+async fn client_with_pods_is_not_cleaned_up() {
+    let e = env(DV3, fake_node());
+    let vol = spike_with_third("Client", &[DV1, DV2]);
+    e.volumes.put(vol.clone());
+
+    let pod = k8s_openapi::api::core::v1::Pod {
+        metadata: kube::core::ObjectMeta {
+            name: Some("client-pod".to_string()),
+            namespace: Some("default".to_string()),
+            ..Default::default()
+        },
+        spec: Some(k8s_openapi::api::core::v1::PodSpec {
+            node_name: Some(DV3.to_string()),
+            volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
+                name: VOLUME.to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    e.volumes.pods.lock().unwrap().push(pod);
+
+    let res = crate::agent::cleanup::check_and_cleanup_client(&e.agent, VOLUME, &vol)
+        .await
+        .unwrap();
+    assert_eq!(res, None);
+    let current_nodes = e.volumes.object(VOLUME).unwrap().spec.nodes;
+    assert!(current_nodes.iter().any(|n| n.name == DV3));
+    assert!(!e.runner.calls().iter().any(|c| c.contains("down")));
+}
