@@ -10,13 +10,13 @@ single Rust binary running as a DaemonSet.
 
 | Part | State |
 |---|---|
-| Design spec | brought in line with the code of phase 2a; open questions listed at its end |
+| Design spec | brought in line with the code of phase 2b; open questions listed at its end |
 | Image with a prebuilt DRBD 9.3.4 module and drbd-utils 9.35.0 | builds, has tests |
 | Test stand: four Lima VMs with k3s | scripts in `stand/` |
 | DRBD 9 failure experiments on the stand | recorded with raw outputs |
 | CSI driver | creates, mounts and deletes volumes through PVCs on the stand (`stand/csi-e2e.sh`); node failures are not handled |
+| Changing the replica set of an existing volume (phase 2b) | implemented: CLI commands `ambar replica add`, `remove`, `move` with safety rules and witness rebalancing (`stand/replica-e2e.sh`) |
 | Node failure handling (phase 3): releasing a volume on quorum loss, the `no-quorum` taint, `adjust` on `StandAlone`, metrics | not implemented |
-| Changing the replica set of an existing volume (phase 2b) | not implemented; the CRD rejects the change |
 | Production run | not done: nothing here has run on a production cluster |
 | Measurements on the target hardware (NanoPi R5C) | not done |
 
@@ -26,6 +26,8 @@ single Rust binary running as a DaemonSet.
   N one more node joins as a diskless witness. Any other node attaches to the
   volume without a disk when a pod with the volume is scheduled there, and
   detaches when the pod is gone.
+- Existing volumes can change replica count and placement on the fly (`ambar replica add`,
+  `remove`, `move`) without I/O downtime.
 - With `protocol: C` a write is acknowledged after it is on the disks of all
   nodes that hold a copy.
 - One node mounts a volume at a time (`ReadWriteOnce`, `ReadWriteOncePod`).
@@ -34,13 +36,36 @@ single Rust binary running as a DaemonSet.
 - The DRBD module is built ahead of time for an exact kernel version and
   shipped in the image; nodes need no compiler.
 
+## Changing volume replicas
+
+Volume replicas can be added, removed, or moved across nodes on the fly without stopping the workload pod:
+
+```bash
+# Add a replica on node-2 (waits until synced to UpToDate)
+kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica add my-vol node-2
+
+# Remove a replica from node-3 (waits until safe removal finishes)
+kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica remove my-vol node-3
+
+# Move a replica from node-2 to node-4 (adds on node-4, waits for UpToDate, then removes from node-2)
+kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica move my-vol node-2 node-4
+```
+
+Flags:
+- `--namespace <ns>`: namespace of the volume object (default: `ambar-system`).
+- `--timeout <seconds>`: maximum duration to wait for sync or removal in seconds (default: `0`, no timeout).
+
+Exit codes:
+- `0`: the replica change is complete.
+- `1`: the change failed, timed out, or was rejected by safety rules (e.g. attempting to remove the active Primary replica or leaving fewer than 2 replicas).
+
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `docs/superpowers/specs/2026-11-12-ambar-design.md` | design spec (Russian) |
 | `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | record of the DRBD 9 experiments and the stand checks (Russian) |
-| `docs/superpowers/plans/` | executed plans of phases 0, 1 and 2a (Russian, historical) |
+| `docs/superpowers/plans/` | executed plans of phases 0, 1, 2a and 2b (Russian, historical) |
 | `src/` | the `ambar` binary (Rust): node agent, reconcile loop, CSI services |
 | `proto/csi.proto`, `build.rs` | CSI v1 protocol definition and its code generation |
 | `deploy/` | Kubernetes manifests: CRD, CSIDriver, RBAC, DaemonSet, StorageClasses, example of the `ambar-nodes` ConfigMap |
@@ -87,7 +112,7 @@ Linux kernel.
 cargo test
 ```
 
-Expected line: `test result: ok. 756 passed`. The mount code has tests that run
+Expected line: `test result: ok. 828 passed`. The mount code has tests that run
 only on Linux; on macOS run the suite in a container as well:
 `docker run --rm -v "$PWD":/src -w /src rust:1-slim cargo test --locked`.
 
