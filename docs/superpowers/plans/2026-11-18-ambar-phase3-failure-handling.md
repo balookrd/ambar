@@ -119,10 +119,10 @@
 - Modify: `src/agent/run.rs`
 - Create/Modify: тесты в `src/tests/`
 
-- [ ] **Step 1: тесты `attach_loop_read_only` и проверки `dump-md`.**
-- [ ] **Step 2: реализация read-only подключения в `backing.rs`.**
-- [ ] **Step 3: интеграция в `prove_no_data` и пути `DeleteReplica` / `RetireReplica`.**
-- [ ] **Step 4: гейт и коммит.**
+- [x] **Step 1: тесты `attach_loop_read_only` и проверки `dump-md`.**
+- [x] **Step 2: реализация read-only подключения в `backing.rs`.**
+- [x] **Step 3: интеграция в `prove_no_data` и пути `DeleteReplica` / `RetireReplica`.**
+- [x] **Step 4: гейт и коммит.**
 
 ---
 
