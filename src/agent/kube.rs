@@ -140,6 +140,15 @@ pub trait Volumes: Send + Sync {
         expected: &[MemberNode],
         members: &[MemberNode],
     ) -> Result<bool, ApiError>;
+    /// Edits `spec.nodes` and optionally adds a finalizer, if the object has the uid
+    /// `uid` and its `spec.nodes` is still `expected`. `false`: nothing was changed.
+    async fn edit_members(
+        &self,
+        name: &str,
+        uid: &str,
+        expected: &[MemberNode],
+        edit: &crate::replicas::Edit,
+    ) -> Result<bool, ApiError>;
     /// Server-side apply of this node's entry of `status.nodes` under the
     /// field manager `ambar-<node>`; `None` removes the entry. An object that
     /// does not exist is success.
@@ -304,6 +313,36 @@ pub fn replace_members_ops(
         json!({"op": "test", "path": "/spec/nodes", "value": expected}),
         json!({"op": "replace", "path": "/spec/nodes", "value": members}),
     ])
+}
+
+/// Operations that replace `spec.nodes` with `edit.nodes` and optionally add a finalizer,
+/// applying only while `spec.nodes` is `expected`; `None` when `object` has another list.
+pub fn edit_members_ops(
+    object: &ReplicatedVolume,
+    expected: &[MemberNode],
+    edit: &crate::replicas::Edit,
+) -> Option<Vec<Value>> {
+    if object.spec.nodes != expected {
+        return None;
+    }
+    let mut ops = vec![
+        json!({"op": "test", "path": "/spec/nodes", "value": expected}),
+        json!({"op": "replace", "path": "/spec/nodes", "value": edit.nodes}),
+    ];
+    if let Some(finalizer) = &edit.add_finalizer {
+        match &object.metadata.finalizers {
+            Some(existing) => {
+                if !existing.contains(finalizer) {
+                    ops.push(json!({"op": "test", "path": "/metadata/finalizers", "value": existing}));
+                    ops.push(json!({"op": "add", "path": "/metadata/finalizers/-", "value": finalizer}));
+                }
+            }
+            None => {
+                ops.push(json!({"op": "add", "path": "/metadata/finalizers", "value": [finalizer]}));
+            }
+        }
+    }
+    Some(ops)
 }
 
 /// Runs one API call under `API_CALL_TIMEOUT`. The outer `Err` is the expiry,
@@ -482,6 +521,16 @@ impl Volumes for KubeVolumes {
             replace_members_ops(object, expected, members)
         })
         .await
+    }
+
+    async fn edit_members(
+        &self,
+        name: &str,
+        uid: &str,
+        expected: &[MemberNode],
+        edit: &crate::replicas::Edit,
+    ) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &|object| edit_members_ops(object, expected, edit)).await
     }
 
     async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError> {

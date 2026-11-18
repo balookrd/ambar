@@ -125,9 +125,20 @@ pub(crate) fn apply_ops(document: &mut Value, ops: &[Value]) -> Result<(), Strin
             }
             "add" => {
                 let (parent, last) = path.rsplit_once('/').ok_or("bad path")?;
-                let key = last.replace("~1", "/").replace("~0", "~");
                 match document.pointer_mut(parent).ok_or(format!("no {parent}"))? {
+                    Value::Array(items) => {
+                        if last == "-" {
+                            items.push(op["value"].clone());
+                        } else {
+                            let index: usize = last.parse().map_err(|_| "bad index")?;
+                            if index > items.len() {
+                                return Err(format!("index {index} out of bounds"));
+                            }
+                            items.insert(index, op["value"].clone());
+                        }
+                    }
                     Value::Object(map) => {
+                        let key = last.replace("~1", "/").replace("~0", "~");
                         map.insert(key, op["value"].clone());
                     }
                     _ => return Err(format!("cannot add {path}")),
@@ -430,6 +441,19 @@ impl Volumes for FakeVolumes {
     ) -> Result<bool, ApiError> {
         patch_retrying(self, name, uid, &|object| {
             replace_members_ops(object, expected, members)
+        })
+        .await
+    }
+
+    async fn edit_members(
+        &self,
+        name: &str,
+        uid: &str,
+        expected: &[MemberNode],
+        edit: &crate::replicas::Edit,
+    ) -> Result<bool, ApiError> {
+        patch_retrying(self, name, uid, &|object| {
+            crate::agent::kube::edit_members_ops(object, expected, edit)
         })
         .await
     }
