@@ -55,6 +55,10 @@ spec:
             - --csi-socket=/var/lib/kubelet/plugins/ambar/csi.sock
           securityContext:
             privileged: true
+          ports:
+            - name: metrics
+              containerPort: 9770
+              protocol: TCP
           # Ready means the CSI socket exists. The agent binds the socket
           # concurrently with the reconcile loop and does not wait for the
           # first pass of the loop: until the agent is ready, NodeStageVolume

@@ -1,16 +1,18 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 use ambar::agent::kube::KubeVolumes;
 use ambar::agent::nodes::ConfigMapNodes;
 use ambar::agent::run::{Agent, VolumeLocks, preflight};
-use ambar::cli;
+use ambar::cli::{self, Cli, Command, ReplicaCommand};
 use ambar::csi::{self, ControllerService, IdentityService, NodeService, Services};
 use ambar::drbd::adm::Drbd;
 use ambar::drbd::status::ResourceStatus;
@@ -20,118 +22,6 @@ use ambar::module_loader::{self, LoaderEnv};
 use ambar::paths::Paths;
 use ambar::reconcile::Reconciler;
 use tokio_util::sync::CancellationToken;
-
-const EXIT_CODES: &str = "Exit codes:\n  0   done\n  75  the volume is locked by another ambar process; try again later\n  1   any other error";
-
-const REPLICA_AFTER_HELP: &str = "\
-Exit codes:
-  0   the replica change is complete
-  1   the change failed, timed out, or was rejected
-
-Example:
-  kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica add my-vol node-2";
-
-#[derive(Parser)]
-#[command(name = "ambar", version, about = "Replicated volumes for k3s on top of DRBD 9")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum ReplicaCommand {
-    /// Add a replica copy of a volume on a node.
-    #[command(after_help = REPLICA_AFTER_HELP)]
-    Add {
-        /// Name of the volume.
-        volume: String,
-        /// Name of the node where the replica copy will be added.
-        node: String,
-        #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
-        namespace: String,
-        #[arg(long, default_value = "0")]
-        timeout: u64,
-    },
-    /// Remove a replica copy of a volume from a node.
-    #[command(after_help = REPLICA_AFTER_HELP)]
-    Remove {
-        /// Name of the volume.
-        volume: String,
-        /// Name of the node whose replica copy will be removed.
-        node: String,
-        #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
-        namespace: String,
-        #[arg(long, default_value = "0")]
-        timeout: u64,
-    },
-    /// Move a replica copy of a volume from one node to another.
-    #[command(after_help = REPLICA_AFTER_HELP)]
-    Move {
-        /// Name of the volume.
-        volume: String,
-        /// Source node whose replica copy will be moved.
-        from: String,
-        /// Destination node where the replica copy will be moved.
-        to: String,
-        #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
-        namespace: String,
-        #[arg(long, default_value = "0")]
-        timeout: u64,
-    },
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Load the DRBD 9 kernel module bundled in the image.
-    LoadModule {
-        #[arg(long, default_value = "/opt/ambar/modules")]
-        modules_dir: PathBuf,
-    },
-    /// Bring this node in line with a volume description. The node is the
-    /// host name: `drbdadm` picks the `on <host>` section by it.
-    #[command(after_help = EXIT_CODES)]
-    Apply {
-        /// JSON file with the volume description.
-        #[arg(long)]
-        file: PathBuf,
-    },
-    /// Take a volume down on this node and irrevocably delete the local copy
-    /// of its data: the backing file, its markers and the resource files.
-    #[command(after_help = EXIT_CODES)]
-    Remove {
-        /// Name of the volume.
-        #[arg(long)]
-        name: String,
-    },
-    /// Run the node agent: load the DRBD module, then reconcile this node with
-    /// the `ReplicatedVolume` objects until SIGTERM. Needs the API server
-    /// (in-cluster configuration or a kubeconfig).
-    Agent {
-        /// Kubernetes name of this node; must equal the host name.
-        #[arg(long, env = "NODE_NAME")]
-        node_name: String,
-        /// Unix socket of the CSI gRPC server (Identity, Controller, Node).
-        /// A stale socket file is replaced; any other file there is an error.
-        #[arg(long, default_value = "/var/lib/kubelet/plugins/ambar/csi.sock")]
-        csi_socket: PathBuf,
-        /// Namespace of the agent's own objects: the ConfigMap `ambar-nodes`
-        /// is read from it.
-        #[arg(long, env = "POD_NAMESPACE", default_value = "ambar-system")]
-        namespace: String,
-        #[arg(long, default_value = "/opt/ambar/modules")]
-        modules_dir: PathBuf,
-    },
-    /// Manage volume replicas: add, remove, or move copies.
-    #[command(subcommand, after_help = REPLICA_AFTER_HELP)]
-    Replica(ReplicaCommand),
-    /// Print the CustomResourceDefinition of `ReplicatedVolume` as JSON.
-    Crd,
-    /// Print the DRBD state of a volume on this node.
-    Status {
-        #[arg(long)]
-        name: String,
-    },
-}
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
@@ -153,7 +43,23 @@ fn run(cli: Cli) -> Result<()> {
             csi_socket,
             namespace,
             modules_dir,
-        } => run_agent(&node_name, &csi_socket, &namespace, &modules_dir, paths)?,
+            quorum_loss_grace_period,
+            adjust_attempts,
+            adjust_interval,
+            metrics_addr,
+        } => run_agent(
+            &node_name,
+            &csi_socket,
+            &namespace,
+            &modules_dir,
+            paths,
+            cli::AgentOptions {
+                quorum_loss_grace_period: Duration::from_secs(quorum_loss_grace_period),
+                adjust_attempts,
+                adjust_interval: Duration::from_secs(adjust_interval),
+                metrics_addr,
+            },
+        )?,
         Command::Apply { file } => {
             let json = fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
             let spec = VolumeSpec::from_json(&json)?;
@@ -216,7 +122,14 @@ fn load_module(modules_dir: &Path, runner: &SystemRunner) -> Result<String> {
 
 /// The checks that need no API server come first: a wrong node name or a
 /// missing volumes directory must stop the agent before it touches anything.
-fn run_agent(node: &str, csi_socket: &Path, namespace: &str, modules_dir: &Path, paths: Paths) -> Result<()> {
+fn run_agent(
+    node: &str,
+    csi_socket: &Path,
+    namespace: &str,
+    modules_dir: &Path,
+    paths: Paths,
+    _options: cli::AgentOptions,
+) -> Result<()> {
     let hostname = read_trimmed(Path::new("/proc/sys/kernel/hostname"))?;
     preflight(node, &hostname, &paths)?;
     let runner = Arc::new(SystemRunner::default());

@@ -13,8 +13,9 @@ metadata:
 #   patch             JSON patches of finalizers, spec.initialSync, spec.nodes
 #                     and annotations
 # `update` is not granted: the code never replaces an object.
-# The agent does not read `pods` or `nodes`. (`nodes` read access exists only
-# in the ClusterRole ambar-external-provisioner below.)
+# In phase 3 the agent reads and patches `nodes` (for the `no-quorum` taint)
+# and reads/deletes `pods` on this node (to release volumes on quorum loss and
+# clean up stale Client memberships).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -28,6 +29,15 @@ rules:
   - apiGroups: ["ambar.balookrd.github.io"]
     resources: ["replicatedvolumes/status"]
     verbs: ["patch"]
+  # Phase 3 failure handling: taint ambar.balookrd.github.io/no-quorum on the node.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+  # Phase 3 failure handling: evict pods of volumes that lost quorum, and inspect
+  # pods on the node to clean up stale Client memberships.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
