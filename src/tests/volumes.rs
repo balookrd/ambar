@@ -96,6 +96,7 @@ pub(crate) struct FakeVolumes {
     /// `apply_node_status` is logged but stores nothing, as if the write had
     /// not reached the object.
     pub(crate) drop_status_writes: AtomicBool,
+    pub(crate) node_taints: Mutex<BTreeMap<String, Vec<(String, String)>>>,
 }
 
 /// A one-shot action of the fake on its own state.
@@ -483,6 +484,35 @@ impl Volumes for FakeVolumes {
             }
         }
         Ok(())
+    }
+
+    async fn ensure_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(ApiError::Other("fake API failure".to_string()));
+        }
+        let mut taints = self.node_taints.lock().unwrap();
+        let entry = taints.entry(node.to_string()).or_default();
+        if entry.iter().any(|(k, e)| k == key && e == effect) {
+            return Ok(false);
+        }
+        entry.push((key.to_string(), effect.to_string()));
+        self.log(format!("taint {node} {key}:{effect}"));
+        Ok(true)
+    }
+
+    async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(ApiError::Other("fake API failure".to_string()));
+        }
+        let mut taints = self.node_taints.lock().unwrap();
+        let entry = taints.entry(node.to_string()).or_default();
+        if let Some(pos) = entry.iter().position(|(k, e)| k == key && e == effect) {
+            entry.remove(pos);
+            self.log(format!("untaint {node} {key}:{effect}"));
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>> {

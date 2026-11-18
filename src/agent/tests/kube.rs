@@ -192,3 +192,77 @@ fn edit_members_ops_when_finalizer_already_present_has_two_ops() {
     assert_eq!(ops[0], json!({"op": "test", "path": "/spec/nodes", "value": []}));
     assert_eq!(ops[1], json!({"op": "replace", "path": "/spec/nodes", "value": []}));
 }
+
+fn node_with_taints(taints: Option<Vec<(&str, &str)>>) -> k8s_openapi::api::core::v1::Node {
+    k8s_openapi::api::core::v1::Node {
+        spec: Some(k8s_openapi::api::core::v1::NodeSpec {
+            taints: taints.map(|list| {
+                list.into_iter()
+                    .map(|(k, e)| k8s_openapi::api::core::v1::Taint {
+                        key: k.to_string(),
+                        effect: e.to_string(),
+                        time_added: None,
+                        value: None,
+                    })
+                    .collect()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn ensure_taint_ops_creates_array_when_taints_is_none() {
+    let node = node_with_taints(None);
+    let ops = ensure_taint_ops(&node, "k", "NoSchedule").unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(
+        ops[0],
+        json!({"op": "add", "path": "/spec/taints", "value": [{"key": "k", "effect": "NoSchedule"}]})
+    );
+}
+
+#[test]
+fn ensure_taint_ops_appends_when_other_taints_exist() {
+    let node = node_with_taints(Some(vec![("other", "NoSchedule")]));
+    let ops = ensure_taint_ops(&node, "k", "NoSchedule").unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(
+        ops[0],
+        json!({"op": "add", "path": "/spec/taints/-", "value": {"key": "k", "effect": "NoSchedule"}})
+    );
+}
+
+#[test]
+fn ensure_taint_ops_returns_none_when_already_present() {
+    let node = node_with_taints(Some(vec![("k", "NoSchedule")]));
+    assert!(ensure_taint_ops(&node, "k", "NoSchedule").is_none());
+}
+
+#[test]
+fn remove_taint_ops_returns_none_when_no_taints_or_not_found() {
+    let node_none = node_with_taints(None);
+    assert!(remove_taint_ops(&node_none, "k", "NoSchedule").is_none());
+
+    let node_other = node_with_taints(Some(vec![("other", "NoSchedule")]));
+    assert!(remove_taint_ops(&node_other, "k", "NoSchedule").is_none());
+}
+
+#[test]
+fn remove_taint_ops_removes_exact_index() {
+    let node = node_with_taints(Some(vec![("t0", "NoSchedule"), ("t1", "NoSchedule")]));
+    let ops = remove_taint_ops(&node, "t1", "NoSchedule").unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0], json!({"op": "remove", "path": "/spec/taints/1"}));
+}
+
+#[tokio::test(start_paused = true)]
+async fn ensure_node_taint_has_a_time_limit() {
+    expires(volumes().ensure_node_taint("n", "k", "NoSchedule")).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn remove_node_taint_has_a_time_limit() {
+    expires(volumes().remove_node_taint("n", "k", "NoSchedule")).await;
+}
