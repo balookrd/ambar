@@ -164,6 +164,13 @@ pub trait Volumes: Send + Sync {
     /// Removes the taint with key `key` and effect `effect` from the node `node`.
     /// Returns `Ok(true)` if the taint was removed, `Ok(false)` if it was not present.
     async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError>;
+    /// Deletes pods on `node` that use `volume`. Returns the names of the deleted pods.
+    async fn delete_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<Vec<String>, ApiError>;
     /// Names of the objects that were added, changed or deleted, starting
     /// with every existing object. Call once; the stream does not end.
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>>;
@@ -307,6 +314,44 @@ pub fn remove_taint_ops(node: &k8s_openapi::api::core::v1::Node, key: &str, effe
     })])
 }
 
+/// Checks whether `pod` mounts or references `volume`, either by name in `volumes`, PVC claim name,
+/// or matching UID from the node's kubelet mounts directory.
+pub fn pod_uses_volume(pod: &k8s_openapi::api::core::v1::Pod, volume: &str, mounted_uids: &[String]) -> bool {
+    if pod
+        .metadata
+        .uid
+        .as_deref()
+        .is_some_and(|uid| mounted_uids.iter().any(|u| u == uid))
+    {
+        return true;
+    }
+    let Some(spec) = &pod.spec else {
+        return false;
+    };
+    spec.volumes.as_deref().unwrap_or_default().iter().any(|v| {
+        v.name == volume
+            || v.persistent_volume_claim
+                .as_ref()
+                .is_some_and(|pvc| pvc.claim_name == volume)
+    })
+}
+
+/// Discovers pod UIDs on the local node that have mounted `volume` under `/var/lib/kubelet/pods`.
+pub fn mounted_pod_uids_for_volume(kubelet_pods_dir: &std::path::Path, volume: &str) -> Vec<String> {
+    let mut uids = Vec::new();
+    let Ok(entries) = std::fs::read_dir(kubelet_pods_dir) else {
+        return uids;
+    };
+    for entry in entries.flatten() {
+        let pod_uid = entry.file_name().to_string_lossy().into_owned();
+        let vol_dir = entry.path().join("volumes/kubernetes.io~csi").join(volume);
+        if vol_dir.exists() {
+            uids.push(pod_uid);
+        }
+    }
+    uids
+}
+
 /// Operations that change `spec.initialSync` from `Skip` to `Done`.
 pub fn initial_sync_done_ops(object: &ReplicatedVolume) -> Option<Vec<Value>> {
     if object.spec.initial_sync != InitialSync::Skip {
@@ -424,6 +469,7 @@ fn api_error(error: kube::Error) -> ApiError {
 }
 
 pub struct KubeVolumes {
+    client: Client,
     api: Api<ReplicatedVolume>,
     nodes: Api<k8s_openapi::api::core::v1::Node>,
     cache: Store<ReplicatedVolume>,
@@ -437,6 +483,7 @@ impl KubeVolumes {
     pub fn new(client: Client) -> Self {
         let (cache, writer) = reflector::store();
         Self {
+            client: client.clone(),
             api: Api::all(client.clone()),
             nodes: Api::all(client),
             cache,
@@ -652,6 +699,33 @@ impl Volumes for KubeVolumes {
         Err(ApiError::Conflict(format!(
             "editing taints on node {node} exceeded {EDIT_ATTEMPTS} attempts"
         )))
+    }
+
+    async fn delete_node_pods_for_volume(
+        &self,
+        node: &str,
+        volume: &str,
+        mounted_uids: &[String],
+    ) -> Result<Vec<String>, ApiError> {
+        let params = ListParams::default().fields(&format!("spec.nodeName={node}"));
+        let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(self.client.clone());
+        let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
+        let mut deleted = Vec::new();
+        for pod in list.items {
+            if !pod_uses_volume(&pod, volume, mounted_uids) {
+                continue;
+            }
+            let (Some(name), Some(ns)) = (pod.metadata.name.as_deref(), pod.metadata.namespace.as_deref()) else {
+                continue;
+            };
+            let namespaced: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
+            match bounded(namespaced.delete(name, &DeleteParams::default())).await? {
+                Ok(_) => deleted.push(name.to_string()),
+                Err(e) if code_of(&e) == Some(404) => {}
+                Err(e) => return Err(api_error(e)),
+            }
+        }
+        Ok(deleted)
     }
 
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>> {
