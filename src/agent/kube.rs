@@ -158,6 +158,12 @@ pub trait Volumes: Send + Sync {
     /// `uid`. `true`: the entry was removed. `false`: nothing was changed (no
     /// object, another uid, or no such entry).
     async fn remove_node_entry(&self, name: &str, uid: &str, node: &str) -> Result<bool, ApiError>;
+    /// Ensures that the node `node` carries the taint with key `key` and effect `effect`.
+    /// Returns `Ok(true)` if the taint was added, `Ok(false)` if it was already present.
+    async fn ensure_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError>;
+    /// Removes the taint with key `key` and effect `effect` from the node `node`.
+    /// Returns `Ok(true)` if the taint was removed, `Ok(false)` if it was not present.
+    async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError>;
     /// Names of the objects that were added, changed or deleted, starting
     /// with every existing object. Call once; the stream does not end.
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>>;
@@ -262,6 +268,43 @@ pub fn remove_node_entry_ops(object: &ReplicatedVolume, node: &str) -> Option<Ve
         json!({"op": "test", "path": format!("{path}/name"), "value": node}),
         json!({"op": "remove", "path": path}),
     ])
+}
+
+/// JSON patch operations that add a taint with `key` and `effect` to `node` if not present.
+pub fn ensure_taint_ops(node: &k8s_openapi::api::core::v1::Node, key: &str, effect: &str) -> Option<Vec<Value>> {
+    let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref());
+    if let Some(taints) = taints {
+        if taints.iter().any(|t| t.key == key && t.effect == effect) {
+            return None;
+        }
+        Some(vec![json!({
+            "op": "add",
+            "path": "/spec/taints/-",
+            "value": {
+                "key": key,
+                "effect": effect,
+            }
+        })])
+    } else {
+        Some(vec![json!({
+            "op": "add",
+            "path": "/spec/taints",
+            "value": [{
+                "key": key,
+                "effect": effect,
+            }]
+        })])
+    }
+}
+
+/// JSON patch operations that remove a taint with `key` and `effect` from `node` if present.
+pub fn remove_taint_ops(node: &k8s_openapi::api::core::v1::Node, key: &str, effect: &str) -> Option<Vec<Value>> {
+    let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref())?;
+    let idx = taints.iter().position(|t| t.key == key && t.effect == effect)?;
+    Some(vec![json!({
+        "op": "remove",
+        "path": format!("/spec/taints/{idx}"),
+    })])
 }
 
 /// Operations that change `spec.initialSync` from `Skip` to `Done`.
@@ -382,6 +425,7 @@ fn api_error(error: kube::Error) -> ApiError {
 
 pub struct KubeVolumes {
     api: Api<ReplicatedVolume>,
+    nodes: Api<k8s_openapi::api::core::v1::Node>,
     cache: Store<ReplicatedVolume>,
     /// Taken by the first `watch`; the reflector owns it from then on.
     writer: Mutex<Option<reflector::store::Writer<ReplicatedVolume>>>,
@@ -393,7 +437,8 @@ impl KubeVolumes {
     pub fn new(client: Client) -> Self {
         let (cache, writer) = reflector::store();
         Self {
-            api: Api::all(client),
+            api: Api::all(client.clone()),
+            nodes: Api::all(client),
             cache,
             writer: Mutex::new(Some(writer)),
             listed: Arc::new(AtomicBool::new(false)),
@@ -553,6 +598,60 @@ impl Volumes for KubeVolumes {
 
     async fn remove_node_entry(&self, name: &str, uid: &str, node: &str) -> Result<bool, ApiError> {
         patch_status_retrying(self, name, uid, &|object| remove_node_entry_ops(object, node)).await
+    }
+
+    async fn ensure_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        for attempt in 0..EDIT_ATTEMPTS {
+            let Some(node_obj) = call(self.nodes.get_opt(node)).await? else {
+                return Err(ApiError::Other(format!("node {node} not found")));
+            };
+            let Some(ops) = ensure_taint_ops(&node_obj, key, effect) else {
+                return Ok(false);
+            };
+            let ops_val = serde_json::from_value(Value::Array(ops)).map_err(|e| ApiError::Other(e.to_string()))?;
+            match bounded(
+                self.nodes
+                    .patch(node, &PatchParams::default(), &Patch::Json::<()>(ops_val)),
+            )
+            .await?
+            {
+                Ok(_) => return Ok(true),
+                Err(e) if attempt + 1 < EDIT_ATTEMPTS && (code_of(&e) == Some(409) || code_of(&e) == Some(422)) => {
+                    continue;
+                }
+                Err(e) => return Err(api_error(e)),
+            }
+        }
+        Err(ApiError::Conflict(format!(
+            "editing taints on node {node} exceeded {EDIT_ATTEMPTS} attempts"
+        )))
+    }
+
+    async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        for attempt in 0..EDIT_ATTEMPTS {
+            let Some(node_obj) = call(self.nodes.get_opt(node)).await? else {
+                return Ok(false);
+            };
+            let Some(ops) = remove_taint_ops(&node_obj, key, effect) else {
+                return Ok(false);
+            };
+            let ops_val = serde_json::from_value(Value::Array(ops)).map_err(|e| ApiError::Other(e.to_string()))?;
+            match bounded(
+                self.nodes
+                    .patch(node, &PatchParams::default(), &Patch::Json::<()>(ops_val)),
+            )
+            .await?
+            {
+                Ok(_) => return Ok(true),
+                Err(e) if attempt + 1 < EDIT_ATTEMPTS && (code_of(&e) == Some(409) || code_of(&e) == Some(422)) => {
+                    continue;
+                }
+                Err(e) => return Err(api_error(e)),
+            }
+        }
+        Err(ApiError::Conflict(format!(
+            "editing taints on node {node} exceeded {EDIT_ATTEMPTS} attempts"
+        )))
     }
 
     fn watch(&self) -> BoxStream<'static, Result<String, ApiError>> {

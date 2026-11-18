@@ -11,3 +11,4 @@ pub mod nodes;
 pub mod replica_cmd;
 pub mod run;
 pub mod status;
+pub mod taint;

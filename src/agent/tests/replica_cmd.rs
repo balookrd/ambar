@@ -236,6 +236,12 @@ impl Volumes for ConflictOnceVolumes<'_> {
     async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError> {
         self.inner.apply_node_status(name, node, entry).await
     }
+    async fn ensure_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        self.inner.ensure_node_taint(node, key, effect).await
+    }
+    async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        self.inner.remove_node_taint(node, key, effect).await
+    }
     fn watch(&self) -> futures_util::stream::BoxStream<'static, Result<String, ApiError>> {
         self.inner.watch()
     }
