@@ -1392,6 +1392,8 @@ impl Script {
                     reply
                 }
                 ("losetup", ["-j", _]) => script.same_inode.lock().unwrap().clone(),
+                ("losetup", ["--find", ..]) => out(0, "/dev/loop3\n", ""),
+                ("losetup", ["-d", _]) => out(0, "", ""),
                 ("drbdadm", ["dump-md", _]) => {
                     let n = script.dump_calls.fetch_add(1, Ordering::SeqCst);
                     let reply = {
@@ -1488,6 +1490,56 @@ async fn a_pending_file_without_the_synced_marker_and_without_metadata_is_remove
 #[tokio::test]
 async fn a_pending_file_without_the_synced_marker_and_with_fresh_metadata_is_removed_without_the_peer_checks() {
     pending_with_metadata_is_removed_without_the_peer_checks(out(0, FRESH_DUMP, "")).await;
+}
+
+#[tokio::test]
+async fn a_pending_file_without_loop_device_after_reboot_is_checked_read_only_and_removed() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = env(DV1, script.runner());
+    prepare_copy(&e.paths, true, false);
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    // Simulate reboot: device link is absent, no loop device attached.
+    let _ = fs::remove_file(e.paths.device_link(VOLUME));
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    e.volumes.set_entry(VOLUME, reported(DV2));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert!(
+        e.runner
+            .calls()
+            .iter()
+            .any(|c| c.contains("losetup --find --show --read-only")),
+        "read-only loop attachment ran"
+    );
+    assert!(
+        e.runner.calls().iter().any(|c| c.starts_with("losetup -d")),
+        "temporary loop device was detached"
+    );
+}
+
+#[tokio::test]
+async fn a_pending_file_without_loop_device_after_reboot_kept_when_metadata_used() {
+    let script = Script::new(EMPTY_KERNEL, out(0, USED_DUMP, ""));
+    let e = env(DV1, script.runner());
+    prepare_copy(&e.paths, true, false);
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    let _ = fs::remove_file(e.paths.device_link(VOLUME));
+    e.volumes.put(spike_with_third("Witness", &[DV1, DV2]));
+    e.volumes.set_entry(VOLUME, reported(DV2));
+    e.volumes.delete(VOLUME).await.unwrap();
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    assert!(e.paths.image(VOLUME).exists());
+    assert!(e.paths.res_file(VOLUME).exists());
+    assert_eq!(e.volumes.finalizers(VOLUME).len(), 2);
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the reason is in the status");
+    assert!(entry.message.contains("already holds DRBD metadata"));
+    assert!(
+        e.runner.calls().iter().any(|c| c.starts_with("losetup -d")),
+        "temporary read-only loop device was detached"
+    );
 }
 
 #[tokio::test]
@@ -1785,13 +1837,50 @@ async fn a_pending_file_whose_device_link_points_at_the_loop_of_another_file_is_
 }
 
 #[tokio::test]
-async fn a_pending_file_that_no_loop_device_holds_is_kept() {
+async fn a_pending_file_that_no_loop_device_holds_is_removed_when_fresh() {
     let (script, e) = fresh_pending_copy().await;
     script.list("");
 
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_copy_removed(&e);
+    assert!(
+        e.runner
+            .calls()
+            .iter()
+            .any(|c| c.contains("losetup --find --show --read-only")),
+        "read-only loop attachment ran"
+    );
+    assert!(
+        e.runner.calls().iter().any(|c| c.starts_with("losetup -d")),
+        "temporary loop device was detached"
+    );
+}
+
+#[tokio::test]
+async fn a_pending_file_that_no_loop_device_holds_is_kept_when_metadata_used() {
+    let script = Script::new(EMPTY_KERNEL, out(0, USED_DUMP, ""));
+    let e = deleting_with(Backing::Pending { synced: false }, &script, &[DV2]).await;
+    script.list("");
+
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
-    assert_copy_kept(&e, "no loop device holds");
-    assert_no_dump_md(&e, &script);
+    assert!(e.paths.image(VOLUME).exists());
+    let entry = e.volumes.entry_of(VOLUME, DV1).expect("the reason is in the status");
+    assert!(
+        entry.message.contains("already holds DRBD metadata"),
+        "{}",
+        entry.message
+    );
+    assert!(
+        e.runner
+            .calls()
+            .iter()
+            .any(|c| c.contains("losetup --find --show --read-only")),
+        "read-only loop attachment ran"
+    );
+    assert!(
+        e.runner.calls().iter().any(|c| c.starts_with("losetup -d")),
+        "temporary loop device was detached"
+    );
 }
 
 #[tokio::test]
@@ -3160,6 +3249,26 @@ async fn retire_replica_removes_unconfigured_when_no_data() {
             .iter()
             .any(|n| n.name == DV1)
     );
+}
+
+#[tokio::test]
+async fn retire_replica_removes_unconfigured_pending_file_when_no_data() {
+    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
+    let e = env(DV1, script.runner());
+    prepare_copy(&e.paths, true, false);
+    fs::remove_file(e.paths.ready_marker(VOLUME)).unwrap();
+    let _ = fs::remove_file(e.paths.device_link(VOLUME));
+    let mut vol = spike_retiring(DV1);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV1)],
+    });
+    e.volumes.put(vol);
+
+    assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert!(!e.paths.image(VOLUME).exists());
+    assert!(!e.paths.res_file(VOLUME).exists());
+    assert!(e.volumes.entry_of(VOLUME, DV1).is_none());
+    assert_eq!(e.volumes.finalizers(VOLUME), vec![replica_finalizer(DV2)]);
 }
 
 #[tokio::test]

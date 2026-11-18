@@ -160,7 +160,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use crate::backing::loop_holders;
+use crate::backing::{attach_loop_read_only, detach_loop, has_any_loop_reference, link_device, loop_holders};
 use crate::crd::{MemberNode, NodeKind, NodeStatus, ReplicatedVolume, ReplicatedVolumeSpec, to_volume_spec};
 use crate::drbd::adm::{Drbd, Metadata};
 use crate::drbd::status::{ConnectionState, DiskState, ResourceStatus, Role};
@@ -444,19 +444,91 @@ fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileSta
                      deleted: check it by hand, then restore the ready marker or run `ambar remove --name {volume}`"
                 ));
             }
-            // `dump-md` reads whatever the device link points at.
-            prove_device_link(paths, runner, volume)?;
-            match (Drbd { runner }).metadata(volume) {
-                Ok(Metadata::Absent | Metadata::Fresh) => Ok(()),
-                Ok(Metadata::Used) => Err(
-                    "the backing file has no ready marker but already holds DRBD metadata; the metadata was not \
-                     touched, check the file by hand"
-                        .to_string(),
-                ),
-                Err(e) => Err(format!("cannot tell whether the backing file holds DRBD metadata: {e}")),
-            }
+            prove_pending_metadata(paths, runner, volume)
         }
     }
+}
+
+fn check_metadata_result(runner: &dyn Runner, volume: &str) -> Result<(), String> {
+    match (Drbd { runner }).metadata(volume) {
+        Ok(Metadata::Absent | Metadata::Fresh) => Ok(()),
+        Ok(Metadata::Used) => Err(
+            "the backing file has no ready marker but already holds DRBD metadata; the metadata was not \
+             touched, check the file by hand"
+                .to_string(),
+        ),
+        Err(e) => Err(format!("cannot tell whether the backing file holds DRBD metadata: {e}")),
+    }
+}
+
+fn prove_pending_metadata(paths: &Paths, runner: &dyn Runner, volume: &str) -> Result<(), String> {
+    if prove_device_link(paths, runner, volume).is_ok() {
+        return check_metadata_result(runner, volume);
+    }
+    let image = paths.image(volume);
+    let has_ref = has_any_loop_reference(runner, &image)
+        .map_err(|e| format!("cannot tell which loop device holds the backing file: {e}"))?;
+    if has_ref {
+        return prove_device_link(paths, runner, volume);
+    }
+
+    let dev =
+        attach_loop_read_only(runner, &image).map_err(|e| format!("cannot attach the backing file read-only: {e}"))?;
+
+    struct TempCleanup<'a> {
+        runner: &'a dyn Runner,
+        dev: String,
+        link_created: bool,
+        link_path: std::path::PathBuf,
+        res_created: bool,
+        res_path: std::path::PathBuf,
+    }
+
+    impl Drop for TempCleanup<'_> {
+        fn drop(&mut self) {
+            if self.link_created {
+                let _ = fs::remove_file(&self.link_path);
+            }
+            if self.res_created {
+                let _ = fs::remove_file(&self.res_path);
+            }
+            let _ = detach_loop(self.runner, &self.dev);
+        }
+    }
+
+    let link_path = paths.device_link(volume);
+    let link_existed = link_path.is_symlink();
+    if let Err(e) = link_device(&link_path, &dev) {
+        let _ = detach_loop(runner, &dev);
+        return Err(format!("cannot create temporary device link: {e}"));
+    }
+
+    let res_path = paths.res_file(volume);
+    let res_created = if !res_path.exists() {
+        let dummy = format!(
+            "resource {volume} {{\n  device /dev/drbd0;\n  disk {};\n  meta-disk internal;\n}}\n",
+            link_path.display()
+        );
+        if let Some(parent) = res_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(&res_path, dummy).is_ok()
+    } else {
+        false
+    };
+
+    let cleanup = TempCleanup {
+        runner,
+        dev,
+        link_created: !link_existed,
+        link_path,
+        res_created,
+        res_path,
+    };
+
+    let result = check_metadata_result(runner, volume);
+    drop(cleanup);
+    result
 }
 
 /// Shows that `drbdadm dump-md <volume>` would read this volume's backing
