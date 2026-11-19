@@ -529,7 +529,7 @@ impl Volumes for FakeVolumes {
         let mut pods = self.pods.lock().unwrap();
         pods.retain(|pod| {
             let on_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node);
-            if on_node && crate::agent::kube::pod_uses_volume(pod, volume, mounted_uids) {
+            if on_node && fake_pod_uses_volume(pod, volume, mounted_uids) {
                 if let Some(name) = &pod.metadata.name {
                     deleted.push(name.clone());
                     self.log(format!("delete-pod {node} {volume} {name}"));
@@ -554,7 +554,7 @@ impl Volumes for FakeVolumes {
         let pods = self.pods.lock().unwrap();
         for pod in pods.iter() {
             let on_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node);
-            if on_node && crate::agent::kube::pod_uses_volume(pod, volume, mounted_uids) {
+            if on_node && fake_pod_uses_volume(pod, volume, mounted_uids) {
                 return Ok(true);
             }
         }
@@ -595,4 +595,21 @@ pub(crate) fn cluster(caps: &[u64]) -> ClusterNodes {
         })
         .collect();
     ClusterNodes::from_json(&format!("[{}]", list.join(","))).unwrap()
+}
+
+fn fake_pod_uses_volume(pod: &k8s_openapi::api::core::v1::Pod, volume: &str, mounted_uids: &[String]) -> bool {
+    if crate::agent::kube::pod_uses_volume(pod, volume, mounted_uids) {
+        return true;
+    }
+    // In unit test mocks (where no K8s API server is running to resolve PVCs):
+    // allow matching claim_name or volume name for simulated pods.
+    let Some(spec) = &pod.spec else {
+        return false;
+    };
+    spec.volumes.as_deref().unwrap_or_default().iter().any(|v| {
+        v.name == volume
+            || v.persistent_volume_claim
+                .as_ref()
+                .is_some_and(|pvc| pvc.claim_name == volume)
+    })
 }

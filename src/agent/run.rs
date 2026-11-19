@@ -1631,7 +1631,12 @@ impl Agent {
                 mounted_uids: &mounted_uids,
                 now,
             };
-            let _ = check_volume_quorum(quorum_tracker, &*self.volumes, check).await;
+            if let Err(e) = check_volume_quorum(quorum_tracker, &*self.volumes, check).await {
+                eprintln!(
+                    "ambar-agent: warning: volume {:?}: failed to check quorum / evict pods: {e}",
+                    status.name
+                );
+            }
         }
 
         // 3. Auto-adjust StandAlone Secondary connections and split-brain tracking (R34, R35)

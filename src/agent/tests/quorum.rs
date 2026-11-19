@@ -189,3 +189,52 @@ async fn check_volume_quorum_returns_api_error_on_failure() {
     let res = check_volume_quorum(&mut tracker, &fake, check).await;
     assert!(res.is_err());
 }
+
+#[tokio::test]
+async fn check_volume_quorum_retries_eviction_after_api_failure() {
+    let fake = crate::tests::volumes::FakeVolumes::default();
+    let pod = k8s_openapi::api::core::v1::Pod {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test-pod".to_string()),
+            namespace: Some("default".to_string()),
+            ..Default::default()
+        },
+        spec: Some(k8s_openapi::api::core::v1::PodSpec {
+            node_name: Some("dv-1".to_string()),
+            volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
+                name: "v1".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    fake.pods.lock().unwrap().push(pod);
+
+    fake.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut tracker = QuorumTracker::new(Duration::ZERO);
+    let check = VolumeQuorumCheck {
+        node: "dv-1",
+        volume: "v1",
+        is_mounted: true,
+        has_quorum: false,
+        mounted_uids: &[],
+        now: Instant::now(),
+    };
+    // First attempt fails due to fake API failure
+    let res = check_volume_quorum(&mut tracker, &fake, check).await;
+    assert!(res.is_err());
+
+    // API recovers: next check must retry eviction and succeed
+    fake.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    let check2 = VolumeQuorumCheck {
+        node: "dv-1",
+        volume: "v1",
+        is_mounted: true,
+        has_quorum: false,
+        mounted_uids: &[],
+        now: Instant::now(),
+    };
+    let res2 = check_volume_quorum(&mut tracker, &fake, check2).await.unwrap();
+    assert_eq!(res2, Some(vec!["test-pod".to_string()]));
+}
