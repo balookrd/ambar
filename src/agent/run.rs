@@ -166,6 +166,7 @@ use crate::drbd::adm::{Drbd, Metadata};
 use crate::drbd::status::{ConnectionState, DiskState, ResourceStatus, Role};
 use crate::exec::Runner;
 use crate::membership::{collisions, replica_finalizer};
+use crate::model::valid_volume_group_name;
 use crate::model::{InitialSync, valid_volume_name};
 use crate::paths::Paths;
 use crate::reconcile::{FileState, ReconcileError, Reconciler, status_matches_spec};
@@ -287,12 +288,19 @@ fn log_error(volume: &str, text: impl Display) {
 
 /// The node name must be the host name: `drbdadm` picks the `on <host>`
 /// section of the resource file by it. The volumes directory must exist: the
-/// agent never creates it.
-pub fn preflight(node: &str, hostname: &str, paths: &Paths) -> Result<(), AgentError> {
+/// agent never creates it. An optional LVM volume group name must be valid.
+pub fn preflight(node: &str, hostname: &str, paths: &Paths, volume_group: Option<&str>) -> Result<(), AgentError> {
     if node != hostname.trim() {
         return Err(AgentError::Startup(format!(
             "NODE_NAME is {node:?} but /proc/sys/kernel/hostname is {:?}; the node name must be the host name",
             hostname.trim()
+        )));
+    }
+    if let Some(vg) = volume_group
+        && !valid_volume_group_name(vg)
+    {
+        return Err(AgentError::Startup(format!(
+            "invalid volume group name {vg:?}; must be 1-127 characters [a-zA-Z0-9+_.-] and not start with '-'"
         )));
     }
     if !Path::new(&paths.volumes_dir).is_dir() {

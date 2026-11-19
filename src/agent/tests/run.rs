@@ -2570,7 +2570,8 @@ fn preflight_accepts_a_matching_host_name_and_an_existing_volumes_directory() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     fs::create_dir_all(&paths.volumes_dir).unwrap();
-    assert!(preflight("node-a", "node-a\n", &paths).is_ok());
+    assert!(preflight("node-a", "node-a\n", &paths, None).is_ok());
+    assert!(preflight("node-a", "node-a\n", &paths, Some("k3s-vg")).is_ok());
 }
 
 #[test]
@@ -2578,7 +2579,7 @@ fn preflight_rejects_a_node_name_that_is_not_the_host_name() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
     fs::create_dir_all(&paths.volumes_dir).unwrap();
-    let err = preflight("node-a", "node-b\n", &paths).unwrap_err();
+    let err = preflight("node-a", "node-b\n", &paths, None).unwrap_err();
     assert!(err.to_string().contains("node-b"), "{err}");
 }
 
@@ -2586,9 +2587,20 @@ fn preflight_rejects_a_node_name_that_is_not_the_host_name() {
 fn preflight_rejects_a_missing_volumes_directory() {
     let tmp = TempDir::new().unwrap();
     let paths = temp_paths(&tmp);
-    let err = preflight("node-a", "node-a", &paths).unwrap_err();
+    let err = preflight("node-a", "node-a", &paths, None).unwrap_err();
     assert!(err.to_string().contains("does not exist"), "{err}");
     assert!(!paths.volumes_dir.exists());
+}
+
+#[test]
+fn preflight_rejects_an_invalid_volume_group_name() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    let err = preflight("node-a", "node-a\n", &paths, Some("../evil-vg")).unwrap_err();
+    assert!(err.to_string().contains("invalid volume group name"), "{err}");
+    let err = preflight("node-a", "node-a\n", &paths, Some("-lead-dash")).unwrap_err();
+    assert!(err.to_string().contains("invalid volume group name"), "{err}");
 }
 
 #[tokio::test]

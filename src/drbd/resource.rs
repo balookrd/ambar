@@ -6,12 +6,28 @@ use std::path::Path;
 
 use crate::model::{Protocol, VolumeNode, VolumeSpec};
 
+/// Checks whether a block device path is safe to embed in a DRBD resource file
+/// without risking directive injection or syntax corruption.
+pub fn is_safe_backing_device_path(path: &Path) -> bool {
+    let Some(s) = path.to_str() else { return false };
+    if !s.starts_with('/') {
+        return false;
+    }
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'.' | b'+'))
+}
+
 /// Renders `<volume>.res`. The same text is written on every node of the
 /// volume; DRBD picks the `on <host>` section that matches `uname -n`.
 ///
 /// `backing_device` is the stable path of the loop device on a node that
 /// holds a copy, e.g. `/dev/ambar/<volume>`.
 pub fn render(spec: &VolumeSpec, backing_device: &Path) -> String {
+    assert!(
+        is_safe_backing_device_path(backing_device),
+        "unsafe backing device path: {:?}",
+        backing_device
+    );
     let mut nodes: Vec<&VolumeNode> = spec.nodes.iter().collect();
     nodes.sort_by_key(|n| n.node_id);
 

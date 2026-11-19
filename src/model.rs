@@ -194,6 +194,19 @@ pub fn valid_node_name(name: &str) -> bool {
         && bytes.iter().all(allowed)
 }
 
+/// LVM Volume Group name rule: 1-127 characters a-z, A-Z, 0-9, '.', '_', '-' and '+',
+/// not starting with '-', and not '.' or '..'.
+pub fn valid_volume_group_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let allowed = |b: &u8| b.is_ascii_alphanumeric() || matches!(*b, b'.' | b'_' | b'-' | b'+');
+    !bytes.is_empty()
+        && bytes.len() <= 127
+        && bytes[0] != b'-'
+        && name != "."
+        && name != ".."
+        && bytes.iter().all(allowed)
+}
+
 #[cfg(test)]
 #[path = "tests/model.rs"]
 mod tests;

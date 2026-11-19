@@ -330,3 +330,24 @@ fn node_name_limit_constant_is_what_valid_node_name_enforces() {
     assert!(valid_node_name(&"a".repeat(MAX_NODE_NAME_LEN)));
     assert!(!valid_node_name(&"a".repeat(MAX_NODE_NAME_LEN + 1)));
 }
+
+#[test]
+fn test_valid_volume_group_name() {
+    assert!(valid_volume_group_name("k3s-vg"));
+    assert!(valid_volume_group_name("vg0"));
+    assert!(valid_volume_group_name("my_vg.1+"));
+    assert!(valid_volume_group_name("a"));
+    assert!(valid_volume_group_name(&"a".repeat(127)));
+
+    // Invalid
+    assert!(!valid_volume_group_name(""));
+    assert!(!valid_volume_group_name("-"));
+    assert!(!valid_volume_group_name("-vg"));
+    assert!(!valid_volume_group_name("."));
+    assert!(!valid_volume_group_name(".."));
+    assert!(!valid_volume_group_name("../etc"));
+    assert!(!valid_volume_group_name("vg/foo"));
+    assert!(!valid_volume_group_name("vg;echo"));
+    assert!(!valid_volume_group_name("vg name"));
+    assert!(!valid_volume_group_name(&"a".repeat(128)));
+}

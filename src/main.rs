@@ -135,7 +135,7 @@ fn run_agent(
     options: cli::AgentOptions,
 ) -> Result<()> {
     let hostname = read_trimmed(Path::new("/proc/sys/kernel/hostname"))?;
-    preflight(node, &hostname, &paths)?;
+    preflight(node, &hostname, &paths, options.volume_group.as_deref())?;
     let runner = Arc::new(SystemRunner::default());
     eprintln!("ambar-agent: {}", load_module(modules_dir, &runner)?);
 
