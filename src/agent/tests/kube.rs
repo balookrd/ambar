@@ -180,6 +180,29 @@ fn edit_members_ops_with_missing_finalizers_field_has_three_ops() {
 }
 
 #[test]
+fn edit_members_ops_with_missing_finalizers_includes_resource_version_test() {
+    let mut obj = object();
+    obj.metadata.finalizers = None;
+    obj.metadata.resource_version = Some("10".to_string());
+    let edit = crate::replicas::Edit {
+        nodes: vec![],
+        add_finalizer: Some("f1".into()),
+    };
+    let ops = edit_members_ops(&obj, &[], &edit).unwrap();
+    assert_eq!(ops.len(), 4);
+    assert_eq!(ops[0], json!({"op": "test", "path": "/spec/nodes", "value": []}));
+    assert_eq!(ops[1], json!({"op": "replace", "path": "/spec/nodes", "value": []}));
+    assert_eq!(
+        ops[2],
+        json!({"op": "test", "path": "/metadata/resourceVersion", "value": "10"})
+    );
+    assert_eq!(
+        ops[3],
+        json!({"op": "add", "path": "/metadata/finalizers", "value": ["f1"]})
+    );
+}
+
+#[test]
 fn edit_members_ops_when_finalizer_already_present_has_two_ops() {
     let mut obj = object();
     obj.metadata.finalizers = Some(vec!["f1".into()]);
@@ -224,6 +247,22 @@ fn ensure_taint_ops_creates_array_when_taints_is_none() {
 }
 
 #[test]
+fn ensure_taint_ops_includes_resource_version_test_when_taints_is_none() {
+    let mut node = node_with_taints(None);
+    node.metadata.resource_version = Some("42".to_string());
+    let ops = ensure_taint_ops(&node, "k", "NoSchedule").unwrap();
+    assert_eq!(ops.len(), 2);
+    assert_eq!(
+        ops[0],
+        json!({"op": "test", "path": "/metadata/resourceVersion", "value": "42"})
+    );
+    assert_eq!(
+        ops[1],
+        json!({"op": "add", "path": "/spec/taints", "value": [{"key": "k", "effect": "NoSchedule"}]})
+    );
+}
+
+#[test]
 fn ensure_taint_ops_appends_when_other_taints_exist() {
     let node = node_with_taints(Some(vec![("other", "NoSchedule")]));
     let ops = ensure_taint_ops(&node, "k", "NoSchedule").unwrap();
@@ -253,8 +292,16 @@ fn remove_taint_ops_returns_none_when_no_taints_or_not_found() {
 fn remove_taint_ops_removes_exact_index() {
     let node = node_with_taints(Some(vec![("t0", "NoSchedule"), ("t1", "NoSchedule")]));
     let ops = remove_taint_ops(&node, "t1", "NoSchedule").unwrap();
-    assert_eq!(ops.len(), 1);
-    assert_eq!(ops[0], json!({"op": "remove", "path": "/spec/taints/1"}));
+    assert_eq!(ops.len(), 3);
+    assert_eq!(
+        ops[0],
+        json!({"op": "test", "path": "/spec/taints/1/key", "value": "t1"})
+    );
+    assert_eq!(
+        ops[1],
+        json!({"op": "test", "path": "/spec/taints/1/effect", "value": "NoSchedule"})
+    );
+    assert_eq!(ops[2], json!({"op": "remove", "path": "/spec/taints/1"}));
 }
 
 #[tokio::test(start_paused = true)]
@@ -278,7 +325,7 @@ async fn has_node_pods_for_volume_has_a_time_limit() {
 }
 
 #[test]
-fn pod_uses_volume_matches_volume_name() {
+fn pod_uses_volume_ignores_arbitrary_volume_name() {
     let pod = k8s_openapi::api::core::v1::Pod {
         spec: Some(k8s_openapi::api::core::v1::PodSpec {
             volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
@@ -289,12 +336,12 @@ fn pod_uses_volume_matches_volume_name() {
         }),
         ..Default::default()
     };
-    assert!(pod_uses_volume(&pod, "v1", &[]));
-    assert!(!pod_uses_volume(&pod, "other", &[]));
+    // Arbitrary spec.volumes[].name does not imply using the ambar volume
+    assert!(!pod_uses_volume(&pod, "v1", &[]));
 }
 
 #[test]
-fn pod_uses_volume_matches_claim_name() {
+fn pod_uses_volume_ignores_unresolved_claim_name() {
     let pod = k8s_openapi::api::core::v1::Pod {
         spec: Some(k8s_openapi::api::core::v1::PodSpec {
             volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
@@ -309,8 +356,20 @@ fn pod_uses_volume_matches_claim_name() {
         }),
         ..Default::default()
     };
-    assert!(pod_uses_volume(&pod, "v1", &[]));
-    assert!(!pod_uses_volume(&pod, "other", &[]));
+    // PVC claim_name does not equal ambar PV volume name without API resolution
+    assert!(!pod_uses_volume(&pod, "v1", &[]));
+}
+
+#[test]
+fn pod_uses_volume_rejects_invalid_volume_name() {
+    let pod = k8s_openapi::api::core::v1::Pod {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            uid: Some("uid-123".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(!pod_uses_volume(&pod, "../evil", &["uid-123".to_string()]));
 }
 
 #[test]
@@ -337,4 +396,7 @@ fn mounted_pod_uids_scans_kubelet_directory() {
 
     let empty = mounted_pod_uids_for_volume(tmp.path(), "other");
     assert!(empty.is_empty());
+
+    let invalid = mounted_pod_uids_for_volume(tmp.path(), "../invalid");
+    assert!(invalid.is_empty());
 }

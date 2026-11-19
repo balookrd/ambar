@@ -66,6 +66,13 @@ impl QuorumTracker {
     pub fn forget(&mut self, volume: &str) {
         self.lost_at.remove(volume);
     }
+
+    /// Resets the `triggered` state so eviction will be retried on the next check.
+    pub fn retry_eviction(&mut self, volume: &str) {
+        if let Some((_, triggered)) = self.lost_at.get_mut(volume) {
+            *triggered = false;
+        }
+    }
 }
 
 pub struct VolumeQuorumCheck<'a> {
@@ -86,10 +93,16 @@ pub async fn check_volume_quorum(
 ) -> Result<Option<Vec<String>>, crate::agent::kube::ApiError> {
     match tracker.update(check.volume, check.is_mounted, check.has_quorum, check.now) {
         QuorumAction::EvictPods => {
-            let deleted = volumes
+            match volumes
                 .delete_node_pods_for_volume(check.node, check.volume, check.mounted_uids)
-                .await?;
-            Ok(Some(deleted))
+                .await
+            {
+                Ok(deleted) => Ok(Some(deleted)),
+                Err(e) => {
+                    tracker.retry_eviction(check.volume);
+                    Err(e)
+                }
+            }
         }
         _ => Ok(None),
     }

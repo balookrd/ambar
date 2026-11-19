@@ -300,14 +300,19 @@ pub fn ensure_taint_ops(node: &k8s_openapi::api::core::v1::Node, key: &str, effe
             }
         })])
     } else {
-        Some(vec![json!({
+        let mut ops = Vec::new();
+        if let Some(version) = &node.metadata.resource_version {
+            ops.push(json!({"op": "test", "path": "/metadata/resourceVersion", "value": version}));
+        }
+        ops.push(json!({
             "op": "add",
             "path": "/spec/taints",
             "value": [{
                 "key": key,
                 "effect": effect,
             }]
-        })])
+        }));
+        Some(ops)
     }
 }
 
@@ -315,32 +320,33 @@ pub fn ensure_taint_ops(node: &k8s_openapi::api::core::v1::Node, key: &str, effe
 pub fn remove_taint_ops(node: &k8s_openapi::api::core::v1::Node, key: &str, effect: &str) -> Option<Vec<Value>> {
     let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref())?;
     let idx = taints.iter().position(|t| t.key == key && t.effect == effect)?;
-    Some(vec![json!({
-        "op": "remove",
-        "path": format!("/spec/taints/{idx}"),
-    })])
+    Some(vec![
+        json!({
+            "op": "test",
+            "path": format!("/spec/taints/{idx}/key"),
+            "value": key,
+        }),
+        json!({
+            "op": "test",
+            "path": format!("/spec/taints/{idx}/effect"),
+            "value": effect,
+        }),
+        json!({
+            "op": "remove",
+            "path": format!("/spec/taints/{idx}"),
+        }),
+    ])
 }
 
-/// Checks whether `pod` mounts or references `volume`, either by name in `volumes`, PVC claim name,
-/// or matching UID from the node's kubelet mounts directory.
+/// Checks whether `pod` mounts or references `volume`, matching UID from the node's kubelet mounts directory.
 pub fn pod_uses_volume(pod: &k8s_openapi::api::core::v1::Pod, volume: &str, mounted_uids: &[String]) -> bool {
-    if pod
-        .metadata
+    if !crate::model::valid_volume_name(volume) {
+        return false;
+    }
+    pod.metadata
         .uid
         .as_deref()
         .is_some_and(|uid| mounted_uids.iter().any(|u| u == uid))
-    {
-        return true;
-    }
-    let Some(spec) = &pod.spec else {
-        return false;
-    };
-    spec.volumes.as_deref().unwrap_or_default().iter().any(|v| {
-        v.name == volume
-            || v.persistent_volume_claim
-                .as_ref()
-                .is_some_and(|pvc| pvc.claim_name == volume)
-    })
 }
 
 /// Resolves whether `pod` uses `volume`, checking `pod_uses_volume` and if needed querying
@@ -350,31 +356,41 @@ async fn pod_uses_volume_resolve(
     pod: &k8s_openapi::api::core::v1::Pod,
     volume: &str,
     mounted_uids: &[String],
-) -> bool {
+) -> Result<bool, ApiError> {
+    if !crate::model::valid_volume_name(volume) {
+        return Ok(false);
+    }
     if pod_uses_volume(pod, volume, mounted_uids) {
-        return true;
+        return Ok(true);
     }
     let Some(ns) = pod.metadata.namespace.as_deref() else {
-        return false;
+        return Ok(false);
     };
     let Some(spec) = &pod.spec else {
-        return false;
+        return Ok(false);
     };
     for v in spec.volumes.as_deref().unwrap_or_default() {
         if let Some(pvc_ref) = &v.persistent_volume_claim {
             let pvcs: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
-            if let Ok(Ok(Some(pvc))) = bounded(pvcs.get_opt(&pvc_ref.claim_name)).await
-                && pvc.spec.and_then(|s| s.volume_name).as_deref() == Some(volume)
-            {
-                return true;
+            match bounded(pvcs.get_opt(&pvc_ref.claim_name)).await? {
+                Ok(Some(pvc)) => {
+                    if pvc.spec.and_then(|s| s.volume_name).as_deref() == Some(volume) {
+                        return Ok(true);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => return Err(api_error(e)),
             }
         }
     }
-    false
+    Ok(false)
 }
 
 /// Discovers pod UIDs on the local node that have mounted `volume` under `/var/lib/kubelet/pods`.
 pub fn mounted_pod_uids_for_volume(kubelet_pods_dir: &std::path::Path, volume: &str) -> Vec<String> {
+    if !crate::model::valid_volume_name(volume) {
+        return Vec::new();
+    }
     let mut uids = Vec::new();
     let Ok(entries) = std::fs::read_dir(kubelet_pods_dir) else {
         return uids;
@@ -463,6 +479,9 @@ pub fn edit_members_ops(
                 }
             }
             None => {
+                if let Some(version) = &object.metadata.resource_version {
+                    ops.push(json!({"op": "test", "path": "/metadata/resourceVersion", "value": version}));
+                }
                 ops.push(json!({"op": "add", "path": "/metadata/finalizers", "value": [finalizer]}));
             }
         }
@@ -749,16 +768,43 @@ impl Volumes for KubeVolumes {
         let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
         let mut deleted = Vec::new();
         for pod in list.items {
-            if !pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await {
+            if pod
+                .metadata
+                .annotations
+                .as_ref()
+                .is_some_and(|a| a.contains_key("kubernetes.io/config.mirror"))
+            {
                 continue;
             }
-            let (Some(name), Some(ns)) = (pod.metadata.name.as_deref(), pod.metadata.namespace.as_deref()) else {
+            if pod.metadata.deletion_timestamp.is_some() {
+                continue;
+            }
+            if pod
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .is_some_and(|p| p == "Succeeded" || p == "Failed")
+            {
+                continue;
+            }
+            if !pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await? {
+                continue;
+            }
+            let (Some(name), Some(ns), Some(uid)) = (
+                pod.metadata.name.as_deref(),
+                pod.metadata.namespace.as_deref(),
+                pod.metadata.uid.as_deref(),
+            ) else {
                 continue;
             };
             let namespaced: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
-            match bounded(namespaced.delete(name, &DeleteParams::default())).await? {
+            let delete_params = DeleteParams::default().preconditions(Preconditions {
+                uid: Some(uid.to_string()),
+                resource_version: None,
+            });
+            match bounded(namespaced.delete(name, &delete_params)).await? {
                 Ok(_) => deleted.push(name.to_string()),
-                Err(e) if code_of(&e) == Some(404) => {}
+                Err(e) if code_of(&e) == Some(404) || code_of(&e) == Some(409) => {}
                 Err(e) => return Err(api_error(e)),
             }
         }
@@ -775,7 +821,25 @@ impl Volumes for KubeVolumes {
         let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(self.client.clone());
         let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
         for pod in list.items {
-            if pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await {
+            let is_mounted = pod
+                .metadata
+                .uid
+                .as_deref()
+                .is_some_and(|uid| mounted_uids.iter().any(|u| u == uid));
+            if !is_mounted {
+                if pod.metadata.deletion_timestamp.is_some() {
+                    continue;
+                }
+                if pod
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.phase.as_deref())
+                    .is_some_and(|p| p == "Succeeded" || p == "Failed")
+                {
+                    continue;
+                }
+            }
+            if pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await? {
                 return Ok(true);
             }
         }
