@@ -100,7 +100,7 @@ fn local_reports_the_image_and_the_synced_marker() {
     let tmp = TempDir::new().unwrap();
     let paths = dirs(&tmp);
     touch(paths.image("vol"));
-    let state = local(&paths, "vol").unwrap();
+    let state = local(&paths, "vol", None).unwrap();
     assert_eq!(
         state,
         Local {
@@ -110,7 +110,7 @@ fn local_reports_the_image_and_the_synced_marker() {
         }
     );
     touch(paths.synced_marker("vol"));
-    let state = local(&paths, "vol").unwrap();
+    let state = local(&paths, "vol", None).unwrap();
     assert!(state.image && state.synced);
 }
 
@@ -122,7 +122,7 @@ fn local_counts_resource_files_and_links_as_traces() {
     touch(paths.applied_res("b"));
     symlink("/dev/does-not-exist", paths.device_link("c")).unwrap();
     for volume in ["a", "b", "c"] {
-        let state = local(&paths, volume).unwrap();
+        let state = local(&paths, volume, None).unwrap();
         assert_eq!(
             state,
             Local {
@@ -143,7 +143,7 @@ fn local_does_not_count_markers_or_the_lock_file_as_traces() {
     touch(paths.synced_marker("vol"));
     touch(paths.leftover_creating_file("vol"));
     touch(paths.lock_file("vol"));
-    let state = local(&paths, "vol").unwrap();
+    let state = local(&paths, "vol", None).unwrap();
     assert_eq!(
         state,
         Local {
@@ -159,7 +159,7 @@ fn local_of_an_unknown_volume_is_empty() {
     let tmp = TempDir::new().unwrap();
     let paths = dirs(&tmp);
     assert_eq!(
-        local(&paths, "vol").unwrap(),
+        local(&paths, "vol", None).unwrap(),
         Local {
             image: false,
             traces: false,
@@ -173,7 +173,7 @@ fn local_refuses_a_name_that_is_not_a_valid_volume_name() {
     let tmp = TempDir::new().unwrap();
     let paths = dirs(&tmp);
     for bad in ["../x", "A", "", "all", "a/b"] {
-        let err = local(&paths, bad).unwrap_err();
+        let err = local(&paths, bad, None).unwrap_err();
         assert!(matches!(err, ReconcileError::Spec(_)), "{bad:?}: {err}");
     }
 }
@@ -186,7 +186,7 @@ fn an_unreadable_path_is_an_error_not_absence() {
     // `<file>/vol.img` fails with ENOTDIR, which is not "no such file".
     fs::remove_dir_all(&paths.volumes_dir).unwrap();
     touch(paths.volumes_dir.clone());
-    let err = local(&paths, "vol").unwrap_err();
+    let err = local(&paths, "vol", None).unwrap_err();
     assert!(matches!(err, ReconcileError::Io { .. }), "{err}");
 }
 
@@ -198,7 +198,7 @@ fn a_name_with_no_file_of_ambars_is_neither_a_local_volume_nor_a_trace() {
     let paths = dirs(&tmp);
     // The kernel has `foreign` configured; ambar never wrote a file for it.
     assert_eq!(local_volumes(&paths).unwrap(), names(&[]));
-    let state = local(&paths, "foreign").unwrap();
+    let state = local(&paths, "foreign", None).unwrap();
     assert!(!state.traces && !state.image, "{state:?}");
 }
 
@@ -208,24 +208,24 @@ fn a_name_with_no_file_of_ambars_is_neither_a_local_volume_nor_a_trace() {
 fn file_state_tells_absent_pending_and_ready_apart() {
     let tmp = TempDir::new().unwrap();
     let paths = dirs(&tmp);
-    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Absent);
+    assert_eq!(file_state(&paths, "vol", None).unwrap(), FileState::Absent);
     // Markers without the file do not make one.
     touch(paths.ready_marker("vol"));
-    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Absent);
+    assert_eq!(file_state(&paths, "vol", None).unwrap(), FileState::Absent);
     fs::remove_file(paths.ready_marker("vol")).unwrap();
     touch(paths.image("vol"));
-    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Pending);
+    assert_eq!(file_state(&paths, "vol", None).unwrap(), FileState::Pending);
     touch(paths.synced_marker("vol"));
-    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Pending);
+    assert_eq!(file_state(&paths, "vol", None).unwrap(), FileState::Pending);
     touch(paths.ready_marker("vol"));
-    assert_eq!(file_state(&paths, "vol").unwrap(), FileState::Ready);
+    assert_eq!(file_state(&paths, "vol", None).unwrap(), FileState::Ready);
 }
 
 #[test]
 fn file_state_refuses_a_name_that_is_not_a_valid_volume_name() {
     let tmp = TempDir::new().unwrap();
     let paths = dirs(&tmp);
-    assert!(file_state(&paths, "../x").is_err());
+    assert!(file_state(&paths, "../x", None).is_err());
 }
 
 // ---- synced_marker_present, loops_holding ----
@@ -311,4 +311,58 @@ fn loops_holding_reports_a_failed_listing_and_an_unresolvable_directory() {
     assert!(err.contains("no permission"), "{err}");
     let missing = tmp.path().join("nowhere").join("vol.img");
     assert!(loops_holding(&listing(""), &missing).is_err());
+}
+
+// ---- LVM volume_group tests ----
+
+#[test]
+fn local_with_volume_group_ignores_image_file() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    touch(paths.image("vol"));
+    touch(paths.synced_marker("vol"));
+
+    // Without volume_group, the .img file is detected
+    let state_no_vg = local(&paths, "vol", None).unwrap();
+    assert!(state_no_vg.image);
+
+    // With volume_group, it checks /dev/k3s-vg/vol which does not exist, so image is false
+    let state_with_vg = local(&paths, "vol", Some("k3s-vg")).unwrap();
+    assert!(!state_with_vg.image);
+    assert!(state_with_vg.synced);
+}
+
+#[test]
+fn file_state_with_volume_group_ignores_image_file() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    touch(paths.image("vol"));
+    touch(paths.ready_marker("vol"));
+
+    assert_eq!(file_state(&paths, "vol", None).unwrap(), FileState::Ready);
+    // With volume_group, /dev/k3s-vg/vol is absent, so file_state is Absent despite .img
+    assert_eq!(file_state(&paths, "vol", Some("k3s-vg")).unwrap(), FileState::Absent);
+}
+
+#[test]
+fn local_and_file_state_detect_lvm_device_when_present() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    let dev_dir = Path::new("/dev/ambar-test-vg");
+    if fs::create_dir_all(dev_dir).is_ok() {
+        let dev_file = dev_dir.join("vol");
+        touch(dev_file.clone());
+        touch(paths.ready_marker("vol"));
+
+        let state = local(&paths, "vol", Some("ambar-test-vg")).unwrap();
+        assert!(state.image);
+
+        assert_eq!(
+            file_state(&paths, "vol", Some("ambar-test-vg")).unwrap(),
+            FileState::Ready
+        );
+
+        let _ = fs::remove_file(dev_file);
+        let _ = fs::remove_dir(dev_dir);
+    }
 }

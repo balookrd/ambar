@@ -108,7 +108,7 @@ pub enum Command {
         #[arg(long)]
         file: PathBuf,
         /// LVM Volume Group for direct block storage of DRBD volumes.
-        #[arg(long)]
+        #[arg(long, env = "VOLUME_GROUP")]
         volume_group: Option<String>,
     },
     /// Take a volume down on this node and irrevocably delete the local copy
@@ -119,7 +119,7 @@ pub enum Command {
         #[arg(long)]
         name: String,
         /// LVM Volume Group for direct block storage of DRBD volumes.
-        #[arg(long)]
+        #[arg(long, env = "VOLUME_GROUP")]
         volume_group: Option<String>,
     },
     /// Run the node agent: load the DRBD module, then reconcile this node with
@@ -152,7 +152,7 @@ pub enum Command {
         #[arg(long, default_value = "0.0.0.0:9770")]
         metrics_addr: String,
         /// LVM Volume Group for direct block storage of DRBD volumes.
-        #[arg(long)]
+        #[arg(long, env = "VOLUME_GROUP")]
         volume_group: Option<String>,
     },
     /// Manage volume replicas: add, remove, or move copies.

@@ -47,7 +47,7 @@ FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      kmod util-linux e2fsprogs libkeyutils1 \
+      kmod util-linux e2fsprogs libkeyutils1 lvm2 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=module /out/ /opt/ambar/modules/
 COPY --from=utils /stage/usr/sbin/drbdadm /stage/usr/sbin/drbdsetup \
