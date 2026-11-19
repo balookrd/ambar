@@ -246,13 +246,33 @@ echo "Root filesystem available: $(( root_avail_kb / 1024 )) MiB, $MOUNT_POINT u
 if run_on_node "test -s '$BACKUP_FILE'"; then
     echo "Existing backup archive found at $BACKUP_FILE, will reuse if verified."
 else
-    # Require at least 8 GiB (8388608 KiB) free on root fs
-    if (( root_avail_kb < 8388608 )); then
-        echo "FAIL: Insufficient free space on $BACKUP_DIR: $(( root_avail_kb / 1024 )) MiB available, need >= 8192 MiB!" >&2
+    # Require at least used space + 2 GiB safety margin, with absolute minimum of 8 GiB
+    needed_backup_kb=$(( rancher_used_kb + 2097152 ))
+    if (( needed_backup_kb < 8388608 )); then
+        needed_backup_kb=8388608
+    fi
+    if (( root_avail_kb < needed_backup_kb )); then
+        echo "FAIL: Insufficient free space on $BACKUP_DIR: $(( root_avail_kb / 1024 )) MiB available, need >= $(( needed_backup_kb / 1024 )) MiB!" >&2
         exit 1
     fi
-    echo "Sufficient free space available on root eMMC for backup."
+    echo "Sufficient free space available on root eMMC for backup ($(( root_avail_kb / 1024 )) MiB >= $(( needed_backup_kb / 1024 )) MiB)."
 fi
+
+# Verify that existing data fits within the target LV size
+lv_size_unit="${LV_SIZE: -1}"
+lv_size_num="${LV_SIZE%[a-zA-Z]*}"
+case "$lv_size_unit" in
+    g|G) lv_size_kb=$(( lv_size_num * 1024 * 1024 )) ;;
+    m|M) lv_size_kb=$(( lv_size_num * 1024 )) ;;
+    t|T) lv_size_kb=$(( lv_size_num * 1024 * 1024 * 1024 )) ;;
+    *)   lv_size_kb=$(( lv_size_num / 1024 )) ;;
+esac
+
+if (( rancher_used_kb > lv_size_kb * 85 / 100 )); then
+    echo "FAIL: Existing data in $MOUNT_POINT ($(( rancher_used_kb / 1024 )) MiB) exceeds 85% of target LV size $LV_SIZE ($(( lv_size_kb / 1024 )) MiB)!" >&2
+    exit 1
+fi
+echo "Target LV size $LV_SIZE is sufficient for existing data ($(( rancher_used_kb / 1024 )) MiB / $(( lv_size_kb / 1024 )) MiB)."
 
 # 1.7 Ensure lvm2 package is installed on target node
 echo "Checking lvm2 tools on $NODE..."
@@ -398,7 +418,20 @@ run_on_node "
     if mountpoint -q '$MOUNT_POINT'; then
         echo 'Unmounting $MOUNT_POINT...'
         sync
-        umount '$MOUNT_POINT' 2>/dev/null || umount -l '$MOUNT_POINT' 2>/dev/null || true
+        if ! umount '$MOUNT_POINT'; then
+            echo 'Warning: initial umount failed, terminating active processes holding $MOUNT_POINT...'
+            fuser -km -15 '$MOUNT_POINT' 2>/dev/null || true
+            sleep 2
+            if ! umount '$MOUNT_POINT'; then
+                fuser -km -9 '$MOUNT_POINT' 2>/dev/null || true
+                sleep 2
+                umount '$MOUNT_POINT' || {
+                    echo 'FAIL: Cannot unmount $MOUNT_POINT cleanly! Active openers:' >&2
+                    lsof +f -- '$MOUNT_POINT' 2>/dev/null || fuser -v -m '$MOUNT_POINT' 2>/dev/null || true
+                    exit 1
+                }
+            fi
+        fi
     fi
     if mountpoint -q '$MOUNT_POINT'; then
         echo 'FAIL: Failed to unmount $MOUNT_POINT!' >&2
@@ -414,6 +447,13 @@ echo "=== Step 6/8: Initialize LVM on $NVME_DEV (VG: $VG_NAME, LV: $LV_NAME ($LV
 if [[ "$IS_LOCAL" -eq 1 ]]; then
     NVME_DEV="$NVME_DEV" VG_NAME="$VG_NAME" LV_NAME="$LV_NAME" LV_SIZE="$LV_SIZE" bash -s << 'LOCAL_LVM_SCRIPT'
 set -euo pipefail
+
+if findmnt -n --source "$NVME_DEV" >/dev/null 2>&1; then
+    echo "FAIL: Block device $NVME_DEV or its partitions are still mounted!" >&2
+    findmnt --source "$NVME_DEV" >&2 || true
+    exit 1
+fi
+
 if vgs "$VG_NAME" >/dev/null 2>&1; then
     echo "Removing existing VG $VG_NAME..."
     vgchange -an "$VG_NAME" >/dev/null 2>&1 || true
@@ -448,6 +488,13 @@ LOCAL_LVM_SCRIPT
 else
     ssh "${R5C_SSH_OPTS[@]}" "${R5C_USER}@${NODE}" "sudo NVME_DEV='$NVME_DEV' VG_NAME='$VG_NAME' LV_NAME='$LV_NAME' LV_SIZE='$LV_SIZE' bash -s" << 'REMOTE_LVM_SCRIPT'
 set -euo pipefail
+
+if findmnt -n --source "$NVME_DEV" >/dev/null 2>&1; then
+    echo "FAIL: Block device $NVME_DEV or its partitions are still mounted!" >&2
+    findmnt --source "$NVME_DEV" >&2 || true
+    exit 1
+fi
+
 if vgs "$VG_NAME" >/dev/null 2>&1; then
     echo "Removing existing VG $VG_NAME..."
     vgchange -an "$VG_NAME" >/dev/null 2>&1 || true
