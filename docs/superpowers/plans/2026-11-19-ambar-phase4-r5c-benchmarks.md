@@ -35,7 +35,7 @@
 - Consumes: SSH `mmv@k3s-1..3`, локальный `kubectl`, NVMe `/var/lib/rancher`.
 - Produces: функции `r5c_ssh`, `r5c_k3s_rss`, `r5c_cgroup_rss`, файлы `stand/baseline-k3s-rss.json` и `stand/baseline-local-path.json`.
 
-- [ ] **Step 1: Создать библиотеку функций физического кластера `stand/r5c-lib.sh`**
+- [x] **Step 1: Создать библиотеку функций физического кластера `stand/r5c-lib.sh`**
 
 ```bash
 cat << 'EOF' > stand/r5c-lib.sh
@@ -91,7 +91,7 @@ EOF
 chmod +x stand/r5c-lib.sh
 ```
 
-- [ ] **Step 2: Создать `stand/Dockerfile.fio` для автономного бенчмарк-контейнера**
+- [x] **Step 2: Создать `stand/Dockerfile.fio` для автономного бенчмарк-контейнера**
 
 ```bash
 cat << 'EOF' > stand/Dockerfile.fio
@@ -102,7 +102,7 @@ ENTRYPOINT ["fio"]
 EOF
 ```
 
-- [ ] **Step 3: Создать скрипт preflight-проверки и baseline памяти `stand/r5c-preflight.sh`**
+- [x] **Step 3: Создать скрипт preflight-проверки и baseline памяти `stand/r5c-preflight.sh`**
 
 ```bash
 cat << 'EOF' > stand/r5c-preflight.sh
@@ -157,7 +157,7 @@ EOF
 chmod +x stand/r5c-preflight.sh
 ```
 
-- [ ] **Step 4: Создать скрипт замера эталонного `fsync` на `local-path` (`stand/r5c-bench-local.sh`)**
+- [x] **Step 4: Создать скрипт замера эталонного `fsync` на `local-path` (`stand/r5c-bench-local.sh`)**
 
 ```bash
 cat << 'EOF' > stand/r5c-bench-local.sh
@@ -266,17 +266,17 @@ EOF
 chmod +x stand/r5c-bench-local.sh
 ```
 
-- [ ] **Step 5: Запустить preflight и проверить выходные данные**
+- [x] **Step 5: Запустить preflight и проверить выходные данные**
 
 Run: `stand/r5c-preflight.sh`
 Expected: Все 3 узла выдают статус ядра, свободное место на NVMe, lan0 IP и сохраняют `stand/baseline-k3s-rss.json`.
 
-- [ ] **Step 6: Запустить эталонный замер local-path**
+- [x] **Step 6: Запустить эталонный замер local-path**
 
 Run: `stand/r5c-bench-local.sh`
 Expected: Образ собран, загружен в containerd на 3 узла, fio pod завершается со статусом Succeeded, результаты выводятся и сохраняются в `stand/baseline-local-path.json`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add stand/r5c-lib.sh stand/Dockerfile.fio stand/r5c-preflight.sh stand/r5c-bench-local.sh
