@@ -17,7 +17,7 @@ server; см. «Стенд из четырёх узлов»).
 | Хост | macOS на Apple silicon |
 | Lima | 2.3.0, `vmType: vz`, сеть `user-v2` (`stand/lima/node.yaml`) |
 | Docker | `docker buildx`, сборка под `linux/arm64` |
-| Для `image/build.sh` на хосте | Rust stable 1.95 или новее, `cargo-zigbuild`, `zig`, цель `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.99.1) |
+| Для `image/build.sh` на хосте | Rust stable 1.100 или новее, `cargo-zigbuild`, `zig`, цель `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.100.0) |
 | Ресурсы | по 2 CPU, 3 ГиБ RAM и 20 ГиБ диска на ВМ |
 
 ## Порядок запуска
