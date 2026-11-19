@@ -439,3 +439,32 @@ fn pick_witness_rules() {
     // 4. All nodes excluded -> None:
     assert_eq!(pick_witness(&nodes, &free, &["n1", "n2", "n3", "n4"], &[]), None);
 }
+
+#[test]
+fn lvm_allocated_bytes_rounds_up_to_pe_size_with_drbd_metadata() {
+    // 1 GiB (1073741824 B), max_peers = 7.
+    // backing_file_bytes gives 1074036736 B (1 GiB + 288 KiB metadata).
+    // PE size is 4 MiB (4194304 B).
+    // 1074036736 / 4194304 = 256.069 -> 257 PEs = 1077936128 B (1028 MiB).
+    let allocated = lvm_allocated_bytes(GIB, 7);
+    assert_eq!(allocated, 1077936128);
+    assert_eq!(allocated % LVM_PE_SIZE, 0);
+
+    // Exact PE multiple: 4 MiB volume with max_peers 0 overhead rounds up to next PE
+    assert_eq!(lvm_allocated_bytes(4 * 1024 * 1024, 1), 8 * 1024 * 1024);
+}
+
+#[test]
+fn free_budgets_aligned_deducts_pe_aligned_sizes() {
+    let nodes = cluster(&[10 * GIB, 10 * GIB]);
+    // 1 volume of 1 GiB on n1
+    let existing = [volume(1000, 7000, &["n1"], GIB)];
+
+    let normal_free = free_budgets(&nodes, &existing);
+    assert_eq!(normal_free["n1"], 9 * GIB);
+
+    let aligned_free = free_budgets_aligned(&nodes, &existing, 7);
+    // n1 free budget is reduced by 1077936128 instead of 1073741824 (difference: ~4 MiB)
+    assert_eq!(aligned_free["n1"], 10 * GIB - 1077936128);
+    assert_eq!(aligned_free["n2"], 10 * GIB);
+}

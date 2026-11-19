@@ -37,9 +37,9 @@ metadata:
 data:
   nodes: |
     [
-      {"name": "k3s-1", "address": "10.10.10.51", "nodeId": 0, "capacityBytes": 107374182400},
-      {"name": "k3s-2", "address": "10.10.10.52", "nodeId": 1, "capacityBytes": 107374182400},
-      {"name": "k3s-3", "address": "10.10.10.53", "nodeId": 2, "capacityBytes": 107374182400}
+      {"name": "k3s-1", "address": "10.10.10.51", "nodeId": 0, "capacityBytes": 85899345920},
+      {"name": "k3s-2", "address": "10.10.10.52", "nodeId": 1, "capacityBytes": 85899345920},
+      {"name": "k3s-3", "address": "10.10.10.53", "nodeId": 2, "capacityBytes": 85899345920}
     ]
 CM
 

@@ -15,15 +15,24 @@ use crate::reconcile::{FileState, ReconcileError};
 use super::decide::Local;
 
 /// Volume names this node has a file of ambar's for: a backing file, a
-/// resource file in `res_dir`, an applied copy of it or a device link in
-/// `dev_dir`. Markers and lock files alone do not count, and neither does a
+/// resource file in `res_dir`, an applied copy of it, a device link in
+/// `dev_dir`, or an LVM logical volume in `/dev/{volume_group}` when configured.
+/// Markers and lock files alone do not count, and neither does a
 /// resource that exists only in the kernel: ambar writes `<name>.res` for
 /// every resource it configures, so a kernel resource without that file is
 /// not ambar's and is left alone. Names that are not valid volume names are
 /// skipped.
-pub fn local_volumes(paths: &Paths) -> Result<BTreeSet<String>, ReconcileError> {
+pub fn local_volumes(paths: &Paths, volume_group: Option<&str>) -> Result<BTreeSet<String>, ReconcileError> {
+    let vg_dir = volume_group.map(|vg| Path::new("/dev").join(vg));
+    local_volumes_in(paths, vg_dir.as_deref())
+}
+
+pub(crate) fn local_volumes_in(paths: &Paths, vg_dir: Option<&Path>) -> Result<BTreeSet<String>, ReconcileError> {
     let mut found = BTreeSet::new();
     names_in(&paths.volumes_dir, Some(".img"), &mut found)?;
+    if let Some(dir) = vg_dir {
+        names_in(dir, None, &mut found)?;
+    }
     names_in(&paths.res_dir, Some(".res"), &mut found)?;
     names_in(&paths.res_dir, Some(".res.applied"), &mut found)?;
     names_in(&paths.dev_dir, None, &mut found)?;

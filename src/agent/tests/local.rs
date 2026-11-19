@@ -33,7 +33,7 @@ fn every_kind_of_trace_makes_the_volume_local() {
     touch(paths.applied_res("only-applied"));
     symlink("/dev/loop7", paths.device_link("only-link")).unwrap();
 
-    let found = local_volumes(&paths).unwrap();
+    let found = local_volumes(&paths, None).unwrap();
     assert_eq!(found, names(&["only-applied", "only-link", "only-res", "with-image"]));
 }
 
@@ -45,7 +45,7 @@ fn a_volume_is_listed_once_however_many_traces_it_has() {
     touch(paths.res_file("vol"));
     touch(paths.applied_res("vol"));
     symlink("/dev/loop7", paths.device_link("vol")).unwrap();
-    assert_eq!(local_volumes(&paths).unwrap(), names(&["vol"]));
+    assert_eq!(local_volumes(&paths, None).unwrap(), names(&["vol"]));
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn markers_and_lock_files_without_an_image_do_not_make_a_volume_local() {
     touch(paths.synced_marker("only-synced"));
     touch(paths.leftover_creating_file("only-creating"));
     touch(paths.lock_file("only-lock"));
-    assert_eq!(local_volumes(&paths).unwrap(), names(&[]));
+    assert_eq!(local_volumes(&paths, None).unwrap(), names(&[]));
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn names_that_are_not_valid_volume_names_are_skipped() {
     touch(paths.res_dir.join("bad_name.res"));
     symlink("/dev/loop7", paths.dev_dir.join("Bad")).unwrap();
     touch(paths.image("good"));
-    assert_eq!(local_volumes(&paths).unwrap(), names(&["good"]));
+    assert_eq!(local_volumes(&paths, None).unwrap(), names(&["good"]));
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn files_that_are_not_volume_files_are_ignored() {
     touch(paths.res_dir.join("global_common.conf"));
     touch(paths.res_dir.join("drbd.res.bak"));
     touch(paths.volumes_dir.join("notes.txt"));
-    assert_eq!(local_volumes(&paths).unwrap(), names(&[]));
+    assert_eq!(local_volumes(&paths, None).unwrap(), names(&[]));
 }
 
 #[test]
@@ -90,7 +90,25 @@ fn missing_resource_and_device_directories_mean_nothing_there() {
     let paths = temp_paths(&tmp);
     fs::create_dir_all(&paths.volumes_dir).unwrap();
     touch(paths.image("vol"));
-    assert_eq!(local_volumes(&paths).unwrap(), names(&["vol"]));
+    assert_eq!(local_volumes(&paths, None).unwrap(), names(&["vol"]));
+}
+
+#[test]
+fn local_volumes_finds_lvm_volumes_in_vg_dir_and_filters_invalid_names() {
+    let tmp = TempDir::new().unwrap();
+    let paths = dirs(&tmp);
+    let vg_dir = tmp.path().join("lvm").join("k3s-vg");
+    fs::create_dir_all(&vg_dir).unwrap();
+    touch(vg_dir.join("pvc-12345"));
+    touch(vg_dir.join("spike"));
+    // System LV with underscore or invalid names must be ignored
+    touch(vg_dir.join("lv_k3s"));
+    touch(vg_dir.join("Upper"));
+    touch(vg_dir.join(".hidden"));
+    touch(vg_dir.join("all"));
+
+    let found = local_volumes_in(&paths, Some(&vg_dir)).unwrap();
+    assert_eq!(found, names(&["pvc-12345", "spike"]));
 }
 
 // ---- local ----
@@ -197,7 +215,7 @@ fn a_name_with_no_file_of_ambars_is_neither_a_local_volume_nor_a_trace() {
     let tmp = TempDir::new().unwrap();
     let paths = dirs(&tmp);
     // The kernel has `foreign` configured; ambar never wrote a file for it.
-    assert_eq!(local_volumes(&paths).unwrap(), names(&[]));
+    assert_eq!(local_volumes(&paths, None).unwrap(), names(&[]));
     let state = local(&paths, "foreign", None).unwrap();
     assert!(!state.traces && !state.image, "{state:?}");
 }
