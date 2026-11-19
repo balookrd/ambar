@@ -128,7 +128,7 @@ fn run_agent(
     namespace: &str,
     modules_dir: &Path,
     paths: Paths,
-    _options: cli::AgentOptions,
+    options: cli::AgentOptions,
 ) -> Result<()> {
     let hostname = read_trimmed(Path::new("/proc/sys/kernel/hostname"))?;
     preflight(node, &hostname, &paths)?;
@@ -155,6 +155,9 @@ fn run_agent(
             volumes,
             locks: VolumeLocks::default(),
             ready: Arc::new(AtomicBool::new(false)),
+            options: options.clone(),
+            metrics: Default::default(),
+            is_tainted: Arc::new(AtomicBool::new(false)),
         });
         let shutdown = CancellationToken::new();
         tokio::spawn(cancel_on_signal(shutdown.clone()));
@@ -167,7 +170,8 @@ fn run_agent(
         };
         eprintln!("ambar-agent: node {node} started");
         // Either side ending (an error, or the signal) stops the other one.
-        let (agent_result, csi_result) = tokio::join!(
+        let metrics_addr = options.metrics_addr.clone();
+        let (agent_result, csi_result, metrics_result) = tokio::join!(
             async {
                 let result = agent.run(shutdown.clone()).await;
                 shutdown.cancel();
@@ -178,8 +182,16 @@ fn run_agent(
                 shutdown.cancel();
                 result
             },
+            async {
+                let result = agent.serve_metrics(&metrics_addr, shutdown.clone()).await;
+                shutdown.cancel();
+                result
+            },
         );
         eprintln!("ambar-agent: stopped");
+        if let Err(e) = metrics_result {
+            eprintln!("ambar-agent: the metrics server error: {e}");
+        }
         match (agent_result, csi_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(agent_err), Ok(())) => Err(agent_err.into()),

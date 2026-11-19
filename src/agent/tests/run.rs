@@ -108,6 +108,9 @@ fn env_sharing(node: &str, runner: FakeRunner, volumes_dir_exists: bool, volumes
         volumes: volumes.clone(),
         locks: VolumeLocks::default(),
         ready: Arc::new(AtomicBool::new(false)),
+        options: Default::default(),
+        metrics: Default::default(),
+        is_tainted: Arc::new(AtomicBool::new(false)),
     });
     Env {
         paths,
@@ -3393,4 +3396,321 @@ async fn client_with_pods_is_not_cleaned_up() {
     let current_nodes = e.volumes.object(VOLUME).unwrap().spec.nodes;
     assert!(current_nodes.iter().any(|n| n.name == DV3));
     assert!(!e.runner.calls().iter().any(|c| c.contains("down")));
+}
+
+#[tokio::test]
+async fn tick_failures_taints_and_untaints_node_based_on_mounted_volume_quorum() {
+    let (e, status) = configured_env(
+        DV1,
+        kernel_json(DV1, |s| {
+            s["may-promote"] = json!(false);
+            s["devices"][0]["open"] = json!(true);
+            s["devices"][0]["quorum"] = json!(false);
+        }),
+        true,
+    );
+    let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
+    let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
+    let now = std::time::Instant::now();
+
+    // 1. Quorum lost on mounted volume -> node is tainted
+    e.agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, now)
+        .await
+        .unwrap();
+
+    assert!(e.agent.is_tainted.load(Ordering::SeqCst));
+    {
+        let taints = e.volumes.node_taints.lock().unwrap();
+        let dv1_taints = taints.get(DV1).expect("dv1 taints present");
+        assert!(
+            dv1_taints
+                .iter()
+                .any(|(k, ef)| k == "ambar.balookrd.github.io/no-quorum" && ef == "NoSchedule")
+        );
+    }
+
+    let metrics = e.agent.metrics.get();
+    assert!(
+        metrics.contains("ambar_node_tainted{node=\"lima-dv-1\"} 1"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("ambar_volume_quorum{node=\"lima-dv-1\",volume=\"spike\"} 0"),
+        "{metrics}"
+    );
+
+    // 2. Quorum restored -> taint is removed
+    *status.lock().unwrap() = kernel_json(DV1, |s| {
+        s["may-promote"] = json!(true);
+        s["devices"][0]["open"] = json!(true);
+        s["devices"][0]["quorum"] = json!(true);
+    });
+
+    e.agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, now)
+        .await
+        .unwrap();
+
+    assert!(!e.agent.is_tainted.load(Ordering::SeqCst));
+    {
+        let taints = e.volumes.node_taints.lock().unwrap();
+        let dv1_taints = taints.get(DV1).expect("dv1 taints present");
+        assert!(
+            !dv1_taints
+                .iter()
+                .any(|(k, _)| k == "ambar.balookrd.github.io/no-quorum")
+        );
+    }
+
+    let metrics2 = e.agent.metrics.get();
+    assert!(
+        metrics2.contains("ambar_node_tainted{node=\"lima-dv-1\"} 0"),
+        "{metrics2}"
+    );
+    assert!(
+        metrics2.contains("ambar_volume_quorum{node=\"lima-dv-1\",volume=\"spike\"} 1"),
+        "{metrics2}"
+    );
+}
+
+#[tokio::test]
+async fn tick_failures_evicts_pods_after_grace_period() {
+    let (e, _) = configured_env(
+        DV1,
+        kernel_json(DV1, |s| {
+            s["may-promote"] = json!(false);
+            s["devices"][0]["open"] = json!(true);
+            s["devices"][0]["quorum"] = json!(false);
+        }),
+        true,
+    );
+    let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
+    let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
+    let t0 = std::time::Instant::now();
+
+    let pod = k8s_openapi::api::core::v1::Pod {
+        metadata: kube::core::ObjectMeta {
+            name: Some("test-workload".to_string()),
+            namespace: Some("default".to_string()),
+            uid: Some("uid-123".to_string()),
+            ..Default::default()
+        },
+        spec: Some(k8s_openapi::api::core::v1::PodSpec {
+            node_name: Some(DV1.to_string()),
+            volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
+                name: VOLUME.to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    e.volumes.pods.lock().unwrap().push(pod);
+
+    // Initial check (t0): grace period started, pod is not evicted yet
+    e.agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, t0)
+        .await
+        .unwrap();
+    assert_eq!(e.volumes.pods.lock().unwrap().len(), 1);
+
+    // After 10s: still in grace period
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            t0 + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(e.volumes.pods.lock().unwrap().len(), 1);
+
+    // After 31s: grace period expired, pod is evicted
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            t0 + Duration::from_secs(31),
+        )
+        .await
+        .unwrap();
+    assert!(e.volumes.pods.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tick_failures_auto_adjusts_standalone_and_sets_split_brain_metric() {
+    let (e, status) = configured_env(
+        DV1,
+        kernel_json(DV1, |s| {
+            s["role"] = json!("Secondary");
+            s["connections"][0]["connection-state"] = json!("StandAlone");
+        }),
+        true,
+    );
+    let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
+    let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
+    let t0 = std::time::Instant::now();
+
+    // 1st attempt
+    e.agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, t0)
+        .await
+        .unwrap();
+    assert_eq!(
+        commands(&e.runner, &["drbdadm adjust spike"]),
+        vec!["drbdadm adjust spike"]
+    );
+    assert!(
+        e.agent
+            .metrics
+            .get()
+            .contains("ambar_volume_manual_check_needed{node=\"lima-dv-1\",volume=\"spike\"} 0")
+    );
+
+    // 2nd attempt at t0 + 5s
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            t0 + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commands(&e.runner, &["drbdadm adjust spike"]).len(), 2);
+    assert!(
+        e.agent
+            .metrics
+            .get()
+            .contains("ambar_volume_manual_check_needed{node=\"lima-dv-1\",volume=\"spike\"} 0")
+    );
+
+    // 3rd attempt at t0 + 10s
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            t0 + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commands(&e.runner, &["drbdadm adjust spike"]).len(), 3);
+
+    // After 3rd attempt: attempts exhausted, split-brain detected
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            t0 + Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
+    assert!(standalone_tracker.is_manual_check_needed(VOLUME));
+    assert!(
+        e.agent
+            .metrics
+            .get()
+            .contains("ambar_volume_manual_check_needed{node=\"lima-dv-1\",volume=\"spike\"} 1")
+    );
+
+    // Connection restored to Connected -> auto-resets metric
+    *status.lock().unwrap() = kernel_json(DV1, |s| {
+        s["role"] = json!("Secondary");
+        s["connections"][0]["connection-state"] = json!("Connected");
+    });
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            t0 + Duration::from_secs(20),
+        )
+        .await
+        .unwrap();
+    assert!(!standalone_tracker.is_manual_check_needed(VOLUME));
+    assert!(
+        e.agent
+            .metrics
+            .get()
+            .contains("ambar_volume_manual_check_needed{node=\"lima-dv-1\",volume=\"spike\"} 0")
+    );
+}
+
+#[tokio::test]
+async fn tick_failures_cleans_up_stale_client() {
+    let kernel = Arc::new(Mutex::new(EMPTY_KERNEL.to_string()));
+    let runner = node_with_status(kernel.clone(), false);
+    let e = env(DV3, runner);
+
+    let mut vol = spike_with_third("Client", &[DV1, DV2]);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV3)],
+    });
+    e.volumes.put(vol);
+
+    let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
+    let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
+    let now = std::time::Instant::now();
+
+    e.agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, now)
+        .await
+        .unwrap();
+
+    let obj = e.volumes.object(VOLUME).unwrap();
+    assert!(!obj.spec.nodes.iter().any(|n| n.name == DV3));
+    assert!(e.volumes.entry_of(VOLUME, DV3).is_none());
+}
+
+#[tokio::test]
+async fn run_failure_loop_stops_on_cancellation() {
+    let e = env(DV1, fake_node());
+    let shutdown = CancellationToken::new();
+    let shutdown_task = shutdown.clone();
+    let agent = e.agent.clone();
+
+    let handle = tokio::spawn(async move {
+        agent.run_failure_loop(shutdown_task).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.cancel();
+
+    let res = tokio::time::timeout(Duration::from_millis(500), handle).await;
+    assert!(res.is_ok(), "run_failure_loop should exit on cancellation");
+}
+
+#[tokio::test]
+async fn agent_serve_metrics_listener_serves_http() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let e = env(DV1, fake_node());
+    let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
+    let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
+    e.agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, std::time::Instant::now())
+        .await
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let shutdown_server = shutdown.clone();
+    let agent = e.agent.clone();
+
+    let server_handle = tokio::spawn(async move { agent.serve_metrics_listener(listener, shutdown_server).await });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let response = String::from_utf8(buf).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("ambar_node_allocated_bytes{node=\"lima-dv-1\"}"));
+
+    shutdown.cancel();
+    let _ = server_handle.await;
 }

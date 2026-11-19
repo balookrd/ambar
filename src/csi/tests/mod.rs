@@ -39,6 +39,9 @@ fn services(ready: bool) -> Services {
         volumes: volumes.clone(),
         locks: VolumeLocks::default(),
         ready: Arc::new(AtomicBool::new(ready)),
+        options: Default::default(),
+        metrics: Default::default(),
+        is_tainted: Arc::new(AtomicBool::new(false)),
     });
     Services {
         identity: IdentityService {
