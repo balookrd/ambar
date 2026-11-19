@@ -139,3 +139,15 @@ fn handle_standalone_executes_drbd_adjust() {
     assert!(!adjusted2);
     assert_eq!(runner.calls().len(), 1);
 }
+
+#[test]
+fn handle_standalone_rejects_invalid_volume_name() {
+    let runner = crate::tests::FakeRunner::new(|_, _| crate::tests::out(0, "", ""));
+    let drbd = Drbd { runner: &runner };
+    let mut tracker = StandaloneTracker::new(3, Duration::from_secs(5));
+    let res = resource("../evil", Role::Secondary, &[ConnectionState::StandAlone]);
+
+    let adjusted = handle_standalone(&mut tracker, &drbd, &res, Instant::now()).unwrap();
+    assert!(!adjusted);
+    assert!(runner.calls().is_empty());
+}

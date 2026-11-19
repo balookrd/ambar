@@ -704,7 +704,7 @@ impl<'a> Reconciler<'a> {
 
     /// Takes the exclusive lock of `volume` without waiting; it is held until
     /// the returned file is dropped.
-    fn lock_volume(&self, volume: &str) -> Result<File, ReconcileError> {
+    pub(crate) fn lock_volume(&self, volume: &str) -> Result<File, ReconcileError> {
         let path = self.paths.lock_file(volume);
         let io_err = |action, source| ReconcileError::Io {
             action,

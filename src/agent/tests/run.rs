@@ -3411,6 +3411,33 @@ async fn client_with_pods_is_not_cleaned_up() {
 }
 
 #[tokio::test]
+async fn check_and_cleanup_client_fails_closed_when_drbd_status_fails() {
+    let (e, status) = configured_env(
+        DV3,
+        kernel_json(DV3, |s| {
+            s["role"] = json!("Secondary");
+            s["devices"][0]["client"] = json!(true);
+            s["devices"][0]["open"] = json!(false);
+        }),
+        true,
+    );
+    let mut vol = spike_with_third("Client", &[DV1, DV2]);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV3)],
+    });
+    e.volumes.put(vol.clone());
+
+    // Corrupt status so read_status fails:
+    *status.lock().unwrap() = "invalid json {".to_string();
+
+    let res = crate::agent::cleanup::check_and_cleanup_client(&e.agent, VOLUME, &vol).await;
+    // Must return Err (fail-closed), not delete client!
+    assert!(res.is_err());
+    let current_nodes = e.volumes.object(VOLUME).unwrap().spec.nodes;
+    assert!(current_nodes.iter().any(|n| n.name == DV3));
+}
+
+#[tokio::test]
 async fn tick_failures_taints_and_untaints_node_based_on_mounted_volume_quorum() {
     let (e, status) = configured_env(
         DV1,
@@ -3484,6 +3511,56 @@ async fn tick_failures_taints_and_untaints_node_based_on_mounted_volume_quorum()
         metrics2.contains("ambar_volume_quorum{node=\"lima-dv-1\",volume=\"spike\"} 1"),
         "{metrics2}"
     );
+}
+
+#[tokio::test]
+async fn tick_failures_fails_closed_when_read_all_statuses_fails() {
+    let (e, status) = configured_env(
+        DV1,
+        kernel_json(DV1, |s| {
+            s["may-promote"] = json!(false);
+            s["devices"][0]["open"] = json!(true);
+            s["devices"][0]["quorum"] = json!(false);
+        }),
+        true,
+    );
+    let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
+    let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
+    let now = std::time::Instant::now();
+
+    // 1. Quorum lost -> node is tainted
+    e.agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, now)
+        .await
+        .unwrap();
+    assert!(e.agent.is_tainted.load(Ordering::SeqCst));
+
+    // 2. Reading DRBD status fails (e.g. invalid json / command failure)
+    *status.lock().unwrap() = "not valid json".to_string();
+
+    let res = e
+        .agent
+        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, now)
+        .await;
+    // Must return Err (fail-closed)
+    assert!(res.is_err());
+
+    // Taint must NOT be removed!
+    assert!(e.agent.is_tainted.load(Ordering::SeqCst));
+    {
+        let taints = e.volumes.node_taints.lock().unwrap();
+        let dv1_taints = taints.get(DV1).expect("dv1 taints present");
+        assert!(
+            dv1_taints
+                .iter()
+                .any(|(k, ef)| k == "ambar.balookrd.github.io/no-quorum" && ef == "NoSchedule")
+        );
+    }
+
+    // Metrics must NOT be wiped
+    let metrics = e.agent.metrics.get();
+    assert!(metrics.contains("ambar_node_tainted{node=\"lima-dv-1\"} 1"));
+    assert!(metrics.contains("ambar_volume_quorum{node=\"lima-dv-1\",volume=\"spike\"} 0"));
 }
 
 #[tokio::test]

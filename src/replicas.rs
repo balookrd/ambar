@@ -315,7 +315,7 @@ pub fn next_add(view: &View, node: &str, cluster: &ClusterNodes, existing: &[Exi
     check_r25(view, cluster, None)?;
 
     if let Some(m) = existing_member
-        && m.kind == NodeKind::Client
+        && (m.kind == NodeKind::Client || m.kind == NodeKind::Witness)
     {
         let is_primary = view
             .status
@@ -474,6 +474,36 @@ pub fn next_remove(
     }
 }
 
+fn balance_witness_or_done(view: &View, cluster: &ClusterNodes, existing: &[Existing]) -> Result<Next, ChangeError> {
+    let n_replicas = replica_count(&view.spec.nodes);
+    let witness_present = find_witness(&view.spec.nodes).is_some();
+
+    if !witness_needed(n_replicas) && witness_present {
+        let mut new_nodes = view.spec.nodes.clone();
+        remove_witness(&mut new_nodes, view.status);
+        new_nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        return Ok(Next::Edit(Edit {
+            nodes: new_nodes,
+            add_finalizer: None,
+        }));
+    }
+
+    if witness_needed(n_replicas) && !witness_present {
+        let mut new_nodes = view.spec.nodes.clone();
+        let free_map = free_budgets(cluster, existing);
+        assign_witness(&mut new_nodes, cluster, &free_map, &[], view.spec.max_peers);
+        if new_nodes != view.spec.nodes {
+            new_nodes.sort_by(|a, b| a.name.cmp(&b.name));
+            return Ok(Next::Edit(Edit {
+                nodes: new_nodes,
+                add_finalizer: None,
+            }));
+        }
+    }
+
+    Ok(Next::Done)
+}
+
 pub fn next_move(
     view: &View,
     from: &str,
@@ -481,6 +511,9 @@ pub fn next_move(
     cluster: &ClusterNodes,
     existing: &[Existing],
 ) -> Result<Next, ChangeError> {
+    if view.deleting {
+        return Err(ChangeError::Deleting);
+    }
     if from == to {
         return Err(ChangeError::SameNode);
     }
@@ -494,6 +527,13 @@ pub fn next_move(
     let from_in_nodes = view.spec.nodes.iter().find(|n| n.name == from);
     let from_has_finalizer = view.finalizers.contains(&replica_finalizer(from));
 
+    if let Some(m) = from_in_nodes
+        && m.kind != NodeKind::Replica
+        && m.kind != NodeKind::Retiring
+    {
+        return Err(ChangeError::NotAMember(from.to_string()));
+    }
+
     if from_in_nodes.is_none() && !from_has_finalizer {
         let to_is_replica = view
             .spec
@@ -505,7 +545,7 @@ pub fn next_move(
             .and_then(|s| s.nodes.iter().find(|n| n.name == to))
             .is_some_and(|n| n.disk == "UpToDate");
         if to_is_replica && to_uptodate {
-            return Ok(Next::Done);
+            return balance_witness_or_done(view, cluster, existing);
         }
         return Err(ChangeError::NotAMember(from.to_string()));
     }
@@ -518,6 +558,18 @@ pub fn next_move(
             && st.role == "Primary"
         {
             return Err(ChangeError::Primary(from.to_string()));
+        }
+
+        if let Some(m) = to_member
+            && (m.kind == NodeKind::Client || m.kind == NodeKind::Witness)
+        {
+            let to_is_primary = view
+                .status
+                .and_then(|s| s.nodes.iter().find(|n| n.name == to))
+                .is_some_and(|n| n.role == "Primary");
+            if to_is_primary {
+                return Err(ChangeError::Primary(to.to_string()));
+            }
         }
 
         check_r25(view, cluster, None)?;
@@ -575,6 +627,7 @@ pub fn next_move(
     // `to` is UpToDate! Now retire `from`
     if let Some(m) = from_in_nodes {
         if m.kind == NodeKind::Replica {
+            check_r25(view, cluster, None)?;
             if let Some(st) = view.status.and_then(|s| s.nodes.iter().find(|n| n.name == from))
                 && st.role == "Primary"
             {
@@ -611,7 +664,7 @@ pub fn next_move(
         return Ok(Next::Wait(format!("waiting for node {from:?} to remove its copy")));
     }
 
-    Ok(Next::Done)
+    balance_witness_or_done(view, cluster, existing)
 }
 
 #[cfg(test)]

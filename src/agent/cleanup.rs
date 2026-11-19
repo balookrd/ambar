@@ -54,6 +54,9 @@ pub async fn check_and_cleanup_client(
     volume: &str,
     object: &ReplicatedVolume,
 ) -> Result<Option<Outcome>, AgentError> {
+    if !crate::model::valid_volume_name(volume) {
+        return Ok(None);
+    }
     let is_client = object.metadata.deletion_timestamp.is_none()
         && object
             .spec
@@ -63,7 +66,17 @@ pub async fn check_and_cleanup_client(
     if !is_client {
         return Ok(None);
     }
-    let status = agent.read_status(volume).await.ok().flatten();
+    let _lock = agent.locks.lock(volume).await;
+    let status = match agent.read_status(volume).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ambar-agent: warning: volume {volume:?}: cannot read status for cleanup: {e}");
+            return Err(AgentError::Reconcile {
+                volume: volume.to_string(),
+                source: e,
+            });
+        }
+    };
     let is_busy = status
         .as_ref()
         .is_some_and(|s| s.role == Role::Primary || s.devices.iter().any(|d| d.open));
