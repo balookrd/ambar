@@ -44,4 +44,24 @@ done
 results="${results}}"
 echo "$results" > "$HERE/baseline-k3s-rss.json"
 echo "Saved baseline to $HERE/baseline-k3s-rss.json"
+
+echo "=== 4. Checking LVM topology (k3s-vg / lv_k3s) ==="
+CHECK_LVM="${CHECK_LVM:-auto}"
+for n in "${R5C_NODES[@]}"; do
+    has_vg="$(r5c_ssh "$n" "command -v vgs >/dev/null 2>&1 && vgs k3s-vg --noheadings >/dev/null 2>&1 && echo 1 || echo 0")"
+    if [[ "$has_vg" == "1" ]]; then
+        r5c_ssh "$n" "vgs k3s-vg --noheadings -o vg_free --units g | tr -d '<gG ' | awk '{if (\$1 < 40) exit 1}'"
+        r5c_ssh "$n" "lvs /dev/k3s-vg/lv_k3s >/dev/null"
+        vg_free_gb="$(r5c_ssh "$n" "vgs k3s-vg --noheadings -o vg_free --units g | tr -d '<gG '")"
+        echo "Node $n: k3s-vg free space ${vg_free_gb} GB (>= 40 GB) and lv_k3s OK"
+    else
+        if [[ "$CHECK_LVM" == "1" ]]; then
+            echo "FAIL: Node $n has no k3s-vg volume group (CHECK_LVM=1 enforced)" >&2
+            exit 1
+        else
+            echo "Node $n: k3s-vg not present yet (migration planned in Task 5; set CHECK_LVM=1 to enforce)"
+        fi
+    fi
+done
+
 echo "OK: Preflight checks passed."
