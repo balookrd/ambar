@@ -192,9 +192,11 @@ spec:
         # Tolerates unreachable/not-ready node to speed up reschedule
         - key: "node.kubernetes.io/unreachable"
           operator: "Exists"
+          effect: "NoExecute"
           tolerationSeconds: 5
         - key: "node.kubernetes.io/not-ready"
           operator: "Exists"
+          effect: "NoExecute"
           tolerationSeconds: 5
       containers:
         - name: app
@@ -299,6 +301,7 @@ done
 kc delete deployment -l "app=$APP_LABEL" --ignore-not-found --wait=true --timeout=60s >/dev/null || true
 kc delete pod -l "app=$APP_LABEL" --ignore-not-found --wait=true --timeout=60s >/dev/null || true
 kc delete pvc -l "app=$APP_LABEL" --ignore-not-found --wait=true --timeout=60s >/dev/null || true
+kc delete pvc fail-pvc --ignore-not-found --wait=true --timeout=60s >/dev/null || true
 
 wait_until 180 "ReplicatedVolume objects of an earlier run are still there" no_rvs
 kc -n "$NS" rollout status ds/ambar --timeout=120s >/dev/null
@@ -317,7 +320,7 @@ echo "initial agent container restart counts: $RESTARTS_BEFORE"
 step a "a. verify Prometheus metrics HTTP server on :9770/metrics"
 
 for n in "${NODES[@]}"; do
-    metrics="$(ag "$n" "curl -sf http://127.0.0.1:9770/metrics")"
+    metrics="$(vm "$n" "curl -sf http://127.0.0.1:9770/metrics")"
     grep -q "ambar_node_allocated_bytes" <<<"$metrics" \
         || fail "$n: metrics missing ambar_node_allocated_bytes"
     grep -q "ambar_node_tainted" <<<"$metrics" \
@@ -326,7 +329,7 @@ for n in "${NODES[@]}"; do
         || fail "$n: metrics missing ambar_module_info"
     
     # Verify 404 on unknown endpoint
-    code="$(ag "$n" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9770/badpath")"
+    code="$(vm "$n" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9770/badpath")"
     [[ "$code" == "404" ]] || fail "$n: expected 404 for /badpath, got $code"
 done
 echo "metrics endpoint :9770/metrics answers with valid OpenMetrics format on all nodes"
@@ -360,11 +363,11 @@ done
 
 # Verify volume is Primary and quorum=true in DRBD on writer node
 drbd_st="$(ag "$WRITER_VM" "drbdsetup status $VOL --json")"
-grep -q '"role":"Primary"' <<<"$drbd_st" || fail "volume $VOL on $WRITER_VM is not Primary"
-grep -q '"quorum":true' <<<"$drbd_st" || fail "volume $VOL on $WRITER_VM has no quorum"
+grep -q '"role": *"Primary"' <<<"$drbd_st" || fail "volume $VOL on $WRITER_VM is not Primary"
+grep -q '"quorum": *true' <<<"$drbd_st" || fail "volume $VOL on $WRITER_VM has no quorum"
 
 # Verify metrics on WRITER_VM reflect healthy quorum
-m="$(ag "$WRITER_VM" "curl -sf http://127.0.0.1:9770/metrics")"
+m="$(vm "$WRITER_VM" "curl -sf http://127.0.0.1:9770/metrics")"
 grep -q "ambar_volume_quorum{node=\"$WRITER_NODE\",volume=\"$VOL\"} 1" <<<"$m" \
     || fail "expected ambar_volume_quorum=1 in metrics on $WRITER_VM"
 grep -q "ambar_node_tainted{node=\"$WRITER_NODE\"} 0" <<<"$m" \
@@ -380,7 +383,7 @@ ISOLATE_TIME=$SECONDS
 
 # Wait for quorum loss in DRBD on writer node
 wait_until 30 "quorum not lost on $WRITER_VM after network isolation" \
-    'ag "$WRITER_VM" "drbdsetup status $VOL --json" 2>/dev/null | grep -q "\"quorum\":false"'
+    'ag "$WRITER_VM" "drbdsetup status $VOL --json" 2>/dev/null | grep -q "\"quorum\": *false"'
 echo "quorum lost on $WRITER_VM in $WAITED s"
 
 # Wait for no-quorum taint on writer node
@@ -389,7 +392,7 @@ wait_until 20 "taint ambar.balookrd.github.io/no-quorum not placed on $WRITER_NO
 echo "taint ambar.balookrd.github.io/no-quorum placed on $WRITER_NODE in $WAITED s"
 
 # Verify metric ambar_node_tainted=1 and ambar_volume_quorum=0
-m="$(ag "$WRITER_VM" "curl -sf http://127.0.0.1:9770/metrics")"
+m="$(vm "$WRITER_VM" "curl -sf http://127.0.0.1:9770/metrics")"
 grep -q "ambar_node_tainted{node=\"$WRITER_NODE\"} 1" <<<"$m" \
     || fail "expected ambar_node_tainted=1 in metrics on $WRITER_VM"
 grep -q "ambar_volume_quorum{node=\"$WRITER_NODE\",volume=\"$VOL\"} 0" <<<"$m" \
@@ -428,12 +431,12 @@ unblock_drbd_port "$WRITER_VM"
 
 # Agent on WRITER_VM is Secondary and sees StandAlone; it should auto-adjust
 wait_until 60 "connection on $WRITER_VM did not reconnect to Connected via auto-adjust" \
-    'ag "$WRITER_VM" "drbdsetup status $VOL --json" 2>/dev/null | grep -q "\"connection-state\":\"Connected\""'
+    'ag "$WRITER_VM" "drbdsetup status $VOL --json" 2>/dev/null | grep -q "\"connection-state\": *\"Connected\""'
 echo "connection on $WRITER_VM reconnected via auto-adjust in $WAITED s"
 
 # Disk should resync and become UpToDate
 wait_until 60 "disk on $WRITER_VM not UpToDate" \
-    'ag "$WRITER_VM" "drbdsetup status $VOL --json" 2>/dev/null | grep -q "\"disk-state\":\"UpToDate\""'
+    'ag "$WRITER_VM" "drbdsetup status $VOL --json" 2>/dev/null | grep -q "\"disk-state\": *\"UpToDate\""'
 echo "disk on $WRITER_VM resynced to UpToDate in $WAITED s"
 
 # Taint must be automatically removed from WRITER_NODE
@@ -442,7 +445,7 @@ wait_until 30 "taint no-quorum was not removed from $WRITER_NODE after quorum re
 echo "taint no-quorum automatically removed from $WRITER_NODE in $WAITED s"
 
 # Verify metrics reflect healthy node and no split-brain
-m="$(ag "$WRITER_VM" "curl -sf http://127.0.0.1:9770/metrics")"
+m="$(vm "$WRITER_VM" "curl -sf http://127.0.0.1:9770/metrics")"
 grep -q "ambar_node_tainted{node=\"$WRITER_NODE\"} 0" <<<"$m" \
     || fail "expected ambar_node_tainted=0 after recovery on $WRITER_VM"
 grep -q "ambar_volume_manual_check_needed{node=\"$WRITER_NODE\",volume=\"$VOL\"} 0" <<<"$m" \
@@ -493,7 +496,7 @@ echo "node $CLIENT_HOST automatically cleaned up from spec.nodes in $WAITED s!"
 
 # Verify resource is down in DRBD on CLIENT_VM
 res_status="$(ag "$CLIENT_VM" "drbdsetup status $VOL 2>&1 || true")"
-[[ "$res_status" =~ "No response from kernel module" || "$res_status" =~ "not configured" || -z "$res_status" ]] \
+[[ "$res_status" =~ "No response from kernel module" || "$res_status" =~ "not configured" || "$res_status" =~ "No such resource" || "$res_status" =~ "No currently configured DRBD found" || -z "$res_status" ]] \
     || fail "resource $VOL on $CLIENT_VM is still configured after client cleanup: $res_status"
 echo "DRBD resource on $CLIENT_VM is down and unconfigured"
 

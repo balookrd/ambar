@@ -96,7 +96,7 @@ pub struct MemberNode {
         "message": "a Replica node is removed only through Retiring"
     },
     {
-        "rule": "(self.nodes.filter(n, n.kind != 'Client').map(n, n.name + '/' + n.kind) == oldSelf.nodes.filter(o, o.kind != 'Client').map(o, o.name + '/' + o.kind)) || (self.initialSync == 'Done' && oldSelf.initialSync == 'Done')",
+        "rule": "(self.initialSync == 'Done' && oldSelf.initialSync == 'Done') || (self.nodes.all(n, n.kind == 'Client' || oldSelf.nodes.exists(o, o.name == n.name && o.kind == n.kind)) && oldSelf.nodes.all(o, o.kind == 'Client' || self.nodes.exists(n, n.name == o.name && n.kind == o.kind)))",
         "message": "the set of Replica, Retiring and Witness nodes changes only when initialSync is Done"
     },
     {
