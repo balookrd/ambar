@@ -349,9 +349,26 @@ pub enum ReconcileError {
 pub struct Reconciler<'a> {
     pub paths: &'a Paths,
     pub runner: &'a dyn Runner,
+    pub volume_group: Option<String>,
 }
 
-impl Reconciler<'_> {
+impl<'a> Reconciler<'a> {
+    pub fn new(paths: &'a Paths, runner: &'a dyn Runner) -> Self {
+        Self {
+            paths,
+            runner,
+            volume_group: None,
+        }
+    }
+
+    pub fn with_volume_group(paths: &'a Paths, runner: &'a dyn Runner, volume_group: Option<String>) -> Self {
+        Self {
+            paths,
+            runner,
+            volume_group,
+        }
+    }
+
     /// Validates the description, locks the volume, observes the node,
     /// executes the plan and returns what was done.
     pub fn apply(&self, spec: &VolumeSpec, node_name: &str) -> Result<Vec<Action>, ReconcileError> {
@@ -381,19 +398,35 @@ impl Reconciler<'_> {
         let volume = spec.name.as_str();
         let diskful = spec.node(node_name).is_some_and(|n| n.diskful);
         let image = self.paths.image(volume);
-        let image_exists = exists(&image)?;
+        let backing_exists = match &self.volume_group {
+            Some(vg) => backing::find_lvm_volume(self.runner, vg, volume)?,
+            None => exists(&image)?,
+        };
         let ready = exists(&self.paths.ready_marker(volume))?;
         let synced = exists(&self.paths.synced_marker(volume))?;
 
-        let file = match (image_exists, ready) {
+        let file = match (backing_exists, ready) {
             (false, _) => FileState::Absent,
             (true, true) => FileState::Ready,
             (true, false) => FileState::Pending,
         };
-        let loop_device = if diskful && file != FileState::Absent {
+        let loop_device = if self.volume_group.is_some() {
+            if diskful && file != FileState::Absent {
+                self.volume_group
+                    .as_ref()
+                    .map(|vg| backing::lvm_device_path(vg, volume))
+            } else {
+                None
+            }
+        } else if diskful && file != FileState::Absent {
             backing::find_loop(self.runner, &image)?
         } else {
             None
+        };
+        let link_target = if self.volume_group.is_some() {
+            loop_device.clone()
+        } else {
+            backing::link_target(&self.paths.device_link(volume))
         };
         let rendered = self.rendered(spec);
         let same_text = |path: PathBuf| fs::read_to_string(path).is_ok_and(|on_disk| on_disk == rendered);
@@ -402,11 +435,11 @@ impl Reconciler<'_> {
         Ok(Observed {
             file,
             loop_device,
-            link_target: backing::link_target(&self.paths.device_link(volume)),
+            link_target,
             res_matches: same_text(self.paths.res_file(volume)),
             res_applied: same_text(self.paths.applied_res(volume)),
             synced,
-            stale_markers: !image_exists && (ready || synced),
+            stale_markers: !backing_exists && (ready || synced),
             status,
         })
     }
@@ -438,18 +471,34 @@ impl Reconciler<'_> {
                 sync_dir(&self.paths.volumes_dir)?;
             }
             Action::CreateFile { bytes } => {
-                // Made durable before the ready marker can exist, so the
-                // marker never outlives a file that a power loss shortened.
-                backing::create_sparse_file(&self.paths.image(volume), *bytes)?;
-                sync_file(&self.paths.image(volume))?;
-                sync_dir(&self.paths.volumes_dir)?;
+                match &self.volume_group {
+                    Some(vg) => {
+                        backing::create_lvm_volume(self.runner, vg, volume, *bytes)?;
+                        *loop_device = Some(backing::lvm_device_path(vg, volume));
+                    }
+                    None => {
+                        // Made durable before the ready marker can exist, so the
+                        // marker never outlives a file that a power loss shortened.
+                        backing::create_sparse_file(&self.paths.image(volume), *bytes)?;
+                        sync_file(&self.paths.image(volume))?;
+                        sync_dir(&self.paths.volumes_dir)?;
+                    }
+                }
             }
-            Action::AttachLoop => *loop_device = Some(backing::attach_loop(self.runner, &self.paths.image(volume))?),
+            Action::AttachLoop => {
+                if let Some(vg) = &self.volume_group {
+                    *loop_device = Some(backing::lvm_device_path(vg, volume));
+                } else {
+                    *loop_device = Some(backing::attach_loop(self.runner, &self.paths.image(volume))?);
+                }
+            }
             Action::LinkDevice => {
-                let device = loop_device.as_deref().ok_or_else(|| ReconcileError::NoLoopDevice {
-                    volume: volume.to_string(),
-                })?;
-                backing::link_device(&self.paths.device_link(volume), device)?;
+                if self.volume_group.is_none() {
+                    let device = loop_device.as_deref().ok_or_else(|| ReconcileError::NoLoopDevice {
+                        volume: volume.to_string(),
+                    })?;
+                    backing::link_device(&self.paths.device_link(volume), device)?;
+                }
             }
             Action::WriteRes => {
                 // The resource directory is not under the volumes-directory
@@ -479,7 +528,9 @@ impl Reconciler<'_> {
                 drbd.create_md(volume, spec.max_peers, spec.size_bytes)?;
                 // `create-md` writes through the loop device; flush the
                 // backing file itself before `MarkReady` records the result.
-                sync_file(&self.paths.image(volume))?;
+                if self.volume_group.is_none() {
+                    sync_file(&self.paths.image(volume))?;
+                }
             }
             Action::MarkReady => write_atomically(&self.paths.ready_marker(volume), "")?,
             Action::Up => {
@@ -509,7 +560,11 @@ impl Reconciler<'_> {
     }
 
     fn rendered(&self, spec: &VolumeSpec) -> String {
-        resource::render(spec, &self.paths.device_link(&spec.name))
+        let backing_device = match &self.volume_group {
+            Some(vg) => PathBuf::from(backing::lvm_device_path(vg, &spec.name)),
+            None => self.paths.device_link(&spec.name),
+        };
+        resource::render(spec, &backing_device)
     }
 
     /// Takes the volume down on this node and deletes its local files.
@@ -581,30 +636,40 @@ impl Reconciler<'_> {
             }
             steps.push("down");
         }
-        let image = self.paths.image(volume);
-        // A missing image can still be held by loop devices (their backing
-        // file shows as `(deleted)`): all of them are detached, found by the
-        // listing that the proof of "no data" uses too.
-        let devices = if exists(&image)? {
-            backing::find_loops(self.runner, &image)?
-        } else {
-            backing::loop_holders(self.runner, &image)?
-                .into_iter()
-                .map(|holder| holder.device)
-                .collect()
-        };
-        for device in devices {
-            backing::detach_loop(self.runner, &device)?;
-            steps.push("detach-loop");
+        match &self.volume_group {
+            Some(vg) => {
+                if backing::find_lvm_volume(self.runner, vg, volume)? {
+                    backing::remove_lvm_volume(self.runner, vg, volume)?;
+                    steps.push("remove-lvm");
+                }
+            }
+            None => {
+                let image = self.paths.image(volume);
+                // A missing image can still be held by loop devices (their backing
+                // file shows as `(deleted)`): all of them are detached, found by the
+                // listing that the proof of "no data" uses too.
+                let devices = if exists(&image)? {
+                    backing::find_loops(self.runner, &image)?
+                } else {
+                    backing::loop_holders(self.runner, &image)?
+                        .into_iter()
+                        .map(|holder| holder.device)
+                        .collect()
+                };
+                for device in devices {
+                    backing::detach_loop(self.runner, &device)?;
+                    steps.push("detach-loop");
+                }
+                // The image goes first and its removal is made durable before the
+                // markers go: a crash in between leaves markers without an image
+                // (cleared by the next apply), never an image without markers that
+                // the next apply would initialise again.
+                if remove_if_present(&image)? {
+                    steps.push("remove-file");
+                }
+                sync_dir(&self.paths.volumes_dir)?;
+            }
         }
-        // The image goes first and its removal is made durable before the
-        // markers go: a crash in between leaves markers without an image
-        // (cleared by the next apply), never an image without markers that
-        // the next apply would initialise again.
-        if remove_if_present(&image)? {
-            steps.push("remove-file");
-        }
-        sync_dir(&self.paths.volumes_dir)?;
         let markers = [
             (self.paths.ready_marker(volume), "remove-marker"),
             (self.paths.synced_marker(volume), "remove-synced-marker"),

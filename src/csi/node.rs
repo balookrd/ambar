@@ -782,6 +782,7 @@ impl NodeService {
     /// (module doc, step 3 of the unstage). The guard: no backing file.
     async fn clean_local(&self, volume: &str) -> Result<(), Status> {
         let name = volume.to_string();
+        let volume_group = self.agent.options.volume_group.clone();
         let result = self
             .agent
             .blocking(move |paths, runner| {
@@ -790,7 +791,12 @@ impl NodeService {
                     Ok(_) => Ok(()),
                     Err(e) => Err(format!("cannot inspect the backing file: {e}")),
                 };
-                Reconciler { paths, runner }.remove_checked(&name, &guard)
+                Reconciler {
+                    paths,
+                    runner,
+                    volume_group,
+                }
+                .remove_checked(&name, &guard)
             })
             .await
             .map_err(|e| agent_status("cannot clean up the volume on this node", e))?;

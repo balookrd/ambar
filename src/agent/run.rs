@@ -861,8 +861,16 @@ impl Agent {
         mark_done: bool,
     ) -> Result<Outcome, AgentError> {
         let node = self.node.clone();
+        let vg = self.options.volume_group.clone();
         let applied = self
-            .blocking(move |paths, runner| Reconciler { paths, runner }.apply(&spec, &node))
+            .blocking(move |paths, runner| {
+                Reconciler {
+                    paths,
+                    runner,
+                    volume_group: vg,
+                }
+                .apply(&spec, &node)
+            })
             .await?;
         let actions = match applied {
             Ok(actions) => actions,
@@ -990,6 +998,7 @@ impl Agent {
         let name = volume.to_string();
         let node = self.node.clone();
         let spec = object.spec.clone();
+        let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
                 // Set when the guard refuses for a reason in the DRBD state.
@@ -1018,7 +1027,11 @@ impl Agent {
                         }
                     }
                 };
-                let reconciler = Reconciler { paths, runner };
+                let reconciler = Reconciler {
+                    paths,
+                    runner,
+                    volume_group: vg,
+                };
                 let result = match &check {
                     // The resource must still be absent when the files go.
                     Check::NoData(_) => reconciler.remove_unconfigured(&name, &guard),
@@ -1112,8 +1125,16 @@ impl Agent {
             spec.initial_sync = InitialSync::Done;
             let node = self.node.clone();
             let spec_obs = spec.clone();
+            let vg = self.options.volume_group.clone();
             let obs = self
-                .blocking(move |paths, runner| Reconciler { paths, runner }.observe(&spec_obs, &node))
+                .blocking(move |paths, runner| {
+                    Reconciler {
+                        paths,
+                        runner,
+                        volume_group: vg,
+                    }
+                    .observe(&spec_obs, &node)
+                })
                 .await?;
             let obs = match obs {
                 Ok(obs) => obs,
@@ -1128,8 +1149,16 @@ impl Agent {
             let matches = obs.res_matches && obs.res_applied && status_matches_spec(&spec, &self.node, st);
             if !matches {
                 let node = self.node.clone();
+                let vg = self.options.volume_group.clone();
                 let applied = self
-                    .blocking(move |paths, runner| Reconciler { paths, runner }.apply(&spec, &node))
+                    .blocking(move |paths, runner| {
+                        Reconciler {
+                            paths,
+                            runner,
+                            volume_group: vg,
+                        }
+                        .apply(&spec, &node)
+                    })
                     .await?;
                 match applied {
                     Ok(actions) => {
@@ -1170,6 +1199,7 @@ impl Agent {
         let name = volume.to_string();
         let node = self.node.clone();
         let spec_crd = object.spec.clone();
+        let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
                 let drbd_state = Cell::new(false);
@@ -1200,7 +1230,11 @@ impl Agent {
                         }
                     }
                 };
-                let reconciler = Reconciler { paths, runner };
+                let reconciler = Reconciler {
+                    paths,
+                    runner,
+                    volume_group: vg,
+                };
                 let result = match &check {
                     CheckRetire::NoData(_) => reconciler.remove_unconfigured(&name, &guard),
                     CheckRetire::Peers => reconciler.remove_checked(&name, &guard),
@@ -1294,8 +1328,16 @@ impl Agent {
         };
         spec.initial_sync = InitialSync::Done;
         let node = self.node.clone();
+        let vg = self.options.volume_group.clone();
         let applied = self
-            .blocking(move |paths, runner| Reconciler { paths, runner }.apply(&spec, &node))
+            .blocking(move |paths, runner| {
+                Reconciler {
+                    paths,
+                    runner,
+                    volume_group: vg,
+                }
+                .apply(&spec, &node)
+            })
             .await?;
         match applied {
             Ok(actions) => log_info(
@@ -1337,6 +1379,7 @@ impl Agent {
         // `remove` deletes a backing file if one is there, so the decision is
         // not enough: the guard looks again under the volume lock.
         let name = volume.to_string();
+        let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
                 let guard = || match local(paths, &name) {
@@ -1344,7 +1387,12 @@ impl Agent {
                     Ok(_) => Ok(()),
                     Err(e) => Err(format!("cannot inspect the backing file: {e}")),
                 };
-                Reconciler { paths, runner }.remove_checked(&name, &guard)
+                Reconciler {
+                    paths,
+                    runner,
+                    volume_group: vg,
+                }
+                .remove_checked(&name, &guard)
             })
             .await?;
         match removed {
@@ -1383,6 +1431,7 @@ impl Agent {
         object: &ReplicatedVolume,
     ) -> Result<Outcome, AgentError> {
         let name = volume.to_string();
+        let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
                 let guard = || {
@@ -1397,7 +1446,12 @@ impl Agent {
                         Err(e) => Err(format!("cannot inspect the backing file: {e}")),
                     }
                 };
-                Reconciler { paths, runner }.remove_checked(&name, &guard)
+                Reconciler {
+                    paths,
+                    runner,
+                    volume_group: vg,
+                }
+                .remove_checked(&name, &guard)
             })
             .await?;
         match removed {

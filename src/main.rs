@@ -47,6 +47,7 @@ fn run(cli: Cli) -> Result<()> {
             adjust_attempts,
             adjust_interval,
             metrics_addr,
+            volume_group,
         } => run_agent(
             &node_name,
             &csi_socket,
@@ -58,9 +59,10 @@ fn run(cli: Cli) -> Result<()> {
                 adjust_attempts,
                 adjust_interval: Duration::from_secs(adjust_interval),
                 metrics_addr,
+                volume_group,
             },
         )?,
-        Command::Apply { file } => {
+        Command::Apply { file, volume_group } => {
             let json = fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
             let spec = VolumeSpec::from_json(&json)?;
             // Equals `uname -n`, which `drbdadm` matches against `on <host>`.
@@ -68,14 +70,16 @@ fn run(cli: Cli) -> Result<()> {
             let done = Reconciler {
                 paths: &paths,
                 runner: &runner,
+                volume_group,
             }
             .apply(&spec, &node)?;
             println!("{}: {done:?}", spec.name);
         }
-        Command::Remove { name } => {
+        Command::Remove { name, volume_group } => {
             let steps = Reconciler {
                 paths: &paths,
                 runner: &runner,
+                volume_group,
             }
             .remove(&name)?;
             println!("{name}: {steps:?}");

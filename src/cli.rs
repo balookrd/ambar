@@ -14,6 +14,7 @@ pub struct AgentOptions {
     pub adjust_attempts: u32,
     pub adjust_interval: Duration,
     pub metrics_addr: String,
+    pub volume_group: Option<String>,
 }
 
 impl Default for AgentOptions {
@@ -23,6 +24,7 @@ impl Default for AgentOptions {
             adjust_attempts: 3,
             adjust_interval: Duration::from_secs(5),
             metrics_addr: "0.0.0.0:9770".to_string(),
+            volume_group: None,
         }
     }
 }
@@ -105,6 +107,9 @@ pub enum Command {
         /// JSON file with the volume description.
         #[arg(long)]
         file: PathBuf,
+        /// LVM Volume Group for direct block storage of DRBD volumes.
+        #[arg(long)]
+        volume_group: Option<String>,
     },
     /// Take a volume down on this node and irrevocably delete the local copy
     /// of its data: the backing file, its markers and the resource files.
@@ -113,6 +118,9 @@ pub enum Command {
         /// Name of the volume.
         #[arg(long)]
         name: String,
+        /// LVM Volume Group for direct block storage of DRBD volumes.
+        #[arg(long)]
+        volume_group: Option<String>,
     },
     /// Run the node agent: load the DRBD module, then reconcile this node with
     /// the `ReplicatedVolume` objects until SIGTERM. Needs the API server
@@ -143,6 +151,9 @@ pub enum Command {
         /// TCP address to expose Prometheus metrics.
         #[arg(long, default_value = "0.0.0.0:9770")]
         metrics_addr: String,
+        /// LVM Volume Group for direct block storage of DRBD volumes.
+        #[arg(long)]
+        volume_group: Option<String>,
     },
     /// Manage volume replicas: add, remove, or move copies.
     #[command(subcommand, after_help = REPLICA_AFTER_HELP)]

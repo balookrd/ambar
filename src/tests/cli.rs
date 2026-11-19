@@ -55,6 +55,7 @@ fn agent_command_defaults() {
             adjust_attempts,
             adjust_interval,
             metrics_addr,
+            volume_group,
         } => {
             assert_eq!(node_name, "dv-1");
             assert_eq!(csi_socket, PathBuf::from("/var/lib/kubelet/plugins/ambar/csi.sock"));
@@ -64,6 +65,7 @@ fn agent_command_defaults() {
             assert_eq!(adjust_attempts, 3);
             assert_eq!(adjust_interval, 5);
             assert_eq!(metrics_addr, "0.0.0.0:9770");
+            assert_eq!(volume_group, None);
         }
         _ => panic!("expected Command::Agent"),
     }
@@ -100,6 +102,17 @@ fn agent_command_explicit_flags() {
             assert_eq!(adjust_attempts, 5);
             assert_eq!(adjust_interval, 10);
             assert_eq!(metrics_addr, "192.168.104.2:9770");
+        }
+        _ => panic!("expected Command::Agent"),
+    }
+}
+
+#[test]
+fn agent_command_volume_group() {
+    let cli = Cli::try_parse_from(["ambar", "agent", "--node-name", "dv-1", "--volume-group", "k3s-vg"]).unwrap();
+    match cli.command {
+        Command::Agent { volume_group, .. } => {
+            assert_eq!(volume_group.as_deref(), Some("k3s-vg"));
         }
         _ => panic!("expected Command::Agent"),
     }
