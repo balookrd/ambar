@@ -44,5 +44,6 @@ r5c_pod_anon_bytes() {
 
 r5c_ambar_total_rss_kb() {
     local node="$1"
+    # node-driver-reg is truncated to 15 chars due to Linux kernel TASK_COMM_LEN limit for ps -C
     r5c_ssh "$node" "ps -o rss= -C ambar,csi-provisioner,node-driver-reg | awk '{s+=\$1} END {print s+0}'"
 }

@@ -97,9 +97,12 @@ run_fio_bench "ambar-r2" "$HERE/bench-fsync-r2.json"
 echo "=== 3. Summary Latency Comparison ==="
 python3 -I - "$HERE/baseline-local-path.json" "$HERE/bench-fsync-r3.json" "$HERE/bench-fsync-r2.json" << 'PYEOF'
 import json
+import os
 import sys
 
 def parse_fio(path):
+    if not os.path.exists(path):
+        return None
     with open(path) as f:
         d = json.load(f)
     job = d["jobs"][0]
@@ -121,13 +124,18 @@ r2 = parse_fio(sys.argv[3])
 
 print(f"{'StorageClass':<12} | {'IOPS':<8} | {'mean (ms)':<10} | {'p50 (ms)':<10} | {'p95 (ms)':<10} | {'p99 (ms)':<10}")
 print("-" * 72)
-print(f"{'local-path':<12} | {local['iops']:<8.1f} | {local['mean_ms']:<10.3f} | {local['p50_ms']:<10.3f} | {local['p95_ms']:<10.3f} | {local['p99_ms']:<10.3f}")
-print(f"{'ambar-r3':<12} | {r3['iops']:<8.1f} | {r3['mean_ms']:<10.3f} | {r3['p50_ms']:<10.3f} | {r3['p95_ms']:<10.3f} | {r3['p99_ms']:<10.3f}")
-print(f"{'ambar-r2':<12} | {r2['iops']:<8.1f} | {r2['mean_ms']:<10.3f} | {r2['p50_ms']:<10.3f} | {r2['p95_ms']:<10.3f} | {r2['p99_ms']:<10.3f}")
-
-if r3["mean_ms"] > 5.0:
-    print(f"\nWARNING: ambar-r3 mean latency {r3['mean_ms']:.3f} ms exceeds 5.0 ms threshold!")
+if local:
+    print(f"{'local-path':<12} | {local['iops']:<8.1f} | {local['mean_ms']:<10.3f} | {local['p50_ms']:<10.3f} | {local['p95_ms']:<10.3f} | {local['p99_ms']:<10.3f}")
 else:
+    print(f"{'local-path':<12} | {'N/A':<8} | {'N/A':<10} | {'N/A':<10} | {'N/A':<10} | {'N/A':<10}")
+if r3:
+    print(f"{'ambar-r3':<12} | {r3['iops']:<8.1f} | {r3['mean_ms']:<10.3f} | {r3['p50_ms']:<10.3f} | {r3['p95_ms']:<10.3f} | {r3['p99_ms']:<10.3f}")
+if r2:
+    print(f"{'ambar-r2':<12} | {r2['iops']:<8.1f} | {r2['mean_ms']:<10.3f} | {r2['p50_ms']:<10.3f} | {r2['p95_ms']:<10.3f} | {r2['p99_ms']:<10.3f}")
+
+if r3 and r3["mean_ms"] > 5.0:
+    print(f"\nWARNING: ambar-r3 mean latency {r3['mean_ms']:.3f} ms exceeds 5.0 ms threshold!")
+elif r3:
     print(f"\nPASS: ambar-r3 mean latency {r3['mean_ms']:.3f} ms is within <= 5.0 ms target!")
 PYEOF
 
