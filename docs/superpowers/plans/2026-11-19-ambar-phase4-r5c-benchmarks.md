@@ -560,7 +560,7 @@ git commit -m "feat(stand): add r5c fsync latency benchmark script" -- stand/r5c
 - Consumes: StorageClass `ambar-r3`, namespace `ambar-bench`, `stand/r5c-lib.sh`, `stand/baseline-k3s-rss.json`.
 - Produces: `stand/bench-load-results.json`, временные ряды RSS подов ambar и k3s server на всех узлах.
 
-- [ ] **Step 1: Создать скрипт 10-минутного нагрузочного теста `stand/r5c-bench-load.sh`**
+- [x] **Step 1: Создать скрипт 10-минутного нагрузочного теста `stand/r5c-bench-load.sh`**
 
 ```bash
 cat << 'EOF' > stand/r5c-bench-load.sh
@@ -711,12 +711,12 @@ EOF
 chmod +x stand/r5c-bench-load.sh
 ```
 
-- [ ] **Step 2: Запустить 10-минутный нагрузочный тест памяти**
+- [x] **Step 2: Запустить 10-минутный нагрузочный тест памяти**
 
 Run: `stand/r5c-bench-load.sh`
 Expected: 5 томов создаются, поды запускаются, 10 минут собираются сэмплы памяти, результаты выводятся и сохраняются в `stand/bench-load-results.json`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add stand/r5c-bench-load.sh

@@ -1,0 +1,26 @@
+{
+  "k3s-1": {
+    "ambar_pod_max_mib": 83.44140625,
+    "ambar_cgroup_anon_mib": 39.9609375,
+    "ambar_ps_rss_mib": 83.44140625,
+    "k3s_base_mib": 707.69921875,
+    "k3s_max_mib": 712.12890625,
+    "k3s_delta_mib": 4.4296875
+  },
+  "k3s-2": {
+    "ambar_pod_max_mib": 85.125,
+    "ambar_cgroup_anon_mib": 44.703125,
+    "ambar_ps_rss_mib": 85.125,
+    "k3s_base_mib": 816.8515625,
+    "k3s_max_mib": 825.515625,
+    "k3s_delta_mib": 8.6640625
+  },
+  "k3s-3": {
+    "ambar_pod_max_mib": 75.078125,
+    "ambar_cgroup_anon_mib": 38.96484375,
+    "ambar_ps_rss_mib": 75.078125,
+    "k3s_base_mib": 572.3359375,
+    "k3s_max_mib": 601.38671875,
+    "k3s_delta_mib": 29.05078125
+  }
+}
