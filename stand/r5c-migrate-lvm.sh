@@ -101,7 +101,7 @@ else
     NODE="$TARGET"
 fi
 
-BACKUP_FILE="${BACKUP_DIR}/k3s-backup-${NODE}.tar.gz"
+BACKUP_FILE="${BACKUP_DIR}/k3s-backup-${NODE}.tar"
 
 # Resilient cluster kubectl runner: tries local kubectl first, falls back to surviving peer node via SSH
 cluster_kubectl() {
@@ -196,16 +196,21 @@ if [[ "$readyz" != *"ok"* ]]; then
 fi
 echo "Kubernetes API readyz: OK."
 
-# 1.3 Check status of all nodes in cluster
-echo "Checking all cluster nodes condition..."
-not_ready_nodes="$(cluster_kubectl get nodes --no-headers 2>/dev/null | awk '$2 !~ /^Ready/ {print $1}' || true)"
+# 1.3 Check status of peer nodes in cluster
+echo "Checking cluster peer nodes condition..."
+not_ready_nodes="$(cluster_kubectl get nodes --no-headers 2>/dev/null | awk -v node="$NODE" '$1 != node && $2 !~ /^Ready/ {print $1}' || true)"
 if [[ -n "$not_ready_nodes" ]]; then
-    echo "FAIL: The following cluster nodes are NotReady:" >&2
+    echo "FAIL: The following peer nodes are NotReady:" >&2
     echo "$not_ready_nodes" >&2
     echo "Cannot safely migrate $NODE while other nodes are unhealthy." >&2
     exit 1
 fi
-echo "All cluster nodes are Ready."
+ready_peers="$(cluster_kubectl get nodes --no-headers 2>/dev/null | awk -v node="$NODE" '$1 != node && $2 ~ /^Ready/ {print $1}' || true)"
+if [[ -z "$ready_peers" ]]; then
+    echo "FAIL: No healthy peer nodes available in cluster!" >&2
+    exit 1
+fi
+echo "All cluster peer nodes are Ready."
 
 # 1.4 Check target NVMe block device
 echo "Checking block device $NVME_DEV on $NODE..."
@@ -238,12 +243,16 @@ root_avail_kb="$(run_on_node "df -k '$BACKUP_DIR' | awk 'NR==2 {print \$4}'")"
 rancher_used_kb="$(run_on_node "du -sk '$MOUNT_POINT' 2>/dev/null | awk '{print \$1}' || df -k '$MOUNT_POINT' | awk 'NR==2 {print \$3}'")"
 echo "Root filesystem available: $(( root_avail_kb / 1024 )) MiB, $MOUNT_POINT used: $(( rancher_used_kb / 1024 )) MiB"
 
-# Require at least 8 GiB (8388608 KiB) free on root fs
-if (( root_avail_kb < 8388608 )); then
-    echo "FAIL: Insufficient free space on $BACKUP_DIR: $(( root_avail_kb / 1024 )) MiB available, need >= 8192 MiB!" >&2
-    exit 1
+if run_on_node "test -s '$BACKUP_FILE'"; then
+    echo "Existing backup archive found at $BACKUP_FILE, will reuse if verified."
+else
+    # Require at least 8 GiB (8388608 KiB) free on root fs
+    if (( root_avail_kb < 8388608 )); then
+        echo "FAIL: Insufficient free space on $BACKUP_DIR: $(( root_avail_kb / 1024 )) MiB available, need >= 8192 MiB!" >&2
+        exit 1
+    fi
+    echo "Sufficient free space available on root eMMC for backup."
 fi
-echo "Sufficient free space available on root eMMC for backup."
 
 # 1.7 Ensure lvm2 package is installed on target node
 echo "Checking lvm2 tools on $NODE..."
@@ -294,33 +303,41 @@ echo "Node $NODE drained successfully."
 # ==============================================================================
 echo "=== Step 4/8: Stop k3s and backup $MOUNT_POINT to eMMC ==="
 if [[ "$IS_LOCAL" -eq 1 ]]; then
-    bash -s << LOCAL_BACKUP_SCRIPT
+    BACKUP_FILE="$BACKUP_FILE" MOUNT_POINT="$MOUNT_POINT" bash -s << 'LOCAL_BACKUP_SCRIPT'
 set -euo pipefail
 echo "Stopping k3s services..."
 systemctl stop k3s 2>/dev/null || true
 systemctl stop k3s-agent 2>/dev/null || true
 
-for i in \$(seq 1 30); do
+for i in $(seq 1 30); do
     if ! systemctl is-active --quiet k3s && ! systemctl is-active --quiet k3s-agent; then
         break
     fi
     sleep 1
 done
 
-echo "Creating sparse compressed backup: $BACKUP_FILE..."
-tar --sparse --numeric-owner -cpzf "$BACKUP_FILE" "$MOUNT_POINT"
+if [[ -s "$BACKUP_FILE" ]] && tar -tf "$BACKUP_FILE" >/dev/null 2>&1; then
+    echo "Existing valid backup archive verified at $BACKUP_FILE, reusing."
+else
+    if ! mountpoint -q "$MOUNT_POINT"; then
+        echo "FAIL: $MOUNT_POINT is not mounted, cannot create fresh backup!" >&2
+        exit 1
+    fi
+    echo "Creating sparse backup: $BACKUP_FILE..."
+    tar --sparse --numeric-owner -cpf "$BACKUP_FILE" "$MOUNT_POINT"
 
-echo "Verifying backup archive with tar -tzf..."
-if ! tar -tzf "$BACKUP_FILE" >/dev/null; then
-    echo "FAIL: Backup verification failed!" >&2
-    exit 1
+    echo "Verifying backup archive with tar -tf..."
+    if ! tar -tf "$BACKUP_FILE" >/dev/null; then
+        echo "FAIL: Backup verification failed!" >&2
+        exit 1
+    fi
 fi
 if [[ ! -s "$BACKUP_FILE" ]]; then
     echo "FAIL: Backup file is empty!" >&2
     exit 1
 fi
-size=\$(ls -lh "$BACKUP_FILE" | awk '{print \$5}')
-echo "Backup verified successfully (size: \$size)."
+size=$(ls -lh "$BACKUP_FILE" | awk '{print $5}')
+echo "Backup verified successfully (size: $size)."
 LOCAL_BACKUP_SCRIPT
 else
     ssh "${R5C_SSH_OPTS[@]}" "${R5C_USER}@${NODE}" "sudo BACKUP_FILE='$BACKUP_FILE' MOUNT_POINT='$MOUNT_POINT' bash -s" << 'REMOTE_BACKUP_SCRIPT'
@@ -336,13 +353,21 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-echo "Creating sparse compressed backup: $BACKUP_FILE..."
-tar --sparse --numeric-owner -cpzf "$BACKUP_FILE" "$MOUNT_POINT"
+if [[ -s "$BACKUP_FILE" ]] && tar -tf "$BACKUP_FILE" >/dev/null 2>&1; then
+    echo "Existing valid backup archive verified at $BACKUP_FILE, reusing."
+else
+    if ! mountpoint -q "$MOUNT_POINT"; then
+        echo "FAIL: $MOUNT_POINT is not mounted, cannot create fresh backup!" >&2
+        exit 1
+    fi
+    echo "Creating sparse backup: $BACKUP_FILE..."
+    tar --sparse --numeric-owner -cpf "$BACKUP_FILE" "$MOUNT_POINT"
 
-echo "Verifying backup archive with tar -tzf..."
-if ! tar -tzf "$BACKUP_FILE" >/dev/null; then
-    echo "FAIL: Backup verification failed!" >&2
-    exit 1
+    echo "Verifying backup archive with tar -tf..."
+    if ! tar -tf "$BACKUP_FILE" >/dev/null; then
+        echo "FAIL: Backup verification failed!" >&2
+        exit 1
+    fi
 fi
 if [[ ! -s "$BACKUP_FILE" ]]; then
     echo "FAIL: Backup file is empty!" >&2
@@ -359,15 +384,21 @@ fi
 echo "=== Step 5/8: Unmount $MOUNT_POINT ==="
 run_on_node "
     set -euo pipefail
+
+    if [[ -x /usr/local/bin/k3s-killall.sh ]]; then
+        echo 'Executing k3s-killall.sh to cleanup containerd and mounts...'
+        /usr/local/bin/k3s-killall.sh >/dev/null 2>&1 || true
+    fi
+
+    while read -r _ path _; do
+        case \"\$path\" in /run/k3s/containerd/*) umount -l \"\$path\" 2>/dev/null || true ;; esac
+        case \"\$path\" in /var/lib/kubelet/*) umount -l \"\$path\" 2>/dev/null || true ;; esac
+    done < /proc/self/mounts
+
     if mountpoint -q '$MOUNT_POINT'; then
         echo 'Unmounting $MOUNT_POINT...'
         sync
-        umount '$MOUNT_POINT' || {
-            echo 'Warning: normal umount failed, terminating lingering processes...'
-            fuser -km '$MOUNT_POINT' 2>/dev/null || true
-            sleep 2
-            umount -f '$MOUNT_POINT' || umount -l '$MOUNT_POINT'
-        }
+        umount '$MOUNT_POINT' 2>/dev/null || umount -l '$MOUNT_POINT' 2>/dev/null || true
     fi
     if mountpoint -q '$MOUNT_POINT'; then
         echo 'FAIL: Failed to unmount $MOUNT_POINT!' >&2
@@ -381,7 +412,7 @@ run_on_node "
 # ==============================================================================
 echo "=== Step 6/8: Initialize LVM on $NVME_DEV (VG: $VG_NAME, LV: $LV_NAME ($LV_SIZE)) ==="
 if [[ "$IS_LOCAL" -eq 1 ]]; then
-    bash -s << LOCAL_LVM_SCRIPT
+    NVME_DEV="$NVME_DEV" VG_NAME="$VG_NAME" LV_NAME="$LV_NAME" LV_SIZE="$LV_SIZE" bash -s << 'LOCAL_LVM_SCRIPT'
 set -euo pipefail
 if vgs "$VG_NAME" >/dev/null 2>&1; then
     echo "Removing existing VG $VG_NAME..."
@@ -390,12 +421,16 @@ if vgs "$VG_NAME" >/dev/null 2>&1; then
 fi
 
 for p in "${NVME_DEV}"p* "${NVME_DEV}"[0-9]* "$NVME_DEV"; do
-    if [[ -b "\$p" ]]; then
-        pvremove -y -f "\$p" >/dev/null 2>&1 || true
-        wipefs -a -f "\$p" >/dev/null 2>&1 || true
+    if [[ -b "$p" ]]; then
+        pvremove -y -f "$p" >/dev/null 2>&1 || true
+        wipefs -a -f "$p" >/dev/null 2>&1 || true
     fi
 done
 wipefs -a -f "$NVME_DEV"
+partx -d "$NVME_DEV" >/dev/null 2>&1 || true
+blockdev --rereadpt "$NVME_DEV" >/dev/null 2>&1 || true
+udevadm settle 2>/dev/null || true
+sleep 1
 
 echo "Creating Physical Volume on $NVME_DEV..."
 pvcreate -f -y "$NVME_DEV"
@@ -426,6 +461,10 @@ for p in "${NVME_DEV}"p* "${NVME_DEV}"[0-9]* "$NVME_DEV"; do
     fi
 done
 wipefs -a -f "$NVME_DEV"
+partx -d "$NVME_DEV" >/dev/null 2>&1 || true
+blockdev --rereadpt "$NVME_DEV" >/dev/null 2>&1 || true
+udevadm settle 2>/dev/null || true
+sleep 1
 
 echo "Creating Physical Volume on $NVME_DEV..."
 pvcreate -f -y "$NVME_DEV"
@@ -473,7 +512,7 @@ echo "=== Step 8/8: Restore data from backup and restart k3s ==="
 run_on_node "
     set -euo pipefail
     echo 'Restoring data from $BACKUP_FILE to $MOUNT_POINT...'
-    tar --same-owner -xpzf '$BACKUP_FILE' -C /
+    tar --same-owner -xpf '$BACKUP_FILE' -C /
 
     if [[ ! -d '$MOUNT_POINT/k3s' ]]; then
         echo 'FAIL: Expected directory $MOUNT_POINT/k3s missing after restore!' >&2
