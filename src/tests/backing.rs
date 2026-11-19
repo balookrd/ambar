@@ -490,3 +490,31 @@ fn has_any_loop_reference_finds_unconfirmed_and_ignores_absent() {
     let runner_without_ref = FakeRunner::new(|_, _| out(0, "/dev/loop0 /other.img\n", ""));
     assert!(!crate::backing::has_any_loop_reference(&runner_without_ref, &image).unwrap());
 }
+
+#[test]
+fn test_lvm_create_and_remove() {
+    let runner = FakeRunner::new(|program, args| match (program, args) {
+        ("lvs", ["--noheadings", "-o", "lv_name", "/dev/k3s-vg/pvc-test"]) => out(0, "pvc-test\n", ""),
+        ("lvcreate", ["-y", "-L", "1073741824B", "-n", "pvc-test", "k3s-vg"]) => out(0, "", ""),
+        ("lvremove", ["-y", "/dev/k3s-vg/pvc-test"]) => out(0, "", ""),
+        _ => out(1, "", "unexpected"),
+    });
+
+    assert!(crate::backing::find_lvm_volume(&runner, "k3s-vg", "pvc-test").unwrap());
+    crate::backing::create_lvm_volume(&runner, "k3s-vg", "pvc-test", 1073741824).unwrap();
+    crate::backing::remove_lvm_volume(&runner, "k3s-vg", "pvc-test").unwrap();
+    assert_eq!(
+        runner.calls(),
+        [
+            "lvs --noheadings -o lv_name /dev/k3s-vg/pvc-test",
+            "lvcreate -y -L 1073741824B -n pvc-test k3s-vg",
+            "lvremove -y /dev/k3s-vg/pvc-test"
+        ]
+    );
+}
+
+#[test]
+fn test_lvm_find_not_found() {
+    let runner = FakeRunner::new(|_, _| out(5, "", "Failed to find logical volume \"k3s-vg/pvc-missing\"\n"));
+    assert!(!crate::backing::find_lvm_volume(&runner, "k3s-vg", "pvc-missing").unwrap());
+}

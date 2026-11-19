@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
@@ -749,6 +750,7 @@ fn apply_rejects_an_invalid_spec_before_touching_anything() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let mut spec = spec();
     spec.nodes[0].name = "lima;dv-1".into();
@@ -770,6 +772,7 @@ fn apply_creates_a_copy_then_skips_the_initial_sync_and_remove_undoes_it() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let spec = spec();
 
@@ -865,6 +868,7 @@ fn remove_detaches_every_loop_device_of_the_file() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let steps = reconciler.remove("spike").unwrap();
     assert_eq!(steps, ["detach-loop", "detach-loop", "remove-file"]);
@@ -889,6 +893,7 @@ fn apply_refuses_to_act_on_a_file_attached_twice() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
     assert!(
@@ -909,6 +914,7 @@ fn an_adjust_that_takes_effect_is_recorded() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     assert_eq!(
         reconciler.apply(&spec(), "lima-dv-1").unwrap(),
@@ -931,6 +937,7 @@ fn an_adjust_without_effect_is_an_error_and_is_repeated_next_time() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
     assert!(
@@ -968,6 +975,7 @@ fn a_rejected_adjust_is_not_recorded_even_when_the_status_matches() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
     assert!(
@@ -994,6 +1002,7 @@ fn an_up_without_effect_is_an_error() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.apply(&spec(), "lima-dv-3").unwrap_err();
     assert!(
@@ -1015,6 +1024,7 @@ fn the_synced_marker_is_written_only_after_the_status_shows_the_skip() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let skip = "drbdadm new-current-uuid --clear-bitmap spike/0";
 
@@ -1053,6 +1063,7 @@ fn a_leader_that_resyncs_from_a_peer_never_skips_the_initial_sync_later() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let skip = "drbdadm new-current-uuid --clear-bitmap spike/0";
 
@@ -1077,6 +1088,7 @@ fn stale_markers_are_cleared_before_a_new_copy_is_created() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let done = reconciler.apply(&spec(), "lima-dv-1").unwrap();
     assert_eq!(done[0], Action::ClearStaleMarkers);
@@ -1094,6 +1106,7 @@ fn linking_without_a_known_loop_device_is_an_error() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler
         .execute(&spec(), "lima-dv-1", &Action::LinkDevice, &mut None)
@@ -1138,6 +1151,7 @@ fn remove_deletes_nothing_when_down_fails() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.remove("spike").unwrap_err();
     assert!(matches!(err, ReconcileError::Drbd(_)), "{err}");
@@ -1154,6 +1168,7 @@ fn remove_deletes_nothing_when_the_resource_stays_configured_after_down() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.remove("spike").unwrap_err();
     assert!(
@@ -1185,6 +1200,7 @@ fn remove_rejects_an_invalid_name_before_touching_anything() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     for name in ["../x", "", "a/b", "all"] {
         let err = reconciler.remove(name).unwrap_err();
@@ -1222,6 +1238,7 @@ fn remove_detaches_the_loop_device_of_a_deleted_image() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     assert_eq!(
         reconciler.remove("spike").unwrap(),
@@ -1241,6 +1258,7 @@ fn remove_detaches_the_loop_device_listed_in_the_detached_mount_form() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     assert_eq!(
         reconciler.remove("spike").unwrap(),
@@ -1259,6 +1277,7 @@ fn remove_leaves_a_loop_device_of_another_file_alone() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     assert_eq!(reconciler.remove("spike").unwrap(), ["remove-marker", "remove-link"]);
     assert_eq!(count(&runner, "losetup -d"), 0);
@@ -1278,6 +1297,7 @@ fn remove_detaches_every_loop_device_of_a_deleted_image_whatever_the_link_says()
     let steps = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     }
     .remove("spike")
     .unwrap();
@@ -1306,6 +1326,7 @@ fn remove_finds_the_loop_device_when_the_volumes_directory_is_behind_a_link() {
     let steps = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     }
     .remove("spike")
     .unwrap();
@@ -1326,6 +1347,7 @@ fn remove_stops_when_the_loop_devices_of_a_missing_image_cannot_be_listed() {
     let err = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     }
     .remove("spike")
     .unwrap_err();
@@ -1374,6 +1396,7 @@ fn a_marker_or_image_that_cannot_be_inspected_stops_observe_and_apply() {
         let reconciler = Reconciler {
             paths: &paths,
             runner: &runner,
+            volume_group: None,
         };
 
         let err = reconciler.observe(&spec(), "lima-dv-1").unwrap_err();
@@ -1401,6 +1424,7 @@ fn remove_stops_when_the_image_cannot_be_inspected() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.remove("spike").unwrap_err();
     assert!(matches!(err, ReconcileError::Io { action: "inspect", .. }), "{err}");
@@ -1419,6 +1443,7 @@ fn a_held_volume_lock_makes_apply_and_remove_busy() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let held = reconciler.lock_volume("spike").unwrap();
 
@@ -1457,6 +1482,7 @@ fn a_guard_that_refuses_runs_nothing_and_deletes_nothing() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler
         .remove_checked("spike", &|| Err("a peer is Primary".to_string()))
@@ -1485,6 +1511,7 @@ fn a_guard_that_passes_lets_remove_proceed() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let steps = reconciler.remove_checked("spike", &|| Ok(())).unwrap();
     assert!(steps.contains(&"remove-file"), "{steps:?}");
@@ -1509,6 +1536,7 @@ fn a_removal_that_requires_an_absent_resource_refuses_one_that_appeared_after_th
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let guard = || {
         // Stands for the status read of the agent's guard.
@@ -1540,6 +1568,7 @@ fn a_removal_that_requires_an_absent_resource_proceeds_when_it_is_absent() {
     let steps = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     }
     .remove_unconfigured("spike", &|| Ok(()))
     .unwrap();
@@ -1553,6 +1582,7 @@ fn the_guard_runs_with_the_volume_lock_held() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let seen_busy = Mutex::new(None);
     reconciler
@@ -1574,6 +1604,7 @@ fn the_guard_does_not_run_when_the_volume_is_busy_or_the_name_is_invalid() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let called = Mutex::new(0);
     let guard = || {
@@ -1633,6 +1664,7 @@ fn create_md_runs_only_after_dump_md_reports_no_metadata() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     reconciler.apply(&spec(), "lima-dv-1").unwrap();
     let md: Vec<String> = runner.calls().into_iter().filter(|c| c.contains("-md")).collect();
@@ -1652,6 +1684,7 @@ fn existing_metadata_stops_create_md_and_leaves_no_ready_marker() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
     assert!(
@@ -1681,6 +1714,7 @@ fn a_failed_metadata_check_stops_create_md() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
     assert!(
@@ -1705,6 +1739,7 @@ fn apply_does_not_create_the_volumes_directory() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let err = reconciler.apply(&spec(), "lima-dv-1").unwrap_err();
     assert!(matches!(&err, ReconcileError::Io { action: "open", .. }), "{err}");
@@ -1739,6 +1774,7 @@ fn apply_once(dump_md: Output) -> (Result<Vec<Action>, ReconcileError>, Vec<Stri
     let result = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     }
     .apply(&spec(), "lima-dv-1");
     (result, md_calls(&runner), paths, tmp)
@@ -1835,6 +1871,7 @@ fn an_apply_interrupted_after_create_md_is_finished_by_the_next_one() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     // Writing the ready marker fails: a directory sits in the way of the
     // temporary file, as if the process had died right after `create-md`.
@@ -1866,6 +1903,7 @@ fn a_ready_file_is_not_checked_and_not_written_again() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     reconciler.apply(&spec(), "lima-dv-1").unwrap();
     let (dumps, creates) = (count(&runner, "drbdadm dump-md"), count(&runner, "drbdadm create-md"));
@@ -1905,6 +1943,7 @@ fn a_leftover_creating_file_changes_no_decision() {
         let err = Reconciler {
             paths: &paths,
             runner: &runner,
+            volume_group: None,
         }
         .apply(&spec(), "lima-dv-1")
         .unwrap_err();
@@ -1927,6 +1966,7 @@ fn remove_deletes_a_leftover_creating_file() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let steps = reconciler.remove("spike").unwrap();
     assert!(steps.contains(&"remove-leftover-creating-file"), "{steps:?}");
@@ -1945,6 +1985,7 @@ fn clearing_stale_markers_deletes_a_leftover_creating_file() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     // The leftover alone is not a stale marker: no decision depends on it.
     assert!(reconciler.observe(&spec(), "lima-dv-1").unwrap().stale_markers);
@@ -1976,6 +2017,7 @@ fn a_missing_volumes_directory_gives_an_actionable_error() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     for err in [
         reconciler.apply(&spec(), "lima-dv-1").unwrap_err(),
@@ -2001,6 +2043,7 @@ fn remove_does_not_create_the_volumes_directory() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     reconciler.remove("spike").unwrap_err();
     assert!(!paths.volumes_dir.exists());
@@ -2060,6 +2103,7 @@ fn turn_diskless_into_copy_executes_down_before_create_md() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let bytes = backing_file_bytes(1_073_741_824, 7);
     let done = reconciler.apply(&spec(), "lima-dv-1").unwrap();
@@ -2108,6 +2152,7 @@ fn down_without_effect_is_an_error() {
     let reconciler = Reconciler {
         paths: &paths,
         runner: &runner,
+        volume_group: None,
     };
     let mut loop_dev = None;
     let err = reconciler
@@ -2118,4 +2163,154 @@ fn down_without_effect_is_an_error() {
         "{err}"
     );
     assert_eq!(runner.calls(), ["drbdadm down spike", "drbdsetup status --json"]);
+}
+
+#[test]
+fn lvm_rendered_uses_direct_block_device_path() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    let runner = fake_node();
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+        volume_group: Some("k3s-vg".into()),
+    };
+    let text = reconciler.rendered(&spec());
+    assert!(
+        text.contains("disk /dev/k3s-vg/spike; meta-disk internal;"),
+        "rendered res must contain direct LVM block device: {text}"
+    );
+    assert!(
+        !text.contains("/dev/ambar/spike"),
+        "rendered res must not contain loopback symlink: {text}"
+    );
+}
+
+#[test]
+fn lvm_observe_detects_existing_and_absent_volume() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+
+    // 1. Absent volume
+    let runner_absent = FakeRunner::new(|program, args| match (program, args) {
+        ("lvs", _) => out(5, "", "Failed to find logical volume \"k3s-vg/spike\"\n"),
+        ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
+        _ => out(0, "", ""),
+    });
+    let reconciler_absent = Reconciler {
+        paths: &paths,
+        runner: &runner_absent,
+        volume_group: Some("k3s-vg".into()),
+    };
+    let obs_absent = reconciler_absent.observe(&spec(), "lima-dv-1").unwrap();
+    assert_eq!(obs_absent.file, FileState::Absent);
+    assert_eq!(obs_absent.loop_device, None);
+
+    // 2. Existing volume with ready marker
+    fs::write(paths.ready_marker("spike"), "").unwrap();
+    let runner_present = FakeRunner::new(|program, args| match (program, args) {
+        ("lvs", ["--noheadings", "-o", "lv_name", "/dev/k3s-vg/spike"]) => out(0, "spike\n", ""),
+        ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
+        _ => out(0, "", ""),
+    });
+    let reconciler_present = Reconciler {
+        paths: &paths,
+        runner: &runner_present,
+        volume_group: Some("k3s-vg".into()),
+    };
+    let obs_present = reconciler_present.observe(&spec(), "lima-dv-1").unwrap();
+    assert_eq!(obs_present.file, FileState::Ready);
+    assert_eq!(obs_present.loop_device.as_deref(), Some("/dev/k3s-vg/spike"));
+    assert_eq!(obs_present.link_target.as_deref(), Some("/dev/k3s-vg/spike"));
+}
+
+#[test]
+fn lvm_apply_creates_lv_and_remove_deletes_it() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+
+    let lv_created = Arc::new(AtomicBool::new(false));
+    let lv_created_clone = lv_created.clone();
+    let up = Arc::new(AtomicBool::new(false));
+    let up_clone = up.clone();
+    let skipped = Arc::new(AtomicBool::new(false));
+    let skipped_clone = skipped.clone();
+    let runner = FakeRunner::new(move |program, args| match (program, args) {
+        ("lvs", ["--noheadings", "-o", "lv_name", "/dev/k3s-vg/spike"]) => {
+            if lv_created_clone.load(Ordering::SeqCst) {
+                out(0, "spike\n", "")
+            } else {
+                out(5, "", "Failed to find logical volume \"k3s-vg/spike\"\n")
+            }
+        }
+        ("lvcreate", ["-y", "-L", _, "-n", "spike", "k3s-vg"]) => {
+            lv_created_clone.store(true, Ordering::SeqCst);
+            out(0, "", "")
+        }
+        ("lvremove", ["-y", "/dev/k3s-vg/spike"]) => {
+            lv_created_clone.store(false, Ordering::SeqCst);
+            out(0, "", "")
+        }
+        ("drbdadm", ["dump-md", _]) => out(255, "", P7_NO_METADATA_STDERR),
+        ("drbdadm", ["create-md", ..]) => out(0, "", ""),
+        ("drbdadm", ["up", _]) => {
+            up_clone.store(true, Ordering::SeqCst);
+            out(0, "", "")
+        }
+        ("drbdadm", ["down", _]) => {
+            up_clone.store(false, Ordering::SeqCst);
+            out(0, "", "")
+        }
+        ("drbdadm", ["new-current-uuid", ..]) => {
+            skipped_clone.store(true, Ordering::SeqCst);
+            out(0, "", "")
+        }
+        ("drbdsetup", _) if up_clone.load(Ordering::SeqCst) && skipped_clone.load(Ordering::SeqCst) => {
+            out(0, THREE_UPTODATE, "")
+        }
+        ("drbdsetup", _) if up_clone.load(Ordering::SeqCst) => out(0, THREE_INCONSISTENT, ""),
+        ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
+        _ => out(0, "", ""),
+    });
+
+    let reconciler = Reconciler {
+        paths: &paths,
+        runner: &runner,
+        volume_group: Some("k3s-vg".into()),
+    };
+    let spec = spec();
+
+    // 1. Apply: creates LVM volume, writes res with /dev/k3s-vg/spike, creates md, marks ready, ups
+    let done = reconciler.apply(&spec, "lima-dv-1").unwrap();
+    let bytes = backing_file_bytes(spec.size_bytes, spec.max_peers);
+    assert_eq!(
+        done,
+        [
+            Action::CreateFile { bytes },
+            Action::AttachLoop,
+            Action::LinkDevice,
+            Action::WriteRes,
+            Action::CreateMd,
+            Action::MarkReady,
+            Action::Up,
+            Action::MarkApplied,
+            Action::SkipInitialSync
+        ]
+    );
+
+    let res_text = fs::read_to_string(paths.res_file("spike")).unwrap();
+    assert!(res_text.contains("disk /dev/k3s-vg/spike; meta-disk internal;"));
+    assert!(paths.ready_marker("spike").exists());
+    assert!(!paths.image("spike").exists(), "no sparse image file in LVM mode");
+
+    // 2. Remove: tears down DRBD, removes LVM volume, cleans markers and res
+    let steps = reconciler.remove("spike").unwrap();
+    assert_eq!(
+        steps,
+        ["down", "remove-lvm", "remove-marker", "remove-res", "remove-applied"]
+    );
+    assert!(!paths.ready_marker("spike").exists());
+    assert!(!paths.res_file("spike").exists());
 }

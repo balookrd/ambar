@@ -325,6 +325,40 @@ pub fn link_target(link: &Path) -> Option<String> {
     fs::read_link(link).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Returns the block device path for an LVM logical volume in a volume group: `/dev/{vg}/{lv_name}`.
+pub fn lvm_device_path(vg: &str, lv_name: &str) -> String {
+    format!("/dev/{vg}/{lv_name}")
+}
+
+/// Checks whether an LVM logical volume exists in the volume group via `lvs`.
+pub fn find_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str) -> Result<bool, BackingError> {
+    let dev = lvm_device_path(vg, lv_name);
+    let args = ["--noheadings", "-o", "lv_name", &dev];
+    match checked(runner, "lvs", &args) {
+        Ok(_) => Ok(true),
+        Err(BackingError::Command { stderr, .. })
+            if stderr.contains("not found") || stderr.contains("Failed to find") =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Creates a new LVM logical volume in `vg` of `bytes` size via `lvcreate`.
+pub fn create_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str, bytes: u64) -> Result<(), BackingError> {
+    let size_arg = format!("{bytes}B");
+    checked(runner, "lvcreate", &["-y", "-L", &size_arg, "-n", lv_name, vg])?;
+    Ok(())
+}
+
+/// Irrevocably removes an LVM logical volume via `lvremove`.
+pub fn remove_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str) -> Result<(), BackingError> {
+    let dev = lvm_device_path(vg, lv_name);
+    checked(runner, "lvremove", &["-y", &dev])?;
+    Ok(())
+}
+
 /// Accepts a device name that `losetup` printed; anything else is an error
 /// so that a blank or malformed line never becomes a link target.
 fn device_name(program: &str, args: &[&str], device: &str, line: &str) -> Result<String, BackingError> {
