@@ -371,6 +371,9 @@ fn env_for(node: &str) -> Env {
         volumes: volumes.clone(),
         locks: VolumeLocks::default(),
         ready: Arc::new(AtomicBool::new(true)),
+        options: Default::default(),
+        metrics: Default::default(),
+        is_tainted: Arc::new(AtomicBool::new(false)),
     });
     let mut svc = NodeService::new(agent, Arc::new(FakeNodes(Ok(cluster(&[100 * GIB; 4])))));
     svc.mountinfo = mountinfo;

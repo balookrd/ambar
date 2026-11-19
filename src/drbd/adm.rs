@@ -378,8 +378,8 @@ impl Drbd<'_> {
         self.checked("drbdadm", &["new-current-uuid", "--clear-bitmap", &target])
     }
 
-    /// Status of one resource; `None` when it is not configured in the kernel.
-    pub fn status(&self, volume: &str) -> Result<Option<ResourceStatus>, DrbdError> {
+    /// Status of all resources currently configured in the kernel.
+    pub fn all_statuses(&self) -> Result<Vec<ResourceStatus>, DrbdError> {
         let args = ["status", "--json"];
         let out = self.run("drbdsetup", &args)?;
         if !out.success() {
@@ -397,7 +397,12 @@ impl Drbd<'_> {
             let first_line = text.lines().next().unwrap_or("");
             return Err(DrbdError::Status(format!("unexpected output: {first_line}")));
         }
-        let all = status::parse(text).map_err(|e| DrbdError::Status(e.to_string()))?;
+        status::parse(text).map_err(|e| DrbdError::Status(e.to_string()))
+    }
+
+    /// Status of one resource; `None` when it is not configured in the kernel.
+    pub fn status(&self, volume: &str) -> Result<Option<ResourceStatus>, DrbdError> {
+        let all = self.all_statuses()?;
         Ok(all.into_iter().find(|r| r.name == volume))
     }
 

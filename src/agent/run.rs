@@ -170,11 +170,17 @@ use crate::model::{InitialSync, valid_volume_name};
 use crate::paths::Paths;
 use crate::reconcile::{FileState, ReconcileError, Reconciler, status_matches_spec};
 
+use crate::cli::AgentOptions;
+use crate::metrics::{MetricsHolder, NodeMetricData, VolumeMetricData, render_metrics};
+
 use super::cleanup;
 use super::decide::{Local, ObjectView, Refusal, Task, decide};
-use super::kube::{ApiError, Volumes};
+use super::kube::{ApiError, Volumes, mounted_pod_uids_for_volume};
 use super::local::{file_state, local, local_volumes, loops_holding, synced_marker_present};
+use super::quorum::{QuorumTracker, VolumeQuorumCheck, check_volume_quorum};
+use super::standalone::{StandaloneTracker, handle_standalone};
 use super::status::node_status;
+use super::taint::reconcile_node_taint;
 
 /// Next pass after one that ran a node-level action or changed the status.
 const PROGRESS_DELAY: Duration = Duration::from_secs(1);
@@ -253,6 +259,7 @@ impl VolumeLocks {
     }
 }
 
+#[derive(Clone)]
 pub struct Agent {
     pub node: String,
     pub paths: Paths,
@@ -265,6 +272,9 @@ pub struct Agent {
     /// the flag stays true. `NodeStageVolume` answers `UNAVAILABLE` until it is
     /// set; later loss of the API server is not tracked.
     pub ready: Arc<AtomicBool>,
+    pub options: AgentOptions,
+    pub metrics: MetricsHolder,
+    pub is_tainted: Arc<AtomicBool>,
 }
 
 fn log_info(volume: &str, text: impl Display) {
@@ -643,6 +653,20 @@ impl Agent {
             Err(e) => Err(ReconcileError::Io {
                 action: "read the DRBD status",
                 path: volume.to_string(),
+                source: std::io::Error::other(e.to_string()),
+            }),
+        }
+    }
+
+    pub(crate) async fn read_all_statuses(&self) -> Result<Vec<ResourceStatus>, ReconcileError> {
+        match self
+            .blocking(move |_, runner| Drbd { runner }.all_statuses().map_err(ReconcileError::from))
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => Err(ReconcileError::Io {
+                action: "read all DRBD statuses",
+                path: "/proc/drbd".to_string(),
                 source: std::io::Error::other(e.to_string()),
             }),
         }
@@ -1416,11 +1440,19 @@ impl Agent {
         let queue = Arc::new(Queue::default());
         let stop_watch = shutdown.child_token();
         let watch = tokio::spawn(feed(self.volumes.watch(), queue.clone(), stop_watch.clone()));
+        let stop_failures = shutdown.child_token();
+        let stop_failures_task = stop_failures.clone();
+        let this = self.clone();
+        let failures_task = tokio::spawn(async move {
+            this.run_failure_loop(stop_failures_task).await;
+        });
         let result = self.serve(&queue, &shutdown).await;
         stop_watch.cancel();
+        stop_failures.cancel();
         if let Err(e) = watch.await {
             log_error("*", format!("the watch task failed: {e}"));
         }
+        let _ = failures_task.await;
         result
     }
 
@@ -1466,6 +1498,122 @@ impl Agent {
             }
         }
         Ok(())
+    }
+
+    /// Single evaluation of node-level failure checks and metrics:
+    /// 1. Taints node with no-quorum if any mounted volume lost quorum, or removes taint if quorum intact.
+    /// 2. Evicts pods for volumes whose quorum loss grace period expired.
+    /// 3. Auto-adjusts Secondary connections in StandAlone (up to max attempts).
+    /// 4. Cleans up stale Client entries without pods.
+    /// 5. Renders and stores latest Prometheus metrics.
+    pub async fn tick_failures(
+        &self,
+        quorum_tracker: &mut QuorumTracker,
+        standalone_tracker: &mut StandaloneTracker,
+        now: std::time::Instant,
+    ) -> Result<(), AgentError> {
+        let statuses = self.read_all_statuses().await.unwrap_or_default();
+
+        // 1. Taint management (R32)
+        let should_taint = crate::agent::taint::should_taint_node(&statuses);
+        if reconcile_node_taint(&*self.volumes, &self.node, should_taint)
+            .await
+            .is_ok()
+        {
+            self.is_tainted.store(should_taint, Ordering::SeqCst);
+        }
+
+        // 2. Quorum loss tracking and pod eviction (R33)
+        for status in &statuses {
+            let is_mounted = status.role == Role::Primary || status.devices.iter().any(|d| d.open);
+            let has_quorum = status.quorum();
+            let mounted_uids = mounted_pod_uids_for_volume(Path::new("/var/lib/kubelet/pods"), &status.name);
+            let check = VolumeQuorumCheck {
+                volume: &status.name,
+                is_mounted,
+                has_quorum,
+                node: &self.node,
+                mounted_uids: &mounted_uids,
+                now,
+            };
+            let _ = check_volume_quorum(quorum_tracker, &*self.volumes, check).await;
+        }
+
+        // 3. Auto-adjust StandAlone Secondary connections and split-brain tracking (R34, R35)
+        let runner = self.runner.clone();
+        for status in &statuses {
+            let drbd = Drbd { runner: &*runner };
+            let _ = handle_standalone(standalone_tracker, &drbd, status, now);
+        }
+
+        // 4. Stale Client cleanup without pods (R36)
+        if let Ok(objects) = self.volumes.list().await {
+            for obj in &objects {
+                if let Some(ref name) = obj.metadata.name {
+                    let _ = cleanup::check_and_cleanup_client(self, name, obj).await;
+                }
+            }
+        }
+
+        // 5. Prometheus metrics update (R38)
+        let drbd_ver = std::fs::read_to_string(Path::new("/sys/module/drbd/version"))
+            .ok()
+            .map(|s| s.trim().to_string());
+        let mut volume_metrics = Vec::new();
+        let mut total_allocated: u64 = 0;
+        for status in &statuses {
+            let manual = standalone_tracker.is_manual_check_needed(&status.name);
+            let size = status.device().map_or(0, |d| d.size * 1024);
+            total_allocated += size;
+            volume_metrics.push(VolumeMetricData {
+                name: &status.name,
+                status: Some(status),
+                manual_check_needed: manual,
+            });
+        }
+        let metric_data = NodeMetricData {
+            node: &self.node,
+            drbd_version: drbd_ver.as_deref(),
+            is_tainted: self.is_tainted.load(Ordering::SeqCst),
+            allocated_bytes: total_allocated,
+            volumes: volume_metrics,
+        };
+        self.metrics.update(render_metrics(&metric_data));
+
+        Ok(())
+    }
+
+    /// Background loop running failure evaluations periodically.
+    pub async fn run_failure_loop(&self, shutdown: CancellationToken) {
+        let mut quorum_tracker = QuorumTracker::new(self.options.quorum_loss_grace_period);
+        let mut standalone_tracker =
+            StandaloneTracker::new(self.options.adjust_attempts as usize, self.options.adjust_interval);
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    let now = std::time::Instant::now();
+                    let _ = self.tick_failures(&mut quorum_tracker, &mut standalone_tracker, now).await;
+                }
+            }
+        }
+    }
+
+    /// Serves Prometheus HTTP metrics on `addr`.
+    pub async fn serve_metrics(&self, addr: &str, shutdown: CancellationToken) -> std::io::Result<()> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        self.serve_metrics_listener(listener, shutdown).await
+    }
+
+    /// Serves Prometheus HTTP metrics on an already-bound `TcpListener`.
+    pub async fn serve_metrics_listener(
+        &self,
+        listener: tokio::net::TcpListener,
+        shutdown: CancellationToken,
+    ) -> std::io::Result<()> {
+        let holder = self.metrics.clone();
+        crate::agent::metrics_server::serve_listener(listener, Arc::new(move || holder.get()), shutdown).await
     }
 
     fn publish_readiness(&self, startup: &Startup) {

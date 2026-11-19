@@ -16,6 +16,17 @@ pub struct AgentOptions {
     pub metrics_addr: String,
 }
 
+impl Default for AgentOptions {
+    fn default() -> Self {
+        Self {
+            quorum_loss_grace_period: Duration::from_secs(30),
+            adjust_attempts: 3,
+            adjust_interval: Duration::from_secs(5),
+            metrics_addr: "0.0.0.0:9770".to_string(),
+        }
+    }
+}
+
 /// Exit code of `ambar apply` and `ambar remove` when another process holds
 /// the volume lock: EX_TEMPFAIL from `sysexits.h`.
 pub const EXIT_BUSY: u8 = 75;
