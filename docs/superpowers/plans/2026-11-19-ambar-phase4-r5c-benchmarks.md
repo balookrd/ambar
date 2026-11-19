@@ -734,7 +734,7 @@ git commit -m "feat(stand): add r5c 10-minute memory load benchmark script" -- s
 - Consumes: `stand/r5c-preflight.sh`, `stand/r5c-bench-local.sh`, `stand/r5c-deploy.sh`, `stand/r5c-bench-fsync.sh`, `stand/r5c-bench-load.sh`.
 - Produces: единая CLI-точка входа для запуска бенчмарка и очистки ресурсов.
 
-- [ ] **Step 1: Создать скрипт-оркестратор `stand/bench-r5c.sh`**
+- [x] **Step 1: Создать скрипт-оркестратор `stand/bench-r5c.sh`**
 
 ```bash
 cat << 'EOF' > stand/bench-r5c.sh
@@ -848,12 +848,12 @@ EOF
 chmod +x stand/bench-r5c.sh
 ```
 
-- [ ] **Step 2: Проверить синтаксис скрипта orchestrator**
+- [x] **Step 2: Проверить синтаксис скрипта orchestrator**
 
 Run: `bash -n stand/bench-r5c.sh`
 Expected: Успешный выход без синтаксических ошибок.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add stand/bench-r5c.sh
