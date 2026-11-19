@@ -871,16 +871,16 @@ git commit -m "feat(stand): add r5c benchmark master orchestrator script" -- sta
 - Consumes: результаты работы `stand/bench-r5c.sh all`.
 - Produces: утвержденный протокол замеров `2026-11-19-ambar-phase4-r5c-results.md`.
 
-- [ ] **Step 1: Выполнить полный цикл замеров**
+- [x] **Step 1: Выполнить полный цикл замеров**
 
 Run: `stand/bench-r5c.sh all`
 Expected: Все этапы (preflight, baseline local-path, deploy ambar, fsync ambar-r3 & r2, load 10m, clean, report) проходят успешно.
 
-- [ ] **Step 2: Зафиксировать протокол результатов в `docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`**
+- [x] **Step 2: Зафиксировать протокол результатов в `docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`**
 
 Создать документ с описанием стенда, методики, сырых данных и сравнительной таблицы с Longhorn и local-path.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md stand/baseline-*.json stand/bench-*.json*
