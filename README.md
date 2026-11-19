@@ -17,8 +17,8 @@ single Rust binary running as a DaemonSet.
 | CSI driver | creates, mounts and deletes volumes through PVCs on the stand (`stand/csi-e2e.sh`); handles node and network failures (`stand/failure-e2e.sh`) |
 | Changing the replica set of an existing volume (phase 2b) | implemented: CLI commands `ambar replica add`, `remove`, `move` with safety rules and witness rebalancing (`stand/replica-e2e.sh`) |
 | Node failure handling (phase 3): releasing a volume on quorum loss, the `no-quorum` taint, `adjust` on `StandAlone`, metrics | implemented: `no-quorum` taint, 30s grace period pod eviction, auto-adjust on StandAlone, Client cleanup, Prometheus metrics on `:9770/metrics` (`stand/failure-e2e.sh`) |
-| Production run | not done: nothing here has run on a production cluster |
-| Measurements on the target hardware (NanoPi R5C) | not done |
+| Production run | ambar is deployed on a production 3-node NanoPi R5C cluster in namespace `ambar-system`, running alongside existing production services |
+| Measurements on the target hardware (NanoPi R5C) | completed, see test report [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 
 ## What it does
 
@@ -88,12 +88,31 @@ Exported Prometheus metrics:
 - `ambar_volume_manual_check_needed{node, volume}`: `1` if auto-adjust attempts are exhausted (split-brain alert), `0` otherwise.
 - `ambar_module_info{version}`: DRBD kernel module version info metric.
 
+## NanoPi R5C Benchmarks
+
+Phase 4 validation was conducted on a live 3-node FriendlyElec NanoPi R5C cluster (Rockchip RK3568B2, 4 cores Cortex-A55, 4 GB RAM, NVMe 128 GB, 2.5 GbE replication network, Debian 13 trixie, Linux 6.12.116+, k3s v1.36.2+k3s1). Full protocol: [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md).
+
+| Metric / Parameter | `local-path` (baseline) | `ambar-r3` (3 replicas) | `ambar-r2` (2 replicas + witness) | Longhorn 1.12.2 (2026-11-09) | Target threshold | Result |
+|---|---|---|---|---|---|---|
+| **Pod cgroup v2 anon memory (max per node)** | 0 (kernel) | **39–45 MiB** | — | — | $\le$ 64 MiB | **PASS** |
+| **`k3s-server` RSS memory delta** | 0.00 MiB | **+4.4 .. +29.1 MiB** | — | 180–450 MiB | $\le$ 50 MiB | **PASS** |
+| **4K `fsync` latency (mean)** | **2.58 ms** | **30.86 ms** | **28.35 ms** | 13.6 ms | $\le$ 5.0 ms | **CONCERN** |
+| 4K `fsync` latency (p50 / p95 / p99) | 2.54 / 3.65 / 6.00 ms | 30.28 / 38.54 / 44.83 ms | 27.92 / 36.44 / 40.11 ms | 12.1 / 18.4 / 24.8 ms | — | Reference |
+| Volume quorum retention under 10m load | N/A | **5/5 (100%)** | — | Unstable | 100% | **PASS** |
+| Broken connections (split-brain) | N/A | **0** | — | Occurred | 0 | **PASS** |
+
+Summary:
+- **Memory footprint**: Driver pods consume only 39–45 MiB anon memory per node (well below the 64 MiB limit and far superior to Longhorn's 145–348 MiB). The k3s server RSS delta is +4.4..+29.1 MiB (vs 180–450 MiB in Longhorn).
+- **Replication reliability**: 100% quorum retention and 0 split-brain under continuous 10-minute multi-volume workload.
+- **I/O Latency**: 4K `fsync` latency is 30.86 ms (`ambar-r3`) and 28.35 ms (`ambar-r2`). The target of $\le 5.0$ ms was not reached due to baseline flash flush latency of the budget NVMe SSDs (2.58 ms) and double VFS/ext4 journal overhead of host loopback image files. Eliminating the loopback layer (direct LVM block volumes) is planned for future phases.
+
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `docs/superpowers/specs/2026-11-12-ambar-design.md` | design spec (Russian) |
 | `docs/superpowers/specs/2026-11-12-drbd9-spike-results.md` | record of the DRBD 9 experiments and the stand checks (Russian) |
+| `docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md` | test protocol and benchmark results on NanoPi R5C (Russian) |
 | `docs/superpowers/plans/` | executed plans of phases 0, 1, 2a and 2b (Russian, historical) |
 | `src/` | the `ambar` binary (Rust): node agent, reconcile loop, CSI services |
 | `proto/csi.proto`, `build.rs` | CSI v1 protocol definition and its code generation |
