@@ -1516,8 +1516,9 @@ impl Agent {
 
     /// Names of every object and every local leftover.
     async fn all_names(&self) -> Result<BTreeSet<String>, AgentError> {
+        let vg = self.options.volume_group.clone();
         let mut names = self
-            .blocking(|paths, _| local_volumes(paths))
+            .blocking(move |paths, _| local_volumes(paths, vg.as_deref()))
             .await?
             .map_err(|e| Self::reconcile_error("*", e))?;
         for object in self.volumes.list().await? {
