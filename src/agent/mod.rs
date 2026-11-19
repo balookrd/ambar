@@ -8,6 +8,7 @@ pub mod cleanup;
 pub mod decide;
 pub mod kube;
 pub mod local;
+pub mod metrics_server;
 pub mod nodes;
 pub mod quorum;
 pub mod replica_cmd;
