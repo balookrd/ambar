@@ -343,6 +343,36 @@ pub fn pod_uses_volume(pod: &k8s_openapi::api::core::v1::Pod, volume: &str, moun
     })
 }
 
+/// Resolves whether `pod` uses `volume`, checking `pod_uses_volume` and if needed querying
+/// referenced PVCs via API to verify `pvc.spec.volumeName == volume`.
+async fn pod_uses_volume_resolve(
+    client: &kube::Client,
+    pod: &k8s_openapi::api::core::v1::Pod,
+    volume: &str,
+    mounted_uids: &[String],
+) -> bool {
+    if pod_uses_volume(pod, volume, mounted_uids) {
+        return true;
+    }
+    let Some(ns) = pod.metadata.namespace.as_deref() else {
+        return false;
+    };
+    let Some(spec) = &pod.spec else {
+        return false;
+    };
+    for v in spec.volumes.as_deref().unwrap_or_default() {
+        if let Some(pvc_ref) = &v.persistent_volume_claim {
+            let pvcs: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
+            if let Ok(Ok(Some(pvc))) = bounded(pvcs.get_opt(&pvc_ref.claim_name)).await
+                && pvc.spec.and_then(|s| s.volume_name).as_deref() == Some(volume)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Discovers pod UIDs on the local node that have mounted `volume` under `/var/lib/kubelet/pods`.
 pub fn mounted_pod_uids_for_volume(kubelet_pods_dir: &std::path::Path, volume: &str) -> Vec<String> {
     let mut uids = Vec::new();
@@ -719,7 +749,7 @@ impl Volumes for KubeVolumes {
         let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
         let mut deleted = Vec::new();
         for pod in list.items {
-            if !pod_uses_volume(&pod, volume, mounted_uids) {
+            if !pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await {
                 continue;
             }
             let (Some(name), Some(ns)) = (pod.metadata.name.as_deref(), pod.metadata.namespace.as_deref()) else {
@@ -745,7 +775,7 @@ impl Volumes for KubeVolumes {
         let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(self.client.clone());
         let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
         for pod in list.items {
-            if pod_uses_volume(&pod, volume, mounted_uids) {
+            if pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await {
                 return Ok(true);
             }
         }
