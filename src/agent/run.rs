@@ -1385,10 +1385,17 @@ impl Agent {
         let name = volume.to_string();
         let removed = self
             .blocking(move |paths, runner| {
-                let guard = || match local(paths, &name) {
-                    Ok(state) if state.image => Err("a backing file exists on this node".to_string()),
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(format!("cannot inspect the backing file: {e}")),
+                let guard = || {
+                    if let Ok(Some(status)) = (Drbd { runner }).status(&name)
+                        && (status.role == Role::Primary || status.devices.iter().any(|d| d.open))
+                    {
+                        return Err("the resource is in use (Primary or open)".to_string());
+                    }
+                    match local(paths, &name) {
+                        Ok(state) if state.image => Err("a backing file exists on this node".to_string()),
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(format!("cannot inspect the backing file: {e}")),
+                    }
                 };
                 Reconciler { paths, runner }.remove_checked(&name, &guard)
             })
