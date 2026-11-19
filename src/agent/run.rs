@@ -424,8 +424,14 @@ enum CheckRetire {
 /// * `Pending`: the synced marker is absent, the device link of the volume is
 ///   on a loop device that holds this very file (`prove_device_link`), and
 ///   `Drbd::metadata` is `Absent` or `Fresh`.
-fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileState) -> Result<(), String> {
-    let now = file_state(paths, volume).map_err(|e| format!("cannot inspect the backing file: {e}"))?;
+fn prove_no_data(
+    paths: &Paths,
+    runner: &dyn Runner,
+    volume: &str,
+    file: FileState,
+    volume_group: Option<&str>,
+) -> Result<(), String> {
+    let now = file_state(paths, volume, volume_group).map_err(|e| format!("cannot inspect the backing file: {e}"))?;
     if now != file {
         return Err(format!(
             "the backing file was {file:?} at the decision and is {now:?} now; the next pass decides again"
@@ -434,16 +440,20 @@ fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileSta
     match file {
         FileState::Ready => Err("a backing file with the ready marker has appeared since the decision".to_string()),
         FileState::Absent => {
-            let devices = loops_holding(runner, &paths.image(volume))
-                .map_err(|e| format!("cannot tell whether a loop device holds the backing file: {e}"))?;
-            if devices.is_empty() {
+            if volume_group.is_some() {
                 Ok(())
             } else {
-                Err(format!(
-                    "the backing file is gone but a loop device still holds it ({}); it is not detached here, check \
-                     it by hand",
-                    devices.join(", ")
-                ))
+                let devices = loops_holding(runner, &paths.image(volume))
+                    .map_err(|e| format!("cannot tell whether a loop device holds the backing file: {e}"))?;
+                if devices.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "the backing file is gone but a loop device still holds it ({}); it is not detached here, check \
+                         it by hand",
+                        devices.join(", ")
+                    ))
+                }
             }
         }
         FileState::Pending => {
@@ -455,7 +465,11 @@ fn prove_no_data(paths: &Paths, runner: &dyn Runner, volume: &str, file: FileSta
                      deleted: check it by hand, then restore the ready marker or run `ambar remove --name {volume}`"
                 ));
             }
-            prove_pending_metadata(paths, runner, volume)
+            if volume_group.is_some() {
+                check_metadata_result(runner, volume)
+            } else {
+                prove_pending_metadata(paths, runner, volume)
+            }
         }
     }
 }
@@ -638,7 +652,8 @@ impl Agent {
 
     async fn read_local(&self, volume: &str) -> Result<Local, AgentError> {
         let name = volume.to_string();
-        self.blocking(move |paths, _| local(paths, &name))
+        let vg = self.options.volume_group.clone();
+        self.blocking(move |paths, _| local(paths, &name, vg.as_deref()))
             .await?
             .map_err(|e| Self::reconcile_error(volume, e))
     }
@@ -937,7 +952,9 @@ impl Agent {
     async fn delete_replica(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
         let file = {
             let name = volume.to_string();
-            self.blocking(move |paths, _| file_state(paths, &name)).await?
+            let vg = self.options.volume_group.clone();
+            self.blocking(move |paths, _| file_state(paths, &name, vg.as_deref()))
+                .await?
         };
         let file = match file {
             Ok(file) => file,
@@ -976,8 +993,9 @@ impl Agent {
                 FileState::Ready => return self.bring_up(volume, object).await,
                 FileState::Absent | FileState::Pending => {
                     let name = volume.to_string();
+                    let vg = self.options.volume_group.clone();
                     let proof = self
-                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file))
+                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file, vg.as_deref()))
                         .await?;
                     if let Err(why) = proof {
                         return self.keep(volume, object, None, &why, false).await;
@@ -1003,6 +1021,7 @@ impl Agent {
             .blocking(move |paths, runner| {
                 // Set when the guard refuses for a reason in the DRBD state.
                 let drbd_state = Cell::new(false);
+                let vg_guard = vg.clone();
                 let guard = || {
                     let status = Drbd { runner }
                         .status(&name)
@@ -1023,7 +1042,7 @@ impl Agent {
                                     "the resource has been configured in the kernel since the decision".to_string()
                                 );
                             }
-                            prove_no_data(paths, runner, &name, *file)
+                            prove_no_data(paths, runner, &name, *file, vg_guard.as_deref())
                         }
                     }
                 };
@@ -1079,7 +1098,9 @@ impl Agent {
     async fn retire_replica(&self, volume: &str, object: &ReplicatedVolume) -> Result<Outcome, AgentError> {
         let file = {
             let name = volume.to_string();
-            self.blocking(move |paths, _| file_state(paths, &name)).await?
+            let vg = self.options.volume_group.clone();
+            self.blocking(move |paths, _| file_state(paths, &name, vg.as_deref()))
+                .await?
         };
         let file = match file {
             Ok(file) => file,
@@ -1185,8 +1206,9 @@ impl Agent {
                 FileState::Ready => return self.bring_up(volume, object).await,
                 FileState::Absent | FileState::Pending => {
                     let name = volume.to_string();
+                    let vg = self.options.volume_group.clone();
                     let proof = self
-                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file))
+                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file, vg.as_deref()))
                         .await?;
                     if let Err(why) = proof {
                         return self.keep(volume, object, None, &why, false).await;
@@ -1203,6 +1225,7 @@ impl Agent {
         let removed = self
             .blocking(move |paths, runner| {
                 let drbd_state = Cell::new(false);
+                let vg_guard = vg.clone();
                 let guard = || {
                     let status = Drbd { runner }
                         .status(&name)
@@ -1226,7 +1249,7 @@ impl Agent {
                                     "the resource has been configured in the kernel since the decision".to_string()
                                 );
                             }
-                            prove_no_data(paths, runner, &name, *file)
+                            prove_no_data(paths, runner, &name, *file, vg_guard.as_deref())
                         }
                     }
                 };
@@ -1382,7 +1405,8 @@ impl Agent {
         let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
-                let guard = || match local(paths, &name) {
+                let vg_guard = vg.clone();
+                let guard = || match local(paths, &name, vg_guard.as_deref()) {
                     Ok(state) if state.image => Err("a backing file has appeared since the decision".to_string()),
                     Ok(_) => Ok(()),
                     Err(e) => Err(format!("cannot inspect the backing file: {e}")),
@@ -1434,13 +1458,14 @@ impl Agent {
         let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
+                let vg_guard = vg.clone();
                 let guard = || {
                     if let Ok(Some(status)) = (Drbd { runner }).status(&name)
                         && (status.role == Role::Primary || status.devices.iter().any(|d| d.open))
                     {
                         return Err("the resource is in use (Primary or open)".to_string());
                     }
-                    match local(paths, &name) {
+                    match local(paths, &name, vg_guard.as_deref()) {
                         Ok(state) if state.image => Err("a backing file exists on this node".to_string()),
                         Ok(_) => Ok(()),
                         Err(e) => Err(format!("cannot inspect the backing file: {e}")),

@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::backing::loop_holders;
+use crate::backing::{loop_holders, lvm_device_path};
 use crate::exec::Runner;
 use crate::model::{SpecError, valid_volume_name};
 use crate::paths::Paths;
@@ -66,12 +66,19 @@ fn names_in(dir: &Path, suffix: Option<&str>, into: &mut BTreeSet<String>) -> Re
 /// What the node holds for `volume`. A trace is a file that ambar writes (see
 /// `local_volumes`); a resource in the kernel is not one. A path that cannot
 /// be inspected is an error, never "absent": the answer decides whether a
-/// backing file counts.
-pub fn local(paths: &Paths, volume: &str) -> Result<Local, ReconcileError> {
+/// backing file counts. If `volume_group` is specified, the backing device is
+/// checked at `/dev/{vg}/{volume}` instead of the `.img` backing file.
+pub fn local(paths: &Paths, volume: &str, volume_group: Option<&str>) -> Result<Local, ReconcileError> {
     if !valid_volume_name(volume) {
         return Err(SpecError::Name(volume.to_string()).into());
     }
-    let image = exists(&paths.image(volume))?;
+    let image = match volume_group {
+        Some(vg) => {
+            let dev = lvm_device_path(vg, volume);
+            exists(Path::new(&dev))?
+        }
+        None => exists(&paths.image(volume))?,
+    };
     let synced = exists(&paths.synced_marker(volume))?;
     let traces = exists(&paths.res_file(volume))?
         || exists(&paths.applied_res(volume))?
@@ -82,12 +89,19 @@ pub fn local(paths: &Paths, volume: &str) -> Result<Local, ReconcileError> {
 /// The state of the backing file of `volume`, as `Reconciler::observe` sees
 /// it: absent, present without the ready marker (DRBD metadata was never
 /// created on it), or present with it. A path that cannot be inspected is an
-/// error, never "absent".
-pub fn file_state(paths: &Paths, volume: &str) -> Result<FileState, ReconcileError> {
+/// error, never "absent". If `volume_group` is specified, the backing device is
+/// checked at `/dev/{vg}/{volume}` instead of the `.img` backing file.
+pub fn file_state(paths: &Paths, volume: &str, volume_group: Option<&str>) -> Result<FileState, ReconcileError> {
     if !valid_volume_name(volume) {
         return Err(SpecError::Name(volume.to_string()).into());
     }
-    let image = exists(&paths.image(volume))?;
+    let image = match volume_group {
+        Some(vg) => {
+            let dev = lvm_device_path(vg, volume);
+            exists(Path::new(&dev))?
+        }
+        None => exists(&paths.image(volume))?,
+    };
     let ready = exists(&paths.ready_marker(volume))?;
     Ok(match (image, ready) {
         (false, _) => FileState::Absent,

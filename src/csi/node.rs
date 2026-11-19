@@ -786,7 +786,8 @@ impl NodeService {
         let result = self
             .agent
             .blocking(move |paths, runner| {
-                let guard = || match local(paths, &name) {
+                let vg_guard = volume_group.clone();
+                let guard = || match local(paths, &name, vg_guard.as_deref()) {
                     Ok(state) if state.image => Err("a backing file exists on this node".to_string()),
                     Ok(_) => Ok(()),
                     Err(e) => Err(format!("cannot inspect the backing file: {e}")),

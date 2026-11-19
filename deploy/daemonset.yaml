@@ -53,6 +53,9 @@ spec:
           # socket-dir). It is also the default of `ambar agent`.
           args:
             - --csi-socket=/var/lib/kubelet/plugins/ambar/csi.sock
+            # When running with direct LVM backend instead of loopback files, pass
+            # --volume-group=<vg> (or set the VOLUME_GROUP environment variable):
+            # - --volume-group=k3s-vg
           securityContext:
             privileged: true
           ports:
@@ -83,10 +86,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Optional: LVM Volume Group for direct block storage (e.g. k3s-vg).
+            # When omitted, ambar uses loopback file storage.
+            # - name: VOLUME_GROUP
+            #   value: "k3s-vg"
           volumeMounts:
             - {name: dev, mountPath: /dev}
             - {name: modules, mountPath: /lib/modules, readOnly: true}
             - {name: res, mountPath: /etc/drbd.d}
+            - {name: run-lvm, mountPath: /run/lvm}
             # Mount exactly the volumes directory, at the same path as on the
             # host: not a parent directory, not another path. After a pod is
             # replaced, the kernel lists the backing file of a loop device
@@ -148,6 +156,9 @@ spec:
           hostPath: {path: /dev}
         - name: modules
           hostPath: {path: /lib/modules}
+        # Host /run/lvm is needed for LVM2 device-mapper locks and lvmetad/dm state.
+        - name: run-lvm
+          hostPath: {path: /run/lvm, type: DirectoryOrCreate}
         # The install step creates both directories on every node: the agent
         # does not create the volumes directory and stops if it is missing.
         - name: res
