@@ -409,7 +409,7 @@ git commit -m "feat(stand): add r5c ambar deployment script" -- stand/r5c-deploy
 - Consumes: StorageClasses `ambar-r3`, `ambar-r2`, namespace `ambar-bench`, образ `ambar-fio:local`.
 - Produces: JSON-отчеты `stand/bench-fsync-r3.json` и `stand/bench-fsync-r2.json`, задержки fdatasync.
 
-- [ ] **Step 1: Создать скрипт замера задержек fsync `stand/r5c-bench-fsync.sh`**
+- [x] **Step 1: Создать скрипт замера задержек fsync `stand/r5c-bench-fsync.sh`**
 
 ```bash
 cat << 'EOF' > stand/r5c-bench-fsync.sh
@@ -537,12 +537,12 @@ EOF
 chmod +x stand/r5c-bench-fsync.sh
 ```
 
-- [ ] **Step 2: Запустить замер задержек fsync на `ambar-r3` и `ambar-r2`**
+- [x] **Step 2: Запустить замер задержек fsync на `ambar-r3` и `ambar-r2`**
 
 Run: `stand/r5c-bench-fsync.sh`
 Expected: Замеры для обоих StorageClass выполняются, формируется сравнительная таблица с `local-path`, средняя задержка `ambar-r3` выводится в миллисекундах.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add stand/r5c-bench-fsync.sh
