@@ -11017,3 +11017,32 @@ lima-dv-3: 03:52:22.376 ... cleaned leftovers ["down", "remove-res", "remove-app
 6. соблюдение правил валидации CRD: запрет прямого удаления реплик, смены роли `Replica -> Client`, добавления `Retiring` извне и присутствия более одного `Retiring`;
 7. проверку целостности данных после остановки писателя и чистое удаление тома;
 8. отсутствие ошибок RBAC (`forbidden`) и непредвиденных перезапусков контейнеров.
+
+## Проверки обработки отказов на стенде (Фаза 3)
+
+Сценарии сквозной проверки реализованы в `stand/failure-e2e.sh` и охватывают:
+1. **HTTP-сервер метрик Prometheus на порту 9770 (R38):**
+   - Проверка отдачи эндпоинта `:9770/metrics` на всех 4 узлах;
+   - Валидация формата OpenMetrics/Prometheus и наличия всех метрик: `ambar_node_allocated_bytes`, `ambar_node_tainted`, `ambar_volume_uptodate_replicas`, `ambar_volume_out_of_sync_bytes`, `ambar_volume_quorum`, `ambar_volume_standalone_connections`, `ambar_volume_manual_check_needed`, `ambar_module_info`;
+   - Проверка ответа 404 на некорректные URI.
+2. **Изоляция сети репликации и выставление taint `no-quorum:NoSchedule` (R32):**
+   - Блокировка DRBD-портов через `nftables` на узле писателя тома `ambar-r2` (2 реплики + 1 свидетель);
+   - Фиксация потери кворума в DRBD (`quorum: false`);
+   - Автоматическое выставление taint `ambar.balookrd.github.io/no-quorum:NoSchedule` на изолированный узел;
+   - Отражение в метриках: `ambar_node_tainted=1`, `ambar_volume_quorum=0`.
+3. **Grace period 30 с и выселение подов (R33):**
+   - Сохранение пода в течение первых 20 с после потери кворума (grace period в процессе);
+   - Выселение пода агентом через Kubernetes API (`delete_node_pods_for_volume`) по истечении 30 с;
+   - Перезапуск рабочей нагрузки на выжившем узле с кворумом (`dv-1`) без возврата на узел с taint `no-quorum`.
+4. **Восстановление сети и авто-adjust StandAlone (R34, R35):**
+   - Снятие правил `nftables` на изолированном узле;
+   - Том размонтирован, узел в роли `Secondary` видит состояние `StandAlone` (пиры продвинулись вперед);
+   - Агент автоматически запускает `drbdadm adjust`, соединение переходит в `Connected`, диск ресинхронизируется в `UpToDate`;
+   - Автоматическое снятие taint `no-quorum` с узла, сброс `ambar_node_tainted` в 0 и `manual_check_needed` в 0.
+5. **Очистка забытого узла `Client` без подов (R36):**
+   - Запуск читающего пода на узле без локальной копии данных (`dv-4`) с подключением в роли `Client`;
+   - После удаления пода агент в периодическом цикле обнаруживает отсутствие подов, выполняет `drbdadm down` и удаляет узел из `spec.nodes` и `status.nodes`.
+6. **Чистота стенда после отказов:**
+   - Полное удаление тестовых PVC и CRD ReplicatedVolume;
+   - Отсутствие зависших файлов томов, loop-устройств, taints и правил `nftables`;
+   - Отсутствие аварийных перезапусков контейнеров ambar в ходе сценария.
