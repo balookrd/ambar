@@ -48,7 +48,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       kmod util-linux e2fsprogs libkeyutils1 lvm2 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && sed -i -e 's/^[[:space:]]*#[[:space:]]*udev_sync = 1/udev_sync = 0/' \
+           -e 's/^[[:space:]]*#[[:space:]]*udev_rules = 1/udev_rules = 0/' /etc/lvm/lvm.conf
 COPY --from=module /out/ /opt/ambar/modules/
 COPY --from=utils /stage/usr/sbin/drbdadm /stage/usr/sbin/drbdsetup \
      /stage/usr/sbin/drbdmeta /usr/sbin/
