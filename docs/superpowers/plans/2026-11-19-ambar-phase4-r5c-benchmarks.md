@@ -901,24 +901,24 @@ git commit -m "docs(spec): add phase 4 r5c benchmark results protocol" -- docs/s
 - Consumes: фактические данные из протокола замеров `2026-11-19-ambar-phase4-r5c-results.md`.
 - Produces: обновленная синхронная двуязычная документация.
 
-- [ ] **Step 1: Обновить `README.md` и `README.ru.md` с фактическими цифрами замеров**
+- [x] **Step 1: Обновить `README.md` и `README.ru.md` с фактическими цифрами замеров**
 
 Заполнить итоговую таблицу производительности и потребления памяти фактическими данными, полученными на кластере NanoPi R5C.
 
-- [ ] **Step 2: Обновить архитектурную спецификацию `docs/superpowers/specs/2026-11-12-ambar-design.md`**
+- [x] **Step 2: Обновить архитектурную спецификацию `docs/superpowers/specs/2026-11-12-ambar-design.md`**
 
 Отметить успешное прохождение всех критериев Фазы 4.
 
-- [ ] **Step 3: Обновить память проекта Claude `~/.claude/projects/-Users-mvmalykh-IdeaProjects-ambar/memory/MEMORY.md`**
+- [x] **Step 3: Обновить память проекта Claude `~/.claude/projects/-Users-mvmalykh-IdeaProjects-ambar/memory/MEMORY.md`**
 
 Зафиксировать статус Фазы 4, конфигурацию R5C и результаты бенчмарков.
 
-- [ ] **Step 4: Прогнать тесты и локальный гейт качества**
+- [x] **Step 4: Прогнать тесты и локальный гейт качества**
 
 Run: `cargo test --locked && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings`
 Expected: Все юнит- и интеграционные тесты проходят, гейт качества зелёный.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md README.ru.md docs/superpowers/specs/2026-11-12-ambar-design.md
