@@ -3,3 +3,5 @@
 /image/ambar
 .idea/
 /.code-index/
+__pycache__/
+*.pyc
