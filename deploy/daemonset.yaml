@@ -53,9 +53,7 @@ spec:
           # socket-dir). It is also the default of `ambar agent`.
           args:
             - --csi-socket=/var/lib/kubelet/plugins/ambar/csi.sock
-            # When running with direct LVM backend instead of loopback files, pass
-            # --volume-group=<vg> (or set the VOLUME_GROUP environment variable):
-            # - --volume-group=k3s-vg
+            - --volume-group=k3s-vg
           securityContext:
             privileged: true
           ports:
@@ -86,10 +84,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Optional: LVM Volume Group for direct block storage (e.g. k3s-vg).
-            # When omitted, ambar uses loopback file storage.
-            # - name: VOLUME_GROUP
-            #   value: "k3s-vg"
+            - name: VOLUME_GROUP
+              value: "k3s-vg"
           volumeMounts:
             - {name: dev, mountPath: /dev}
             - {name: modules, mountPath: /lib/modules, readOnly: true}
