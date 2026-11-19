@@ -1,0 +1,213 @@
+# Спецификация дизайна Фазы 5: Переход на LVM бэкенд и прямые блочные устройства DRBD
+
+**Дата:** 2026-11-19  
+**Статус:** Утверждено  
+**Целевое железо:** Кластер 3x FriendlyElec NanoPi R5C (`k3s-1`, `k3s-2`, `k3s-3`), Debian 13 trixie, ядро `6.12.116+deb13-arm64`.
+
+---
+
+## 1. Контекст и цели
+
+### 1.1 Проблема
+По результатам инструментальных замеров Фазы 4 на физическом кластере NanoPi R5C (протокол `docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`):
+- Задержка 4K синхронного `fsync` (`fio`, Protocol C, 3 дисковые копии) составила **30.86 мс**, при задержке локального NVMe в **2.58 мс**.
+- Анализ показал, что задержка обусловлена накладными расходами двойного слоя файловой системы `ext4` и двойного журнала `JBD2`:
+  $$\text{fio} \xrightarrow{\text{fsync}} \text{внутренняя ext4} \to \text{DRBD 9} \xrightarrow{\text{lan0}} \text{loopback (/dev/loopX)} \to \text{файлы .img} \to \text{внешняя хостовая ext4 (JBD2)} \xrightarrow{\text{NVMe FLUSH}} \text{SSD}$$
+- Каждый синхронный вызов `fsync` на 3 узлах вызывает множественные сбросы кэша накопителей и транзакций JBD2, умножая аппаратное время ожидания.
+
+### 1.2 Цели архитектурного перехода
+1. **Исключение хостовой файловой системы и loopback-устройств**:
+   - Перевод накопителей NVMe всех узлов на прямую разметку **LVM2**.
+   - Прямая передача блочных томов LVM (`/dev/k3s-vg/pvc-<UUID>`) в модуль DRBD 9 без промежуточных разреженных файлов (`fallocate`) и `losetup`.
+2. **Ожидаемый выигрыш**:
+   - Снижение задержки `fsync` 4K в режиме Protocol C с **30.86 мс** до **~8–12 мс**.
+   - В асинхронном режиме Protocol A — до **~2.8–3.5 мс** (вплотную к аппаратной скорости локального NVMe 2.58 мс).
+   - Нулевая фрагментация дискового пространства и исключение D-state ядра при конкурентном сбросе loopback-буферов.
+3. **Безопасность боевого кластера**:
+   - Бесшовный переезд нода за нодой (drain $\to$ backup $\to$ partition/LVM $\to$ restore $\to$ uncordon) без потери данных кластера k3s и боевых сервисов.
+4. **Инфраструктурная воспроизводимость**:
+   - Автоматизация разметки чистых узлов с нуля и синхронная актуализация документации (`README.md`, `README.ru.md`).
+
+---
+
+## 2. Архитектура хранилища узла
+
+### 2.1 Физическая разметка NVMe (`/dev/nvme0n1`, 119.2 ГБ)
+Накопитель NVMe целиком отдается под LVM Physical Volume (PV):
+- **PV**: `/dev/nvme0n1` (119.2 ГБ).
+- **Volume Group**: `k3s-vg` (119.2 ГБ, размер экстента PE = 4 МиБ).
+- **Системный Logical Volume**: `lv_k3s`:
+  - Размер: **35 ГБ** (линейный thick-том).
+  - Файловая система: `ext4` с меткой `LABEL=k3s-data`.
+  - Точка монтирования: `/var/lib/rancher`.
+  - Запись в `/etc/fstab`:
+    ```text
+    /dev/k3s-vg/lv_k3s  /var/lib/rancher  ext4  defaults,noatime,nofail,x-systemd.device-timeout=30s  0  2
+    ```
+- **Свободное пространство в VG**: **~84.2 ГБ** нераспределенных PE, зарезервированных под тома `ambar`.
+
+### 2.2 Модель выделения блочных томов ambar
+Для каждого тома PVC `pvc-<UUID>` требуемого полезного объема $S$ байт:
+1. Вычисляется размер бэкенд-устройства с учетом внутренних метаданных DRBD:
+   $$S_{backing} = \text{backing\_bytes}(S, \text{max\_peers})$$
+2. Создается блочное устройство LVM:
+   ```bash
+   lvcreate -y -L <S_backing>B -n <volume_name> k3s-vg
+   ```
+3. Ресурс DRBD генерируется напрямую для блочного устройства:
+   ```text
+   resource pvc-xxxx {
+       ...
+       on k3s-1 {
+           node-id 0;
+           device /dev/drbd1000;
+           disk   /dev/k3s-vg/pvc-xxxx;
+           meta-disk internal;
+           address 10.10.10.11:7000;
+       }
+       ...
+   }
+   ```
+4. Удаление тома:
+   ```bash
+   lvremove -y /dev/k3s-vg/<volume_name>
+   ```
+
+---
+
+## 3. Изменения в кодовой базе `ambar`
+
+### 3.1 Модуль хранилища (`src/backing.rs` / `src/storage.rs`)
+Вводится перечисление типов бэкенда:
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackingBackend {
+    /// Целевой режим на реальных узлах: блочные устройства в LVM Volume Group
+    Lvm { vg_name: String },
+    /// Режим обратной совместимости (Lima VM, локальные тесты): разреженные файлы + loopback
+    Loop { dir: PathBuf },
+}
+```
+
+Агент получает новый аргумент CLI:
+- `--volume-group=<VG_NAME>` (например, `--volume-group=k3s-vg`). При наличии флага драйвер активирует LVM бэкенд.
+- `--volumes-dir=<DIR>` сохраняется для обратной совместимости при работе на виртуальном стенде без LVM.
+
+Операции LVM абстрагируются через трейт `Runner`:
+- `create_volume(runner, vg, name, bytes)` $\to$ `lvcreate -y -L <bytes>B -n <name> <vg>`
+- `remove_volume(runner, vg, name)` $\to$ `lvremove -y /dev/<vg>/<name>`
+- `volume_exists(runner, vg, name)` $\to$ `lvs --noheadings -o lv_name /dev/<vg>/<name>`
+- `device_path(vg, name)` $\to$ `/dev/<vg>/<name>`
+
+### 3.2 Контейнерный образ (`image/Dockerfile`)
+- В базовый слой рантайма (`debian:trixie-slim`) добавляется пакет `lvm2`:
+  ```dockerfile
+  RUN apt-get update \
+   && apt-get install -y --no-install-recommends \
+        kmod util-linux e2fsprogs libkeyutils1 lvm2 \
+   && rm -rf /var/lib/apt/lists/*
+  ```
+
+### 3.3 Манифесты Kubernetes (`deploy/daemonset.yaml`)
+- Добавляется монтирование `/run/lvm` (hostPath) в контейнер `ambar` для корректной работы блокировок LVM device-mapper.
+- Флаг запуска агента дополняется аргументом `--volume-group=k3s-vg`.
+
+---
+
+## 4. Пошаговый регламент миграции кластера (нода за нодой)
+
+### 4.1 Предварительные проверки
+1. Установка `lvm2` на всех узлах:
+   ```bash
+   for n in k3s-1 k3s-2 k3s-3; do ssh $n "sudo apt-get update && sudo apt-get install -y lvm2"; done
+   ```
+2. Проверка свободного места на eMMC (`/dev/mmcblk1p2`):
+   - `k3s-1`: >50 ГБ; `k3s-2`: >24 ГБ; `k3s-3`: >24 ГБ.
+
+### 4.2 Очередность выполнения
+Строгая последовательность:
+1. `k3s-3` (пилотный узел, follower).
+2. `k3s-2` (второй узел, follower).
+3. `k3s-1` (узел с сервисами `home`/`smarthome`).
+
+### 4.3 Шаги для узла $N$:
+1. **Drain узла**:
+   ```bash
+   kubectl cordon $NODE
+   kubectl drain $NODE --ignore-daemonsets --delete-emptydir-data --force
+   ```
+2. **Остановка сервиса k3s**:
+   ```bash
+   sudo systemctl stop k3s
+   ```
+3. **Резервное копирование на eMMC**:
+   ```bash
+   sudo tar --sparse -czf /root/k3s-backup-${NODE}.tar.gz /var/lib/rancher
+   sudo tar -tzf /root/k3s-backup-${NODE}.tar.gz > /dev/null
+   ```
+4. **Размонтирование и инициализация LVM**:
+   ```bash
+   sudo umount /var/lib/rancher
+   sudo wipefs -a /dev/nvme0n1
+   sudo pvcreate -f /dev/nvme0n1
+   sudo vgcreate k3s-vg /dev/nvme0n1
+   sudo lvcreate -L 35G -n lv_k3s k3s-vg
+   sudo mkfs.ext4 -L k3s-data /dev/k3s-vg/lv_k3s
+   ```
+5. **Обновление `/etc/fstab` и монтирование**:
+   ```text
+   /dev/k3s-vg/lv_k3s  /var/lib/rancher  ext4  defaults,noatime,nofail,x-systemd.device-timeout=30s  0  2
+   ```
+   ```bash
+   sudo mount /var/lib/rancher
+   ```
+6. **Восстановление данных k3s**:
+   ```bash
+   sudo tar -xzf /root/k3s-backup-${NODE}.tar.gz -C /
+   ```
+7. **Запуск k3s и возврат узла в строй**:
+   ```bash
+   sudo systemctl start k3s
+   # Ожидание готовности узла в Kubernetes
+   kubectl wait --for=condition=Ready node/${NODE} --timeout=120s
+   kubectl uncordon ${NODE}
+   ```
+8. **Контрольная пауза**: 2 минуты наблюдения за состоянием etcd и подов перед переходом к следующей ноде.
+
+---
+
+## 5. Инфраструктурные скрипты и документация
+
+### 5.1 Автоматизация чистой ноды с нуля
+1. `stand/r5c-init-node.sh`:
+   - Устанавливает `lvm2`.
+   - Инициализирует PV `/dev/nvme0n1`, VG `k3s-vg`, LV `lv_k3s` (35 ГБ).
+   - Форматирует `mkfs.ext4 -L k3s-data /dev/k3s-vg/lv_k3s`.
+   - Настраивает `/etc/fstab` и монтирует `/var/lib/rancher`.
+   - Создает базовые каталоги под k3s и kubelet.
+2. `stand/r5c-install-k3s.sh`:
+   - Накатывает k3s server на первый узел (`--cluster-init`) или присоединяет последующие узлы через интерконнект `lan0`.
+3. `stand/r5c-migrate-lvm.sh`:
+   - Автоматизированный оркестратор понодовой безопасной миграции работающего кластера с интерактивным подтверждением каждого шага.
+4. Обновление `stand/r5c-preflight.sh`:
+   - Проверка наличия `k3s-vg`, доступности $\ge 50$ ГБ свободных PE в VG и статуса `lv_k3s`.
+
+### 5.2 Документация (`README.md`, `README.ru.md`)
+- Обновление требований к разметке узлов: LVM `k3s-vg` вместо одиночного ext4 раздела на весь NVMe.
+- Руководство по подготовке новых узлов кластера с нуля.
+- Описание архитектуры LVM бэкенда в секции дизайна.
+
+---
+
+## 6. План верификации
+
+1. **Юнит-тесты**:
+   - Новые тесты для LVM backend в `src/tests/` с эмуляцией команд `lvcreate`, `lvremove`, `lvs` через `FakeRunner`.
+   - 100% прохождение существующих 902 тестов драйвера.
+2. **Верификация миграции на стенде R5C**:
+   - Успешная поочередная миграция `k3s-3`, `k3s-2`, `k3s-1`.
+   - Нулевой даунтайм кластера, etcd кворум непрерывно 3/3.
+   - Развертывание ambar с поддержкой LVM в `ambar-system`.
+3. **Замер задержки fsync**:
+   - Запуск `stand/r5c-bench-fsync.sh` на LVM томах.
+   - Сравнение с базовой задержкой loopback (30.86 мс) и фиксация результатов в обновленном протоколе.
