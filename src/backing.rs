@@ -6,6 +6,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use crate::exec::{Runner, command_line};
+use crate::model::{valid_volume_group_name, valid_volume_name};
 
 const SECTOR: u64 = 512;
 /// One bitmap extent covers 2^18 sectors.
@@ -27,6 +28,10 @@ pub enum BackingError {
     MultipleLoopDevices { file: String, devices: Vec<String> },
     #[error("{command} printed unexpected output: {output:?}")]
     UnexpectedOutput { command: String, output: String },
+    #[error("invalid volume group name {0:?}")]
+    InvalidVolumeGroup(String),
+    #[error("invalid volume name {0:?}")]
+    InvalidVolumeName(String),
 }
 
 /// Size of DRBD's internal metadata on a backing device of `device_bytes`
@@ -332,30 +337,59 @@ pub fn lvm_device_path(vg: &str, lv_name: &str) -> String {
 
 /// Checks whether an LVM logical volume exists in the volume group via `lvs`.
 pub fn find_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str) -> Result<bool, BackingError> {
+    if !valid_volume_group_name(vg) {
+        return Err(BackingError::InvalidVolumeGroup(vg.to_string()));
+    }
+    if !valid_volume_name(lv_name) {
+        return Err(BackingError::InvalidVolumeName(lv_name.to_string()));
+    }
     let dev = lvm_device_path(vg, lv_name);
-    let args = ["--noheadings", "-o", "lv_name", &dev];
+    let args = ["--noheadings", "-o", "lv_name", "--", &dev];
     match checked(runner, "lvs", &args) {
         Ok(_) => Ok(true),
-        Err(BackingError::Command { stderr, .. })
-            if stderr.contains("not found") || stderr.contains("Failed to find") =>
-        {
-            Ok(false)
+        Err(BackingError::Command { command, code, stderr }) => {
+            let lower = stderr.to_lowercase();
+            if !lower.contains("volume group") && (stderr.contains("not found") || stderr.contains("Failed to find")) {
+                Ok(false)
+            } else {
+                Err(BackingError::Command { command, code, stderr })
+            }
         }
         Err(e) => Err(e),
     }
 }
 
 /// Creates a new LVM logical volume in `vg` of `bytes` size via `lvcreate`.
+/// Discards or wipes the contents of the logical volume so stale filesystem or
+/// DRBD metadata does not confuse subsequent mounts or syncs.
 pub fn create_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str, bytes: u64) -> Result<(), BackingError> {
+    if !valid_volume_group_name(vg) {
+        return Err(BackingError::InvalidVolumeGroup(vg.to_string()));
+    }
+    if !valid_volume_name(lv_name) {
+        return Err(BackingError::InvalidVolumeName(lv_name.to_string()));
+    }
     let size_arg = format!("{bytes}B");
-    checked(runner, "lvcreate", &["-y", "-L", &size_arg, "-n", lv_name, vg])?;
+    checked(runner, "lvcreate", &["-y", "-L", &size_arg, "-n", lv_name, "--", vg])?;
+    let dev = lvm_device_path(vg, lv_name);
+    if checked(runner, "blkdiscard", &["--", &dev]).is_err() {
+        let _ = checked(runner, "wipefs", &["-a", "-f", "--", &dev]);
+    }
     Ok(())
 }
 
 /// Irrevocably removes an LVM logical volume via `lvremove`.
+/// Discards data prior to removal if supported to return blocks to the pool.
 pub fn remove_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str) -> Result<(), BackingError> {
+    if !valid_volume_group_name(vg) {
+        return Err(BackingError::InvalidVolumeGroup(vg.to_string()));
+    }
+    if !valid_volume_name(lv_name) {
+        return Err(BackingError::InvalidVolumeName(lv_name.to_string()));
+    }
     let dev = lvm_device_path(vg, lv_name);
-    checked(runner, "lvremove", &["-y", &dev])?;
+    let _ = checked(runner, "blkdiscard", &["--", &dev]);
+    checked(runner, "lvremove", &["-y", "--", &dev])?;
     Ok(())
 }
 

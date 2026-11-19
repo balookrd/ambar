@@ -62,3 +62,21 @@ fn the_quorum_policy_is_always_explicit() {
     let text = render(&spec, Path::new("/dev/ambar/spike2"));
     assert!(text.contains("quorum majority; on-no-quorum io-error;"), "{text}");
 }
+
+#[test]
+fn safe_backing_device_path_validation() {
+    assert!(is_safe_backing_device_path(Path::new("/dev/ambar/spike2")));
+    assert!(is_safe_backing_device_path(Path::new("/dev/k3s-vg/pvc-123+4")));
+    assert!(!is_safe_backing_device_path(Path::new("relative/path")));
+    assert!(!is_safe_backing_device_path(Path::new("/dev/vg/evil; injection")));
+    assert!(!is_safe_backing_device_path(Path::new("/dev/vg/evil\nnewline")));
+    assert!(!is_safe_backing_device_path(Path::new("/dev/vg/evil{brace}")));
+    assert!(!is_safe_backing_device_path(Path::new("/dev/vg/evil\"quote")));
+}
+
+#[test]
+#[should_panic(expected = "unsafe backing device path")]
+fn render_panics_on_unsafe_backing_device_path() {
+    let spec = VolumeSpec::from_json(TWO_COPIES_ONE_DISKLESS).unwrap();
+    render(&spec, Path::new("/dev/ambar/evil; injection"));
+}

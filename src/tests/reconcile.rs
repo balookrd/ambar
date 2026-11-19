@@ -2210,7 +2210,7 @@ fn lvm_observe_detects_existing_and_absent_volume() {
     // 2. Existing volume with ready marker
     fs::write(paths.ready_marker("spike"), "").unwrap();
     let runner_present = FakeRunner::new(|program, args| match (program, args) {
-        ("lvs", ["--noheadings", "-o", "lv_name", "/dev/k3s-vg/spike"]) => out(0, "spike\n", ""),
+        ("lvs", ["--noheadings", "-o", "lv_name", "--", "/dev/k3s-vg/spike"]) => out(0, "spike\n", ""),
         ("drbdsetup", _) => out(0, "[\n]\n\n", ""),
         _ => out(0, "", ""),
     });
@@ -2238,18 +2238,19 @@ fn lvm_apply_creates_lv_and_remove_deletes_it() {
     let skipped = Arc::new(AtomicBool::new(false));
     let skipped_clone = skipped.clone();
     let runner = FakeRunner::new(move |program, args| match (program, args) {
-        ("lvs", ["--noheadings", "-o", "lv_name", "/dev/k3s-vg/spike"]) => {
+        ("lvs", ["--noheadings", "-o", "lv_name", "--", "/dev/k3s-vg/spike"]) => {
             if lv_created_clone.load(Ordering::SeqCst) {
                 out(0, "spike\n", "")
             } else {
                 out(5, "", "Failed to find logical volume \"k3s-vg/spike\"\n")
             }
         }
-        ("lvcreate", ["-y", "-L", _, "-n", "spike", "k3s-vg"]) => {
+        ("lvcreate", ["-y", "-L", _, "-n", "spike", "--", "k3s-vg"]) => {
             lv_created_clone.store(true, Ordering::SeqCst);
             out(0, "", "")
         }
-        ("lvremove", ["-y", "/dev/k3s-vg/spike"]) => {
+        ("blkdiscard", ["--", "/dev/k3s-vg/spike"]) => out(0, "", ""),
+        ("lvremove", ["-y", "--", "/dev/k3s-vg/spike"]) => {
             lv_created_clone.store(false, Ordering::SeqCst);
             out(0, "", "")
         }

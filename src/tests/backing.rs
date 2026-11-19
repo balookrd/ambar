@@ -494,9 +494,10 @@ fn has_any_loop_reference_finds_unconfirmed_and_ignores_absent() {
 #[test]
 fn test_lvm_create_and_remove() {
     let runner = FakeRunner::new(|program, args| match (program, args) {
-        ("lvs", ["--noheadings", "-o", "lv_name", "/dev/k3s-vg/pvc-test"]) => out(0, "pvc-test\n", ""),
-        ("lvcreate", ["-y", "-L", "1073741824B", "-n", "pvc-test", "k3s-vg"]) => out(0, "", ""),
-        ("lvremove", ["-y", "/dev/k3s-vg/pvc-test"]) => out(0, "", ""),
+        ("lvs", ["--noheadings", "-o", "lv_name", "--", "/dev/k3s-vg/pvc-test"]) => out(0, "pvc-test\n", ""),
+        ("lvcreate", ["-y", "-L", "1073741824B", "-n", "pvc-test", "--", "k3s-vg"]) => out(0, "", ""),
+        ("blkdiscard", ["--", "/dev/k3s-vg/pvc-test"]) => out(0, "", ""),
+        ("lvremove", ["-y", "--", "/dev/k3s-vg/pvc-test"]) => out(0, "", ""),
         _ => out(1, "", "unexpected"),
     });
 
@@ -506,9 +507,35 @@ fn test_lvm_create_and_remove() {
     assert_eq!(
         runner.calls(),
         [
-            "lvs --noheadings -o lv_name /dev/k3s-vg/pvc-test",
-            "lvcreate -y -L 1073741824B -n pvc-test k3s-vg",
-            "lvremove -y /dev/k3s-vg/pvc-test"
+            "lvs --noheadings -o lv_name -- /dev/k3s-vg/pvc-test",
+            "lvcreate -y -L 1073741824B -n pvc-test -- k3s-vg",
+            "blkdiscard -- /dev/k3s-vg/pvc-test",
+            "blkdiscard -- /dev/k3s-vg/pvc-test",
+            "lvremove -y -- /dev/k3s-vg/pvc-test"
+        ]
+    );
+}
+
+#[test]
+fn test_lvm_create_fallback_to_wipefs_when_blkdiscard_fails() {
+    let runner = FakeRunner::new(|program, args| match (program, args) {
+        ("lvcreate", ["-y", "-L", "1073741824B", "-n", "pvc-test", "--", "k3s-vg"]) => out(0, "", ""),
+        ("blkdiscard", ["--", "/dev/k3s-vg/pvc-test"]) => out(
+            1,
+            "",
+            "blkdiscard: /dev/k3s-vg/pvc-test: BLKDISCARD ioctl failed: Operation not supported\n",
+        ),
+        ("wipefs", ["-a", "-f", "--", "/dev/k3s-vg/pvc-test"]) => out(0, "", ""),
+        _ => out(1, "", "unexpected"),
+    });
+
+    crate::backing::create_lvm_volume(&runner, "k3s-vg", "pvc-test", 1073741824).unwrap();
+    assert_eq!(
+        runner.calls(),
+        [
+            "lvcreate -y -L 1073741824B -n pvc-test -- k3s-vg",
+            "blkdiscard -- /dev/k3s-vg/pvc-test",
+            "wipefs -a -f -- /dev/k3s-vg/pvc-test"
         ]
     );
 }
@@ -517,4 +544,34 @@ fn test_lvm_create_and_remove() {
 fn test_lvm_find_not_found() {
     let runner = FakeRunner::new(|_, _| out(5, "", "Failed to find logical volume \"k3s-vg/pvc-missing\"\n"));
     assert!(!crate::backing::find_lvm_volume(&runner, "k3s-vg", "pvc-missing").unwrap());
+}
+
+#[test]
+fn test_lvm_find_vg_missing_returns_error() {
+    let runner = FakeRunner::new(|_, _| {
+        out(
+            5,
+            "",
+            "  Volume group \"k3s-vg\" not found\n  Cannot process volume group k3s-vg\n",
+        )
+    });
+    let err = crate::backing::find_lvm_volume(&runner, "k3s-vg", "pvc-missing").unwrap_err();
+    assert!(matches!(err, BackingError::Command { .. }));
+}
+
+#[test]
+fn test_lvm_validation_errors() {
+    let runner = FakeRunner::new(|_, _| out(0, "", ""));
+    assert!(matches!(
+        crate::backing::find_lvm_volume(&runner, "../evil", "pvc-test"),
+        Err(BackingError::InvalidVolumeGroup(_))
+    ));
+    assert!(matches!(
+        crate::backing::create_lvm_volume(&runner, "k3s-vg", "invalid name!", 1024),
+        Err(BackingError::InvalidVolumeName(_))
+    ));
+    assert!(matches!(
+        crate::backing::remove_lvm_volume(&runner, "-evil-vg", "pvc-test"),
+        Err(BackingError::InvalidVolumeGroup(_))
+    ));
 }
