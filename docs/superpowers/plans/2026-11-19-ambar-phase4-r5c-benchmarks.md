@@ -294,7 +294,7 @@ git commit -m "feat(stand): add r5c preflight and baseline benchmark scripts" --
 - Consumes: `deploy/*`, `image/build.sh`, `stand/r5c-lib.sh`.
 - Produces: работающий DaemonSet `ambar` в namespace `ambar-system`, StorageClasses `ambar-r3` и `ambar-r2`, регистрация в CSINode.
 
-- [ ] **Step 1: Создать скрипт развертывания `stand/r5c-deploy.sh`**
+- [x] **Step 1: Создать скрипт развертывания `stand/r5c-deploy.sh`**
 
 ```bash
 cat << 'EOF' > stand/r5c-deploy.sh
@@ -381,17 +381,17 @@ EOF
 chmod +x stand/r5c-deploy.sh
 ```
 
-- [ ] **Step 2: Запустить развертывание ambar на физическом кластере**
+- [x] **Step 2: Запустить развертывание ambar на физическом кластере**
 
 Run: `stand/r5c-deploy.sh`
 Expected: Образ собран, загружен в containerd на k3s-1..3, применены манифесты, rollout ds/ambar завершен, driver зарегистрирован в CSINode на всех трех узлах.
 
-- [ ] **Step 3: Проверить статус подов и загрузку DRBD 9 в ядро**
+- [x] **Step 3: Проверить статус подов и загрузку DRBD 9 в ядро**
 
 Run: `kubectl -n ambar-system get pods -o wide`
 Expected: 3 пода `ambar-...` в статусе Running 3/3, по одному на каждом физическом узле.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add stand/r5c-deploy.sh
