@@ -10,13 +10,13 @@ single Rust binary running as a DaemonSet.
 
 | Part | State |
 |---|---|
-| Design spec | brought in line with the code of phase 2b; open questions listed at its end |
+| Design spec | brought in line with the code of phase 3; open questions listed at its end |
 | Image with a prebuilt DRBD 9.3.4 module and drbd-utils 9.35.0 | builds, has tests |
 | Test stand: four Lima VMs with k3s | scripts in `stand/` |
 | DRBD 9 failure experiments on the stand | recorded with raw outputs |
-| CSI driver | creates, mounts and deletes volumes through PVCs on the stand (`stand/csi-e2e.sh`); node failures are not handled |
+| CSI driver | creates, mounts and deletes volumes through PVCs on the stand (`stand/csi-e2e.sh`); handles node and network failures (`stand/failure-e2e.sh`) |
 | Changing the replica set of an existing volume (phase 2b) | implemented: CLI commands `ambar replica add`, `remove`, `move` with safety rules and witness rebalancing (`stand/replica-e2e.sh`) |
-| Node failure handling (phase 3): releasing a volume on quorum loss, the `no-quorum` taint, `adjust` on `StandAlone`, metrics | not implemented |
+| Node failure handling (phase 3): releasing a volume on quorum loss, the `no-quorum` taint, `adjust` on `StandAlone`, metrics | implemented: `no-quorum` taint, 30s grace period pod eviction, auto-adjust on StandAlone, Client cleanup, Prometheus metrics on `:9770/metrics` (`stand/failure-e2e.sh`) |
 | Production run | not done: nothing here has run on a production cluster |
 | Measurements on the target hardware (NanoPi R5C) | not done |
 
@@ -28,6 +28,10 @@ single Rust binary running as a DaemonSet.
   detaches when the pod is gone.
 - Existing volumes can change replica count and placement on the fly (`ambar replica add`,
   `remove`, `move`) without I/O downtime.
+- Automatic quorum loss handling: when a mounted volume loses DRBD quorum, the node is tainted with `ambar.balookrd.github.io/no-quorum:NoSchedule`. After a 30s grace period, the agent evicts the pod via the Kubernetes API so that the workload is rescheduled onto a node with quorum. The taint is automatically removed when quorum recovers.
+- Automatic reconnect: connections in `StandAlone` on Secondary nodes are automatically adjusted (`drbdadm adjust`), reconnecting and resyncing disks to `UpToDate`. If reconnect fails after 3 attempts (split-brain), metric `ambar_volume_manual_check_needed` is raised.
+- Automatic cleanup of stale `Client` attachments when no pods on the node use the volume.
+- Built-in Prometheus metrics HTTP server on port 9770 (`:9770/metrics`).
 - With `protocol: C` a write is acknowledged after it is on the disks of all
   nodes that hold a copy.
 - One node mounts a volume at a time (`ReadWriteOnce`, `ReadWriteOncePod`).
@@ -58,6 +62,31 @@ Flags:
 Exit codes:
 - `0`: the replica change is complete.
 - `1`: the change failed, timed out, or was rejected by safety rules (e.g. attempting to remove the active Primary replica or leaving fewer than 2 replicas).
+
+## Failure handling and metrics
+
+The agent continuously monitors DRBD resources, network quorum, and connections on each node:
+
+- **Quorum loss & pod eviction**: If a mounted volume loses DRBD quorum, the node is immediately tainted with `ambar.balookrd.github.io/no-quorum:NoSchedule`. If quorum is not recovered within the grace period (30s), the agent deletes the local pods using the volume to allow Kubernetes to reschedule them onto a healthy node with quorum.
+- **Auto-reconnect & split-brain**: When a DRBD connection enters `StandAlone` on a Secondary node, the agent executes `drbdadm adjust` every 5s (up to 3 attempts). If the connection reconnects (`Connected`), the disk resyncs to `UpToDate`. If it remains `StandAlone` after 3 attempts, the gauge `ambar_volume_manual_check_needed` is set to `1` indicating manual resolution is required (and resets to `0` once connected).
+- **Stale client cleanup**: When a pod on a `Client` node terminates or is deleted, the agent automatically tears down the DRBD resource (`drbdadm down`) and patches `spec.nodes` to remove the client entry, freeing up the peer slot.
+- **Prometheus metrics**: The agent serves metrics on HTTP port 9770 (`:9770/metrics`).
+
+Agent CLI flags:
+- `--failure-poll-interval <seconds>`: interval between failure loop checks (default: `2s`).
+- `--quorum-grace-period <seconds>`: duration before evicting pods on quorum loss (default: `30s`).
+- `--adjust-attempts <count>`: maximum auto-adjust retries for `StandAlone` (default: `3`).
+- `--adjust-interval <seconds>`: delay between adjust retries (default: `5s`).
+- `--metrics-port <port>`: HTTP port for Prometheus metrics (default: `9770`).
+- `--metrics-bind <ip>`: bind address for metrics (default: `0.0.0.0`).
+
+Exported Prometheus metrics:
+- `ambar_node_allocated_bytes{node}`: total allocated sparse volume file bytes on the node.
+- `ambar_node_tainted{node}`: `1` if node is tainted with `no-quorum:NoSchedule`, `0` otherwise.
+- `ambar_volume_quorum{node, volume}`: `1` if the volume has DRBD quorum on the node, `0` otherwise.
+- `ambar_volume_standalone_connections{node, volume}`: count of peer connections in `StandAlone` state.
+- `ambar_volume_manual_check_needed{node, volume}`: `1` if auto-adjust attempts are exhausted (split-brain alert), `0` otherwise.
+- `ambar_module_info{version}`: DRBD kernel module version info metric.
 
 ## Repository layout
 
@@ -112,7 +141,7 @@ Linux kernel.
 cargo test
 ```
 
-Expected line: `test result: ok. 828 passed`. The mount code has tests that run
+Expected line: `test result: ok. 902 passed`. The mount code has tests that run
 only on Linux; on macOS run the suite in a container as well:
 `docker run --rm -v "$PWD":/src -w /src rust:1-slim cargo test --locked`.
 
