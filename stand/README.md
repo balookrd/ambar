@@ -3,7 +3,7 @@
 Три ВМ Lima (`dv-1`, `dv-2`, `dv-3`) с Debian 13 trixie arm64, ядром
 `6.12.116+deb13-arm64`, k3s из трёх server и привилегированным DaemonSet
 `toolbox` с образом `ambar-drbd` (модуль DRBD 9.3.4, `drbd-utils` 9.35.0).
-Для проверок `stand/csi-e2e.sh` и `stand/replica-e2e.sh` добавляется четвёртая ВМ `dv-4` (агент k3s, не
+Для проверок `stand/csi-e2e.sh`, `stand/replica-e2e.sh` и `stand/failure-e2e.sh` добавляется четвёртая ВМ `dv-4` (агент k3s, не
 server; см. «Стенд из четырёх узлов»).
 
 Префикс `dv` в именах ВМ — историческое сокращение первого названия проекта `duovol` (затем `sklad`, сейчас `ambar`); ВМ не переименованы, потому что для этого Lima-инстанс пришлось бы создавать заново.
@@ -51,7 +51,7 @@ server; см. «Стенд из четырёх узлов»).
 ## Стенд из четырёх узлов
 
 `NODES` задаёт список ВМ для `up.sh`, `k3s.sh`, `check.sh`, `install.sh`,
-`down.sh`, `csi-e2e.sh` и `replica-e2e.sh`. Первые три имени — server k3s (etcd остаётся из трёх
+`down.sh`, `csi-e2e.sh`, `replica-e2e.sh` и `failure-e2e.sh`. Первые три имени — server k3s (etcd остаётся из трёх
 участников), четвёртое и следующие — agent. Без переменной все скрипты работают
 с тремя узлами, как раньше.
 
@@ -302,4 +302,26 @@ stand/install.sh && stand/replica-e2e.sh
 | g | Правила валидации CRD через `kubectl patch --type=json`: отказ при удалении `Replica` напрямую, при смене `Replica -> Client`, при добавлении `Retiring` извне и при двух `Retiring` |
 | h | Писатель останавливается, под `reader` проверяет, что последнее подтверждённое значение счётчика есть на диске после `sync`; удаление PVC удаляет файлы и ресурсы на всех 4 узлах |
 | i | `grep -ci forbidden` по журналам всех контейнеров четырёх подов агента равен 0; число перезапусков контейнеров не изменилось |
+
+## Сквозная проверка обработки отказов (Фаза 3)
+
+Скрипт `stand/failure-e2e.sh` проверяет реакцию кластера и драйвера на отказы сети и узлов: изоляцию сети репликации через `nftables`, выставление taint `no-quorum:NoSchedule` (R32), выселение подов по истечении 30 с grace period (R33), авто-восстановление соединений `StandAlone` в роли Secondary через `adjust` (R34), фиксацию метрики split-brain `manual_check_needed` (R35), автоматическую очистку забытого узла `Client` без подов (R36), а также работу HTTP-сервера метрик на порту 9770 (R38). Нужны четыре узла и установленный драйвер.
+
+```bash
+export NODES="dv-1 dv-2 dv-3 dv-4"
+stand/install.sh && stand/failure-e2e.sh
+```
+
+Ожидаемая последняя строка: `OK: all failure handling e2e tests passed cleanly!`.
+
+| Шаг | Что проверяет |
+|---|---|
+| a | HTTP-сервер метрик на порту 9770: `/metrics` отдаёт валидный формат Prometheus со всеми метриками (`ambar_node_allocated_bytes`, `ambar_node_tainted`, `ambar_module_info` и др.); некорректный путь возвращает 404 |
+| b | Создание PVC `fail-pvc` (`ambar-r2`) и Deployment `fail-writer` с непрерывной записью heartbeat: том в состоянии Primary, `quorum: true`, метрика `ambar_volume_quorum=1`, taint отсутствует |
+| c | Изоляция трафика репликации узла писателя через `nftables`: DRBD фиксирует потерю кворума (`quorum: false`); агент выставляет taint `ambar.balookrd.github.io/no-quorum:NoSchedule`; метрика `ambar_node_tainted=1`, `ambar_volume_quorum=0` |
+| d | Grace period 30 с: под не выселяется первые 20 с; по истечении 30 с агент выселяет под через Kubernetes API; Deployment перезапускает под на выжившем узле с кворумом (`dv-1`); запись heartbeat продолжается |
+| e | Восстановление сети (снятие правил `nftables`): размонтированный том на изолированном узле в роли `Secondary` видит `StandAlone`; агент автоматически запускает `adjust`, соединение возвращается в `Connected`, диск ресинхронизируется в `UpToDate`; taint `no-quorum` автоматически снимается; метрика `ambar_node_tainted=0`, split-brain метрика `0` |
+| f | Очистка Client без подов: запуск читающего пода на узле без реплики (`dv-4`) переводит его в `Client`; после удаления пода агент фиксирует отсутствие подов на узле, выполняет `drbdadm down` и удаляет узел из `spec.nodes` и `status.nodes` |
+| g | Удаление тома и чистота стенда: PVC удалён, ReplicatedVolume объект удалён; на всех 4 узлах отсутствуют файлы томов, loop-устройства, правила nftables и taints; счётчик рестартов контейнеров ambar не изменился |
+
 
