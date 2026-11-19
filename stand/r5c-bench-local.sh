@@ -80,7 +80,7 @@ kubectl -n "$R5C_BENCH_NS" logs fio-local > "$HERE/baseline-local-path.json"
 
 python3 -I -c '
 import json, sys
-data = json.load(open("stand/baseline-local-path.json"))
+data = json.load(open(sys.argv[1]))
 job = data["jobs"][0]
 sync = job.get("sync", {})
 lat_ns = sync.get("lat_ns", {})
@@ -96,5 +96,5 @@ print(f"fsync latency mean: {mean_ms:.3f} ms")
 print(f"fsync latency p50:  {p50_ms:.3f} ms")
 print(f"fsync latency p95:  {p95_ms:.3f} ms")
 print(f"fsync latency p99:  {p99_ms:.3f} ms")
-'
+' "$HERE/baseline-local-path.json"
 echo "OK: Baseline local-path benchmark completed."
