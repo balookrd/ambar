@@ -9,6 +9,7 @@ pub mod csi;
 pub mod drbd;
 pub mod exec;
 pub mod membership;
+pub mod metrics;
 pub mod model;
 pub mod module_loader;
 pub mod mount;
