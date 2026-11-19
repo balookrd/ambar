@@ -188,7 +188,9 @@ fn run_agent(
             },
             async {
                 let result = agent.serve_metrics(&metrics_addr, shutdown.clone()).await;
-                shutdown.cancel();
+                if let Err(ref e) = result {
+                    eprintln!("ambar-agent: the metrics server error: {e}");
+                }
                 result
             },
         );

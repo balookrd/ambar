@@ -314,6 +314,13 @@ fn absolute(field: &str, value: &str) -> Result<PathBuf, Status> {
     if !path.is_absolute() {
         return Err(Status::invalid_argument(format!("{field} must be an absolute path")));
     }
+    for comp in path.components() {
+        if matches!(comp, std::path::Component::ParentDir) {
+            return Err(Status::invalid_argument(format!(
+                "{field} must not contain '..' components"
+            )));
+        }
+    }
     Ok(path)
 }
 
@@ -942,6 +949,69 @@ impl NodeService {
         }
         self.retire_client(&volume, &object).await
     }
+
+    async fn publish_locked(
+        &self,
+        volume: String,
+        staging: PathBuf,
+        target: PathBuf,
+        read_only: bool,
+    ) -> Result<(), Status> {
+        let _guard = self.agent.locks.lock(&volume).await;
+        let path = staging.clone();
+        let (_, entry) = self
+            .mount_raw(move |m| entry_at(m.mountinfo, &path))
+            .await
+            .map_err(mount_status)?;
+        let Some(entry) = entry else {
+            return Err(Status::failed_precondition(format!(
+                "{} has no mount: the volume is not staged",
+                staging.display()
+            )));
+        };
+        // What is staged must be this volume's device with ext4 on it.
+        let object = self
+            .agent
+            .volumes
+            .get(&volume)
+            .await
+            .map_err(|e| api_status("cannot read the volume", e))?
+            .ok_or_else(|| Status::not_found(format!("volume {volume:?} does not exist")))?;
+        let device = self.device(&object);
+        if entry.source != device.to_string_lossy() || entry.fstype != "ext4" {
+            return Err(Status::failed_precondition(format!(
+                "{} is a mount of {} ({}), not of {} with ext4: the volume is not staged",
+                staging.display(),
+                entry.source,
+                entry.fstype,
+                device.display()
+            )));
+        }
+        let target_clone = target.clone();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&target_clone))
+            .await
+            .map_err(|e| Status::internal(format!("spawn_blocking failed: {e}")))?
+            .map_err(|e| Status::unavailable(format!("cannot create {}: {e}", target.display())))?;
+        self.mount_raw(move |m| m.bind(&staging, &target, read_only))
+            .await
+            .map_err(mount_status)
+    }
+
+    async fn unpublish_locked(&self, volume: String, target: PathBuf) -> Result<(), Status> {
+        let _guard = self.agent.locks.lock(&volume).await;
+        let path = target.clone();
+        self.mount_raw(move |m| m.unmount(&path)).await.map_err(mount_status)?;
+        // Only an empty directory goes: `remove_dir` refuses anything else.
+        let target_clone = target.clone();
+        let remove_res = tokio::task::spawn_blocking(move || match std::fs::remove_dir(&target_clone) {
+            Ok(()) => Ok(()),
+            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty) => Ok(()),
+            Err(e) => Err(e),
+        })
+        .await
+        .map_err(|e| Status::internal(format!("spawn_blocking failed: {e}")))?;
+        remove_res.map_err(|e| Status::unavailable(format!("cannot remove {}: {e}", target.display())))
+    }
 }
 
 #[tonic::async_trait]
@@ -1030,40 +1100,12 @@ impl Node for NodeService {
         mount_capability(request.volume_capability.as_ref())?;
         let read_only = request.readonly;
 
-        let path = staging.clone();
-        let (_, entry) = self
-            .mount_raw(move |m| entry_at(m.mountinfo, &path))
-            .await
-            .map_err(mount_status)?;
-        let Some(entry) = entry else {
-            return Err(Status::failed_precondition(format!(
-                "{} has no mount: the volume is not staged",
-                staging.display()
-            )));
-        };
-        // What is staged must be this volume's device with ext4 on it.
-        let object = self
-            .agent
-            .volumes
-            .get(&volume)
-            .await
-            .map_err(|e| api_status("cannot read the volume", e))?
-            .ok_or_else(|| Status::not_found(format!("volume {volume:?} does not exist")))?;
-        let device = self.device(&object);
-        if entry.source != device.to_string_lossy() || entry.fstype != "ext4" {
-            return Err(Status::failed_precondition(format!(
-                "{} is a mount of {} ({}), not of {} with ext4: the volume is not staged",
-                staging.display(),
-                entry.source,
-                entry.fstype,
-                device.display()
-            )));
-        }
-        std::fs::create_dir_all(&target)
-            .map_err(|e| Status::unavailable(format!("cannot create {}: {e}", target.display())))?;
-        self.mount_raw(move |m| m.bind(&staging, &target, read_only))
-            .await
-            .map_err(mount_status)?;
+        let this = self.clone();
+        let name = volume.clone();
+        detached(self.log.clone(), "NodePublishVolume", &name, async move {
+            this.publish_locked(volume, staging, target, read_only).await
+        })
+        .await?;
         Ok(Response::new(NodePublishVolumeResponse {}))
     }
 
@@ -1072,17 +1114,15 @@ impl Node for NodeService {
         request: Request<NodeUnpublishVolumeRequest>,
     ) -> Result<Response<NodeUnpublishVolumeResponse>, Status> {
         let request = request.into_inner();
-        volume_name(&request.volume_id)?;
+        let volume = volume_name(&request.volume_id)?;
         let target = absolute("target_path", &request.target_path)?;
 
-        let path = target.clone();
-        self.mount_raw(move |m| m.unmount(&path)).await.map_err(mount_status)?;
-        // Only an empty directory goes: `remove_dir` refuses anything else.
-        match std::fs::remove_dir(&target) {
-            Ok(()) => {}
-            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty) => {}
-            Err(e) => return Err(Status::unavailable(format!("cannot remove {}: {e}", target.display()))),
-        }
+        let this = self.clone();
+        let name = volume.clone();
+        detached(self.log.clone(), "NodeUnpublishVolume", &name, async move {
+            this.unpublish_locked(volume, target).await
+        })
+        .await?;
         Ok(Response::new(NodeUnpublishVolumeResponse {}))
     }
 

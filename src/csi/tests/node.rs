@@ -1230,6 +1230,42 @@ async fn rule_e_unstage_waits_for_the_volume_lock() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn rule_e_publish_waits_for_the_volume_lock() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.stage_mount();
+    let guard = e.svc.agent.locks.lock(VOLUME).await;
+    let svc = e.svc.clone();
+    let staging = e.staging.clone();
+    let target = e.target.clone();
+    let task = tokio::spawn(async move { svc.publish_locked(VOLUME.to_string(), staging, target, false).await });
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!task.is_finished(), "the publish ran while the volume lock was held");
+    assert!(e.sim.mounted_at(&e.target).is_empty());
+    drop(guard);
+    task.await.unwrap().unwrap();
+    assert_eq!(e.sim.mounted_at(&e.target).len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn rule_e_unpublish_waits_for_the_volume_lock() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.stage_mount();
+    e.publish(false).await.unwrap();
+    let guard = e.svc.agent.locks.lock(VOLUME).await;
+    let svc = e.svc.clone();
+    let target = e.target.clone();
+    let task = tokio::spawn(async move { svc.unpublish_locked(VOLUME.to_string(), target).await });
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!task.is_finished(), "the unpublish ran while the volume lock was held");
+    assert_eq!(e.sim.mounted_at(&e.target).len(), 1);
+    drop(guard);
+    task.await.unwrap().unwrap();
+    assert!(e.sim.mounted_at(&e.target).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn rule_e_the_pass_of_the_stage_does_not_deadlock_with_its_own_lock() {
     // `reconcile_one` takes the volume lock itself; the whole stage, which
     // calls it before its own critical section, finishes.
@@ -1359,6 +1395,14 @@ async fn publish_rejects_bad_arguments() {
             ..good.clone()
         },
         NodePublishVolumeRequest {
+            staging_target_path: "/var/lib/../staging".into(),
+            ..good.clone()
+        },
+        NodePublishVolumeRequest {
+            target_path: "/var/lib/../target".into(),
+            ..good.clone()
+        },
+        NodePublishVolumeRequest {
             volume_capability: None,
             ..good.clone()
         },
@@ -1437,6 +1481,10 @@ async fn unpublish_rejects_bad_arguments() {
             volume_id: VOLUME.into(),
             target_path: "relative".into(),
         },
+        NodeUnpublishVolumeRequest {
+            volume_id: VOLUME.into(),
+            target_path: "/var/lib/../target".into(),
+        },
     ] {
         let result = e.svc.node_unpublish_volume(Request::new(request)).await;
         assert_eq!(code(result), Code::InvalidArgument);
@@ -1510,6 +1558,10 @@ async fn unstage_rejects_bad_arguments() {
         NodeUnstageVolumeRequest {
             volume_id: VOLUME.into(),
             staging_target_path: "relative".into(),
+        },
+        NodeUnstageVolumeRequest {
+            volume_id: VOLUME.into(),
+            staging_target_path: "/var/lib/../staging".into(),
         },
     ] {
         let result = e.svc.node_unstage_volume(Request::new(request)).await;
