@@ -112,6 +112,9 @@ pub fn handle_standalone(
     res: &ResourceStatus,
     now: Instant,
 ) -> Result<bool, String> {
+    if !crate::model::valid_volume_name(&res.name) {
+        return Ok(false);
+    }
     match tracker.check(res, now) {
         StandaloneAction::RunAdjust { attempt: _ } => {
             drbd.adjust(&res.name)

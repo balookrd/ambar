@@ -482,6 +482,31 @@ fn add_checks_primary_on_client_node() {
 }
 
 #[test]
+fn add_checks_primary_on_witness_node() {
+    let cluster = test_cluster();
+    let spec = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("n2", 1, "192.168.104.2", NodeKind::Replica),
+        member("n3", 2, "192.168.104.3", NodeKind::Witness),
+    ]);
+    let mut status = healthy_status(&spec);
+    status.nodes.iter_mut().find(|n| n.name == "n3").unwrap().role = "Primary".to_string();
+    let finalizers = vec![replica_finalizer("n1"), replica_finalizer("n2")];
+    let view = View {
+        spec: &spec,
+        status: Some(&status),
+        deleting: false,
+        finalizers: &finalizers,
+    };
+
+    // Witness in Primary -> error
+    assert_eq!(
+        next_add(&view, "n3", &cluster, &[]),
+        Err(ChangeError::Primary("n3".to_string()))
+    );
+}
+
+#[test]
 fn add_checks_budget_capacity() {
     let cluster = test_cluster(); // each has 10 GiB
     let spec = sample_spec(vec![
@@ -1020,6 +1045,7 @@ fn move_checks_same_node_and_not_a_member() {
     let spec = sample_spec(vec![
         member("n1", 0, "192.168.104.1", NodeKind::Replica),
         member("n2", 1, "192.168.104.2", NodeKind::Replica),
+        member("n4", 3, "192.168.104.4", NodeKind::Witness),
     ]);
     let status = healthy_status(&spec);
     let finalizers = vec![replica_finalizer("n1"), replica_finalizer("n2")];
@@ -1033,13 +1059,19 @@ fn move_checks_same_node_and_not_a_member() {
     // from == to -> SameNode
     assert_eq!(next_move(&view, "n1", "n1", &cluster, &[]), Err(ChangeError::SameNode));
 
+    // unknown node -> UnknownNode
+    assert_eq!(
+        next_move(&view, "n1", "n6", &cluster, &[]),
+        Err(ChangeError::UnknownNode("n6".to_string()))
+    );
+
     // from not a member and no finalizer, to not replica -> NotAMember
     assert_eq!(
         next_move(&view, "n3", "n4", &cluster, &[]),
         Err(ChangeError::NotAMember("n3".to_string()))
     );
 
-    // from not a member, but to is Replica and UpToDate -> Done (already finished)
+    // from not a member, but to is Replica and UpToDate, and witness present -> Done (already finished)
     assert_eq!(next_move(&view, "n3", "n1", &cluster, &[]), Ok(Next::Done));
 }
 
@@ -1216,4 +1248,110 @@ fn move_waits_for_destination_uptodate_then_retires_source() {
         finalizers: &finalizers_done,
     };
     assert_eq!(next_move(&view_done, "n2", "n4", &cluster, &[]), Ok(Next::Done));
+}
+
+#[test]
+fn move_refuses_when_volume_is_deleting() {
+    let cluster = test_cluster();
+    let spec = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("n2", 1, "192.168.104.2", NodeKind::Replica),
+    ]);
+    let status = healthy_status(&spec);
+    let finalizers = vec![replica_finalizer("n1"), replica_finalizer("n2")];
+    let view = View {
+        spec: &spec,
+        status: Some(&status),
+        deleting: true,
+        finalizers: &finalizers,
+    };
+    assert_eq!(next_move(&view, "n1", "n3", &cluster, &[]), Err(ChangeError::Deleting));
+}
+
+#[test]
+fn move_refuses_when_from_is_not_replica() {
+    let cluster = test_cluster();
+    let spec = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("n2", 1, "192.168.104.2", NodeKind::Witness),
+    ]);
+    let status = healthy_status(&spec);
+    let finalizers = vec![replica_finalizer("n1")];
+    let view = View {
+        spec: &spec,
+        status: Some(&status),
+        deleting: false,
+        finalizers: &finalizers,
+    };
+    // n2 is a Witness, cannot move replica from a witness node!
+    assert_eq!(
+        next_move(&view, "n2", "n3", &cluster, &[]),
+        Err(ChangeError::NotAMember("n2".to_string()))
+    );
+}
+
+#[test]
+fn move_refuses_when_to_is_primary() {
+    let cluster = test_cluster();
+    let spec = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("n2", 1, "192.168.104.2", NodeKind::Replica),
+        member("n3", 2, "192.168.104.3", NodeKind::Client),
+    ]);
+    let mut status = healthy_status(&spec);
+    status.nodes.iter_mut().find(|n| n.name == "n3").unwrap().role = "Primary".to_string();
+    let finalizers = vec![replica_finalizer("n1"), replica_finalizer("n2")];
+    let view = View {
+        spec: &spec,
+        status: Some(&status),
+        deleting: false,
+        finalizers: &finalizers,
+    };
+    // Destination n3 is Primary -> error
+    assert_eq!(
+        next_move(&view, "n2", "n3", &cluster, &[]),
+        Err(ChangeError::Primary("n3".to_string()))
+    );
+}
+
+#[test]
+fn move_in_three_node_cluster_assigns_source_as_witness_when_finished() {
+    // 3-node cluster: n1, n2, n3
+    let cluster_3 = ClusterNodes::from_json(
+        r#"[
+        {"name":"n1","address":"192.168.104.1","nodeId":0,"capacityBytes":10737418240},
+        {"name":"n2","address":"192.168.104.2","nodeId":1,"capacityBytes":10737418240},
+        {"name":"n3","address":"192.168.104.3","nodeId":2,"capacityBytes":10737418240}
+    ]"#,
+    )
+    .unwrap();
+
+    // Volume has n1 (Replica) and n3 (Replica). n2 was removed.
+    // N=2 replicas in a 3-node cluster: even N requires Witness!
+    // n2 must be assigned as Witness before returning Done!
+    let spec_done = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("n3", 2, "192.168.104.3", NodeKind::Replica),
+    ]);
+    let status = healthy_status(&spec_done);
+    let finalizers_done = vec![replica_finalizer("n1"), replica_finalizer("n3")];
+    let view_done = View {
+        spec: &spec_done,
+        status: Some(&status),
+        deleting: false,
+        finalizers: &finalizers_done,
+    };
+
+    let next = next_move(&view_done, "n2", "n3", &cluster_3, &[]).unwrap();
+    assert_eq!(
+        next,
+        Next::Edit(Edit {
+            nodes: vec![
+                member("n1", 0, "192.168.104.1", NodeKind::Replica),
+                member("n2", 1, "192.168.104.2", NodeKind::Witness),
+                member("n3", 2, "192.168.104.3", NodeKind::Replica),
+            ],
+            add_finalizer: None,
+        })
+    );
 }

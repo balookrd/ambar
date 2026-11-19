@@ -179,7 +179,7 @@ use super::decide::{Local, ObjectView, Refusal, Task, decide};
 use super::kube::{ApiError, Volumes, mounted_pod_uids_for_volume};
 use super::local::{file_state, local, local_volumes, loops_holding, synced_marker_present};
 use super::quorum::{QuorumTracker, VolumeQuorumCheck, check_volume_quorum};
-use super::standalone::{StandaloneTracker, handle_standalone};
+use super::standalone::StandaloneTracker;
 use super::status::node_status;
 use super::taint::reconcile_node_taint;
 
@@ -1468,10 +1468,12 @@ impl Agent {
             .blocking(move |paths, runner| {
                 let vg_guard = vg.clone();
                 let guard = || {
-                    if let Ok(Some(status)) = (Drbd { runner }).status(&name)
-                        && (status.role == Role::Primary || status.devices.iter().any(|d| d.open))
-                    {
-                        return Err("the resource is in use (Primary or open)".to_string());
+                    match (Drbd { runner }).status(&name) {
+                        Ok(Some(status)) if status.role == Role::Primary || status.devices.iter().any(|d| d.open) => {
+                            return Err("the resource is in use (Primary or open)".to_string());
+                        }
+                        Ok(_) => {}
+                        Err(e) => return Err(format!("cannot read drbd status: {e}")),
                     }
                     match local(paths, &name, vg_guard.as_deref()) {
                         Ok(state) if state.image => Err("a backing file exists on this node".to_string()),
@@ -1607,7 +1609,13 @@ impl Agent {
         standalone_tracker: &mut StandaloneTracker,
         now: std::time::Instant,
     ) -> Result<(), AgentError> {
-        let statuses = self.read_all_statuses().await.unwrap_or_default();
+        let statuses = match self.read_all_statuses().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ambar-agent: warning: failed to read drbd statuses: {e}");
+                return Err(Self::reconcile_error("*", e));
+            }
+        };
 
         // 1. Taint management (R32)
         let should_taint = crate::agent::taint::should_taint_node(&statuses);
@@ -1640,10 +1648,53 @@ impl Agent {
         }
 
         // 3. Auto-adjust StandAlone Secondary connections and split-brain tracking (R34, R35)
-        let runner = self.runner.clone();
         for status in &statuses {
-            let drbd = Drbd { runner: &*runner };
-            let _ = handle_standalone(standalone_tracker, &drbd, status, now);
+            if !crate::model::valid_volume_name(&status.name) {
+                continue;
+            }
+            if let crate::agent::standalone::StandaloneAction::RunAdjust { attempt } =
+                standalone_tracker.check(status, now)
+            {
+                let name = status.name.clone();
+                let vg = self.options.volume_group.clone();
+                let _lock = self.locks.lock(&name).await;
+                let adjusted = self
+                    .blocking(move |paths, runner| {
+                        let reconciler = Reconciler {
+                            paths,
+                            runner,
+                            volume_group: vg,
+                        };
+                        let _file_lock = match reconciler.lock_volume(&name) {
+                            Ok(l) => l,
+                            Err(e) => return Err(format!("cannot acquire volume lock: {e}")),
+                        };
+                        let drbd = Drbd { runner };
+                        let out = drbd.adjust(&name).map_err(|e| format!("cannot adjust {name}: {e}"))?;
+                        if !out.success() {
+                            return Err(format!("drbdadm adjust {name} failed: {}", out.stderr));
+                        }
+                        Ok(())
+                    })
+                    .await;
+                match adjusted {
+                    Ok(Ok(())) => {
+                        log_info(
+                            &status.name,
+                            format!("auto-adjusted StandAlone connection (attempt {attempt})"),
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("ambar-agent: warning: volume {:?}: {e}", status.name);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "ambar-agent: warning: volume {:?}: blocking task failed: {e}",
+                            status.name
+                        );
+                    }
+                }
+            }
         }
 
         // 4. Stale Client cleanup without pods (R36)
