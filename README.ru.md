@@ -20,6 +20,8 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; др�
 | Запуск на боевом кластере | ambar развернут на боевом кластере из 3 узлов NanoPi R5C в namespace `ambar-system`, работает параллельно с существующими боевыми сервисами |
 | Замеры на целевом железе (NanoPi R5C) | выполнены, ссылка на протокол [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 | Прямой блочный LVM бэкенд (фаза 5) | реализован и проверен на кластере NanoPi R5C; задержка 4K `fsync` снижена до 12.65 мс (r3) / 10.03 мс (r2) без loopback и двойного журналирования ext4 ([спека](docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md)) |
+| Отказоустойчивый Control Plane (kube-vip) | реализован и работает на боевом 3-нодовом кластере NanoPi R5C: виртуальный IP `198.51.100.30:6443` с автоматическим ARP failover и скриптами в [`stand/r5c-kube-vip.sh`](stand/r5c-kube-vip.sh) |
+| Эксплуатация кластера и нагрузки | манифесты нагрузок, гайды по подготовке железа, конфиги мониторинга и алертинга собраны в [`ops/`](ops/README.ru.md) |
 
 ## Что делает драйвер
 
@@ -227,6 +229,15 @@ cargo test
 манифесты не применялись; для другого кластера образ и `ConfigMap ambar-nodes`
 задаются под этот кластер (см. комментарии в `deploy/daemonset.yaml` и
 `deploy/nodes-configmap.example.yaml`).
+
+## Эксплуатация кластера и рабочие нагрузки
+
+Все материалы по эксплуатации боевого кластера из трёх плат NanoPi R5C (`k3s-1..3`) и сопутствующей инфраструктуры собраны в репозитории:
+
+- [`ops/`](ops/README.ru.md): Манифесты боевого кластера, ingress Traefik, L2-балансировщик MetalLB и перенесённые сервисы (`smarthome`, `ingress`, `registry` и др.).
+- [`ops/nanopi-r5c-k3s/`](ops/nanopi-r5c-k3s/README.md): Подробное руководство по настройке узлов, сетевая топология (`wan0` 198.51.100.0/24, `lan0` 10.10.10.0/24), разметка NVMe под LVM и отказоустойчивый Control Plane на базе kube-vip.
+- [`stand/`](stand/README.md#физический-кластер-nanopi-r5c-скрипты-r5c-sh): Скрипты автоматизации обслуживания физического кластера (`stand/r5c-*.sh`), включая онлайн-миграцию на LVM (`stand/r5c-migrate-lvm.sh`), управление kube-vip (`stand/r5c-kube-vip.sh`) и замеры производительности fio.
+- [`ops/alerting/`](ops/alerting/README.md) и [`ops/grafana/`](ops/grafana/README.md): Правила алертов VictoriaMetrics и дашборды Grafana для мониторинга кластера и хранилища.
 
 ## Лицензия
 
