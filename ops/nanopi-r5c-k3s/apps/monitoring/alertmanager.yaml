@@ -60,6 +60,7 @@ spec:
             - --config.file=/etc/alertmanager/conf/alertmanager.yml
             - --storage.path=/alertmanager
             - --web.listen-address=:9093
+            - --web.external-url=https://alertmanager.k3s.beerloga.su
             - --cluster.listen-address=0.0.0.0:9094
             - --cluster.advertise-address=$(POD_IP):9094
             - --cluster.peer=alertmanager-0.alertmanager-peers.monitoring.svc:9094

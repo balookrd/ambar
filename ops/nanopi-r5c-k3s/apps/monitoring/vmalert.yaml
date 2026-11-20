@@ -44,6 +44,7 @@ spec:
             - -notifier.url=http://alertmanager-0.alertmanager-peers.monitoring.svc:9093
             - -notifier.url=http://alertmanager-1.alertmanager-peers.monitoring.svc:9093
             - -notifier.url=http://alertmanager-2.alertmanager-peers.monitoring.svc:9093
+            - -external.url=https://vmalert.k3s.beerloga.su
           ports:
             - { containerPort: 8880, name: http }
           volumeMounts:
