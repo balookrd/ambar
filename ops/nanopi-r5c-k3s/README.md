@@ -865,11 +865,19 @@ storage (NFS-провижнер + local-path), вход трафика (MetalLB,
 
 ```bash
 # helm нужен, но k3s его НЕ ставит — либо доставить на ноду, либо гонять с мака
-# с экспортированным /etc/rancher/k3s/k3s.yaml (подменив server: на IP ноды)
+# с экспортированным /etc/rancher/k3s/k3s.yaml (указывающим на виртуальный IP kube-vip)
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 cd apps
 ./deploy.sh              # storage → metallb → traefik → workloads → ingress
 ```
+
+### Отказоустойчивый доступ к API (kube-vip)
+
+Чтобы клиенты (`kubectl`, Freelens) не зависели от доступности конкретного мастера (например, при обслуживании `k3s-1`), в кластере развернут `kube-vip` в виде Static Pod на всех трёх узлах:
+- Виртуальный IP: **`198.51.100.30:6443`** (L2 ARP mode на `wan0`).
+- В k3s на всех узлах добавлен параметр `--tls-san=198.51.100.30`.
+- Управление статическими подами: скрипт `stand/r5c-kube-vip.sh [install|status|uninstall]`.
+- В клиентском `kubeconfig` адрес сервера задается как `https://198.51.100.30:6443`. При отказе текущего лидера перехват адреса другим узлом занимает < 4 с.
 
 Скрипт пропускает манифесты с незаполненными `<PLACEHOLDER>` и шаблоны секретов
 (`*.secret.example.yaml`) — детали, storage-модель и карта адресов в

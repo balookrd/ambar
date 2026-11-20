@@ -31,8 +31,10 @@ if [ ${#files[@]} -eq 0 ]; then
 		# NAS they must all be deployed together: the provider runs with
 		# disableDeletion=false, so a dashboard missing from the mounted
 		# directory gets DELETED from the database on the next start.
-		files+=(../../../bins/outline-ss-rust/grafana/*.json)
-		files+=(../../../bins/outline-ws-rust/grafana/*.json)
+		bins_dir="${OUTLINE_PROXY_BINS_DIR:-../../../../outline-proxy/bins}"
+		[ -d "$bins_dir" ] || bins_dir="../../../bins"
+		files+=("$bins_dir"/outline-ss-rust/grafana/*.json)
+		files+=("$bins_dir"/outline-ws-rust/grafana/*.json)
 	fi
 fi
 [ ${#files[@]} -gt 0 ] || { echo "no dashboards to deploy" >&2; exit 1; }
