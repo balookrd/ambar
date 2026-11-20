@@ -4,6 +4,8 @@ set -euo pipefail
 
 R5C_NODES=(k3s-1 k3s-2 k3s-3)
 R5C_IPS=("10.10.10.51" "10.10.10.52" "10.10.10.53")
+R5C_VIP="${R5C_VIP:-198.18.1.30}"
+R5C_VIP_IFACE="${R5C_VIP_IFACE:-wan0}"
 R5C_USER="${R5C_USER:-mmv}"
 R5C_SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new)
 R5C_IMAGE="ambar-drbd:dev"

@@ -85,6 +85,7 @@ install_k3s_remote() {
         r5c_ssh "$node" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - server \
             --cluster-init \
             --node-ip '$node_ip' \
+            --tls-san '$R5C_VIP' \
             --disable=traefik \
             --disable=servicelb"
     else
@@ -101,6 +102,7 @@ install_k3s_remote() {
         r5c_ssh "$node" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN='$token' sh -s - server \
             --server 'https://${first_ip}:6443' \
             --node-ip '$node_ip' \
+            --tls-san '$R5C_VIP' \
             --disable=traefik \
             --disable=servicelb"
     fi
