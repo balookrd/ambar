@@ -139,11 +139,11 @@ watchdog это стоило рестарта контейнера (31 штук�
 обрывало лог; с ним z2m переподключается внутри процесса через 2 с, а лог
 переживает переподключение.
 
-Данные z2m — NFS (`198.51.100.105:/volume1/k8s/zigbee2mqtt-data`), inline
-`nfs`-том без PVC: `database.db` у z2m — JSON-lines, а не SQLite, поэтому
-блокировок нет и сетевая ФС безопасна, а под не привязан к ноде. Ночного
-бэкапа у z2m нет — снят сознательно, копия на `.102` в `/opt/zigbee2mqtt`
-осталась замороженной на момент переезда.
+Данные z2m переведены на PVC `zigbee2mqtt-data` (`1Gi`, `ambar-r3-retain`,
+3 реплики DRBD поверх NVMe LVM), убрав зависимость от NAS. Ночного бэкапа у z2m
+нет — снят сознательно; исходный каталог на NAS
+(`198.51.100.105:/volume1/k8s/zigbee2mqtt-data`) и замороженная копия на `.102`
+в `/opt/zigbee2mqtt` остались в качестве холодного отката.
 
 Сервисы умного дома (`humidity`, `power`, `conditioner`, `presence`, `samsung-tv`)
 перенесены с `198.51.100.102` 2026-08-09 — namespace `smarthome`, подробности в
@@ -295,8 +295,8 @@ Ingress-объекты, не трогая workloads. Пока приложени
 |---|---|---|
 | VictoriaMetrics | TSDB | NVMe NAS `/volume2/victoria-metrics`, docker ([`ops/nas-monitoring/`](../../nas-monitoring/README.md)) |
 | Grafana | SQLite | NVMe NAS `/volume2/grafana`, docker (там же) |
-| mosquitto, `smarthome/conditioner`, `smarthome/presence` | стейт / `devices.json` | PVC `ambar-r3-retain` (RWO, 3 реплики DRBD) |
-| zigbee2mqtt, `smarthome/{humidity,power,samsung-tv}`, реестр | стейт | inline NFS-том (до переноса на `ambar-r3-retain`) |
+| `mosquitto`, `zigbee2mqtt`, все 5 сервисов `smarthome` | стейт / `devices.json` / БД | PVC `ambar-r3-retain` (RWO, 3 реплики DRBD) |
+| реестр | блобы OCI | inline NFS-том (до переноса на `ambar-r3-retain`) |
 | ocserv | `ocpasswd` | PVC `nfs-client` (мелкий) |
 | outline-ss/ws, ocserv | сертификаты/конфиг | Secret/ConfigMap, без PVC |
 

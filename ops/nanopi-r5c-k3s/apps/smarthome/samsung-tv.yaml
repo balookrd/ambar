@@ -31,6 +31,7 @@ spec:
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
       imagePullSecrets:
         - name: registry-creds
       # Reschedule ~1.7 min after a host dies (40s NotReady detect + 60s here),
@@ -77,6 +78,17 @@ spec:
             limits:   { memory: 192Mi }
       volumes:
         - name: conf
-          nfs:
-            server: 198.18.1.105
-            path: /volume1/k8s/smarthome/samsung_tv
+          persistentVolumeClaim:
+            claimName: samsung-tv-conf
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: samsung-tv-conf
+  namespace: smarthome
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ambar-r3-retain
+  resources:
+    requests:
+      storage: 256Mi

@@ -4,10 +4,9 @@
 # stick, so the pod is free to run on any node — no device passthrough, no
 # nodeSelector.
 #
-# Data lives on NFS rather than local-path. z2m's database.db is a JSON-lines
-# file, not SQLite: no locking, no page cache to corrupt, one writer. So the
-# usual reason to avoid a network filesystem does not apply, and in exchange the
-# pod stops being pinned to whichever node happened to hold the volume.
+# Data lives on PVC zigbee2mqtt-data (StorageClass ambar-r3-retain, 3 DRBD replicas
+# on NVMe LVM), replacing the legacy inline NFS volume on the NAS. Strategy is
+# Recreate because the network coordinator accepts a single client.
 #
 # Singleton, and not merely by convention: the coordinator accepts exactly one
 # client. Two replicas would fight over the session, so replicas: 1 + Recreate.
@@ -80,9 +79,20 @@ spec:
             limits:   { memory: 384Mi }   # measured 102 MB in steady state
       volumes:
         - name: data
-          nfs:
-            server: 198.18.1.105
-            path: /volume1/k8s/zigbee2mqtt-data
+          persistentVolumeClaim:
+            claimName: zigbee2mqtt-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zigbee2mqtt-data
+  namespace: home
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ambar-r3-retain
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

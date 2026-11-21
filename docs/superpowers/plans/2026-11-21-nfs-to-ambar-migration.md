@@ -42,12 +42,12 @@
 
 ---
 
-## Волна 2 — Оставшиеся сервисы умного дома (отложено до отдельного решения)
+## Волна 2 — Оставшиеся сервисы умного дома
 
-- [ ] `smarthome/humidity` → PVC `humidity-conf` (`256Mi`, `ambar-r3-retain`, `fsGroup: 1000`).
-- [ ] `smarthome/power` → PVC `power-conf` (`256Mi`, `ambar-r3-retain`, `fsGroup: 1000`).
-- [ ] `smarthome/samsung-tv` → PVC `samsung-tv-conf` (`256Mi`, `ambar-r3-retain`, `fsGroup: 1000`).
-- [ ] `home/zigbee2mqtt` → PVC `zigbee2mqtt-data` (`1Gi`, `ambar-r3-retain`).
+- [x] `smarthome/humidity` → PVC `humidity-conf` (`256Mi`, `ambar-r3-retain`, `fsGroup: 1000`).
+- [x] `smarthome/power` → PVC `power-conf` (`256Mi`, `ambar-r3-retain`, `fsGroup: 1000`).
+- [x] `smarthome/samsung-tv` → PVC `samsung-tv-conf` (`256Mi`, `ambar-r3-retain`, `fsGroup: 1000`).
+- [x] `home/zigbee2mqtt` → PVC `zigbee2mqtt-data` (`1Gi`, `ambar-r3-retain`).
 
 ## Волна 3 — Реестр образов и шаблон VPN (отложено до отдельного решения)
 
@@ -84,3 +84,39 @@
    - `ambar_node_allocated_bytes` на каждой ноде: `1085972480` байт (~1.01 GiB).
    - Горящих алертов `Ambar*` в `vmalert` нет.
    - Исходные каталоги на NAS (`/volume1/k8s/smarthome/conditioner`, `/volume1/k8s/smarthome/presence`, `/volume1/k8s/mosquitto-data`) оставлены нетронутыми как холодный откат.
+
+---
+
+## Фактические результаты Волны 2
+
+**Дата проведения:** 2026-11-21 (14:39–14:44 MSK)
+
+1. **`smarthome/humidity` → `humidity-conf` (`256Mi`, `ambar-r3-retain`):**
+   - PV/RV: `pvc-f161b0dd-be5d-445a-ad00-646704780868` (`minor: 1003`, `port: 7003`).
+   - Контрольные суммы (`VERIFY_OK`, владелец `1000:1000`): `.gitkeep` (`e3b0c442...`), `devices.json` (`6c68abd8...`, 13328 B), `devices.json.old` (`a0805447...`, 13329 B).
+   - Под `humidity-85c76c7d4d-mctvr` запущен на `k3s-3` (`1/1 Running`, 0 рестартов), успешно обновил `/app/conf/devices.json` и отправляет метрики температуры/влажности в VictoriaMetrics, `/tmp/humidity.heartbeat` свежий.
+   - `ReplicatedVolume`: `Primary` на `k3s-3`, `Secondary` на `k3s-1` и `k3s-2`, 3/3 `UpToDate`, `quorum: true`.
+
+2. **`smarthome/power` → `power-conf` (`256Mi`, `ambar-r3-retain`):**
+   - PV/RV: `pvc-8bee4b17-7274-4ec7-9670-659dc81fa022` (`minor: 1004`, `port: 7004`).
+   - Контрольные суммы (`VERIFY_OK`, владелец `1000:1000`): `.gitkeep` (`e3b0c442...`), `devices.json` (`742ca6b0...`, 1428 B), `devices.json.old` (`bdbdc5dc...`, 1428 B).
+   - Под `power-69c8d88f6b-dm6qm` запущен на `k3s-3` (`1/1 Running`, 0 рестартов), обновил `/app/conf/devices.json` и публикует `python2mqtt/power/total`, `/tmp/power.heartbeat` свежий.
+   - `ReplicatedVolume`: `Primary` на `k3s-3`, `Secondary` на `k3s-1` и `k3s-2`, 3/3 `UpToDate`, `quorum: true`.
+
+3. **`smarthome/samsung-tv` → `samsung-tv-conf` (`256Mi`, `ambar-r3-retain`):**
+   - PV/RV: `pvc-b457ee9a-c3ec-49d7-9217-40299b21035e` (`minor: 1005`, `port: 7005`).
+   - Источник NAS: `/volume1/k8s/smarthome/samsung_tv`. Контрольные суммы (`VERIFY_OK`, владелец `1000:1000`): `.gitkeep` (`e3b0c442...`), `devices.json` (`b0a93ad7...`, 468 B), `devices.json.old` (`b7127c43...`, 469 B).
+   - Под `samsung-tv-5bf8b7d9d9-cwbds` запущен на `k3s-3` (`hostNetwork: true`, `1/1 Running`, 0 рестартов), подписан на `python2mqtt/tv/#`, `/tmp/samsung_tv.heartbeat` свежий.
+   - `ReplicatedVolume`: `Primary` на `k3s-3`, `Secondary` на `k3s-1` и `k3s-2`, 3/3 `UpToDate`, `quorum: true`.
+
+4. **`home/zigbee2mqtt` → `zigbee2mqtt-data` (`1Gi`, `ambar-r3-retain`):**
+   - PV/RV: `pvc-cf3e6165-f6df-471f-8527-c0ac0ce6b5ea` (`minor: 1006`, `port: 7006`).
+   - Контрольная сверка (`VERIFY_OK`, 11 файлов включая `device_icons/`, `configuration.yaml`, `database.db`, `coordinator_backup.json`, `state.json`, владелец `1000:1000`).
+   - Под `zigbee2mqtt-5d745df558-9r492` запущен на `k3s-2` (`1/1 Running`, 0 рестартов), ASH/EZSP стартовал (`Network up`, `Adapter network matches config`), frontend `:8080` отвечает `200`, телеметрия устройств поступает в `mosquitto` и `power`.
+   - `ReplicatedVolume`: `Primary` на `k3s-2`, `Secondary` на `k3s-1` и `k3s-3`, 3/3 `UpToDate`, `quorum: true`.
+
+5. **Мониторинг VictoriaMetrics и сохранность отката (итого после Волн 1 и 2):**
+   - `count(ambar_volume_quorum == 1) == 21`, `count(ambar_volume_uptodate_replicas == 3) == 21` (7 боевых томов × 3 узла).
+   - `ambar_node_allocated_bytes` на каждой ноде: `2981232640` байт (~2.78 GiB).
+   - Горящих алертов `Ambar*` в `vmalert` нет.
+   - Исходные каталоги на NAS (`/volume1/k8s/smarthome/{humidity,power,samsung_tv}`, `/volume1/k8s/zigbee2mqtt-data`) оставлены нетронутыми как холодный откат.
