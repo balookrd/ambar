@@ -102,8 +102,9 @@ HTTP-роуты → descheduler. Требует `kubectl` и `helm` в PATH. К�
 Namespace `monitoring`, `home`, `smarthome`, `outline` и `vpn` создаёт
 `namespaces.yaml`, его применяет первая стадия `./deploy.sh apps`.
 
-Секреты создаются до раскатки, вне git. `grafana-alerting` создаёт
-[`ops/grafana/alerting/deploy.sh`](../../grafana/alerting/deploy.sh); `grafana-smtp`
+Секреты создаются до раскатки, вне git. Secret `grafana-alerting` удалён вместе с
+отключением алертинга Grafana (`ops/alerting/deploy.sh` управляет секретами
+`alertmanager-config` и `alertmanager-smtp`); `grafana-smtp`
 остался в `monitoring` как источник пароля SMTP: `ops/alerting/deploy.sh` копирует
 его в Secret `alertmanager-smtp`, а файл для Grafana на NAS создаётся из него по
 [`ops/nas-monitoring/README.md`](../../nas-monitoring/README.md#секрет-smtp)

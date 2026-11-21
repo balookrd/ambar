@@ -6,7 +6,7 @@
 
 Реальные имена узлов, домены и адреса парка в этом документе заменены условными: `fleet.example` — домен парка; `relay-a`, `relay-b` — промежуточные cloud-узлы; `198.51.100.0/24` — домашняя сеть (`.102`, `.104`, `.105` — последний октет). Соответствие — в локальном некоммитируемом `FLEET.local.md`.
 
-С 2026-11-09 это единственный источник алертов парка. Алертинг Grafana выключен; провижининг в [`ops/grafana/alerting/`](../grafana/alerting/) оставлен только для отката (см. «Откат»).
+С 2026-11-09 это единственный источник алертов парка. Алертинг Grafana выключен; архивный провижининг `ops/grafana/alerting/` удалён из репозитория 2026-11-21 (при необходимости восстанавливается из git-истории, см. «Откат»).
 
 ## Требования
 
@@ -215,14 +215,16 @@ kubectl -n monitoring exec alertmanager-0 -- amtool alert add alertname=Alerting
 
 ## Откат
 
-Условие: вернуть алертинг в Grafana, пока `ops/grafana/alerting/` не удалён из репозитория (удаление — не раньше 2026-11-22). Каждый шаг — действие на проде, только с согласия владельца.
+Условие: вернуть алертинг в Grafana из git-истории (каталог `ops/grafana/alerting/` удалён из рабочего дерева 2026-11-21; последняя версия в теге `v26.11.0` / коммите `3dbabd6`). Каждый шаг — действие на проде, только с согласия владельца.
 
 1. Манифеста `grafana.yaml` в дереве больше нет (Grafana работает на NAS, см. [`ops/nas-monitoring/README.md`](../nas-monitoring/README.md)). Верните Grafana в k3s по разделу «Откат в k3s» того README: он берёт манифест из `a6aa553f~1`, последней версии перед удалением, и в ней алертинг Grafana выключен (`GF_UNIFIED_ALERTING_ENABLED=false`, тома `grafana-alerting` нет; проверено). Для отката алертинга возьмите вместо неё версию до переключения: `git show 008e27a2^:ops/nanopi-r5c-k3s/apps/monitoring/grafana.yaml` (проверено: том `grafana-alerting` на месте; между `008e27a2` и `a6aa553f` файл менялся только удалением) и положите её в `/tmp/rollback/grafana.yaml` после шага 3 отката в k3s (выгрузка манифестов), до шага 5 (применение с `replicas: 0`). Либо оставьте версию `a6aa553f~1`, уберите в ней `GF_UNIFIED_ALERTING_ENABLED=false` и верните том `alerting` из Secret `grafana-alerting` с его `volumeMounts`.
-2. Пересоздайте Secret `grafana-alerting`, он был удалён при переключении:
+2. Выгрузите удалённый каталог провижининга из коммита `3dbabd6` и пересоздайте Secret `grafana-alerting` (удалён при переключении):
 
    ```bash
+   mkdir -p /tmp/rollback
+   git archive 3dbabd6 ops/grafana/alerting | tar -x -C /tmp/rollback
    export KUBECONFIG=~/.kube/k3s-home.yaml
-   ./ops/grafana/alerting/deploy.sh --k3s
+   /tmp/rollback/ops/grafana/alerting/deploy.sh --k3s
    ```
 
 3. Примените Deployment и перезапустите Grafana (провижининг алертинга читается только при старте):
@@ -243,6 +245,7 @@ kubectl -n monitoring exec alertmanager-0 -- amtool alert add alertname=Alerting
 | 2026-11-08 17:31 | vmalert и Alertmanager выкачены в теневом режиме: vmalert с `-external.label=shadow=true`, Alertmanager отправляет `shadow="true"` в `blackhole`, кроме пульса. Уведомления слала только Grafana |
 | 2026-11-08 – 2026-11-09 | Теневой прогон 16 часов: 7 из 7 срабатываний `ClientRestarted` в Grafana совпали с vmalert с точностью до минуты |
 | 2026-11-09 09:30 | Переключение: метка `shadow` снята, в Grafana `GF_UNIFIED_ALERTING_ENABLED=false`, том с провижинингом алертинга убран, Secret `grafana-alerting` удалён |
+| 2026-11-21 | Архивный каталог провижининга `ops/grafana/alerting/` удалён из репозитория |
 
 Снятие метки меняет набор меток алертов, поэтому таймеры `for` не восстанавливаются из серий, записанных в теневом режиме: по уже горящим проблемам правила с `for` проходят `pending` заново.
 

@@ -243,10 +243,9 @@ scrape-конфига сам не попадает — его добавляют
 | раскатка и офлайн-проверки | `./ops/alerting/deploy.sh`, `./ops/alerting/test.sh` |
 | пульс `DeadMansSwitch` | [`ops/heartbeat/README.md`](../heartbeat/README.md) |
 
-Каталог [`alerting/`](alerting/) в этом каталоге (`rules.yaml`,
-`contact-points.yaml`, `policies.yaml`, `deploy.sh`) оставлен только для отката
-и не раскатывается. Его удаляют не раньше 2026-11-22; перед удалением
-проверьте, что отката не было и пульс идёт только от Alertmanager.
+Архивный каталог `alerting/` (`rules.yaml`, `contact-points.yaml`,
+`policies.yaml`, `deploy.sh`) удалён из репозитория 2026-11-21 после
+перехода на vmalert и Alertmanager.
 
 ## SMTP
 

@@ -21,7 +21,7 @@ ops/
 │       ├── storage/     # NFS provisioner (historical/fallback storage)
 │       └── vpn/         # AnyConnect (ocserv) VPN gateway
 ├── alerting/            # Alertmanager configs, vmalert rules, and rule unit tests
-├── grafana/             # Grafana dashboards (incl. outline-server/outline-client), alert policies, provisioning
+├── grafana/             # Grafana dashboards (incl. outline-server/outline-client) and dashboard provisioning
 ├── heartbeat/           # Dead-man switch receiver (heartbeat-watch on relay-a/relay-b)
 ├── hostacct/            # Per-LAN-host traffic accounting on GRE gre1 (nftables + node_exporter textfile)
 ├── k3s/                 # Cluster maintenance CronJobs (registry-gc)
