@@ -92,7 +92,7 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: 'outline-ws-rust restarted on {{ $labels.instance }}'
+          summary: 'outline-client restarted on {{ $labels.instance }}'
           description: 'The client process is younger than 3 minutes.'
 
   - name: nodes

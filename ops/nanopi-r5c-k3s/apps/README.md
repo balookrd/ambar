@@ -285,12 +285,12 @@ Ingress-объекты, не трогая workloads. Пока приложени
 
 Помечено `TODO` / `<...>` в файлах:
 
-- Топология outline: `outline-ws-rust` привязан к одному uplink или к каждой ноде?
+- Топология outline: `outline-client` привязан к одному uplink или к каждой ноде?
   От этого зависит выбор между DaemonSet и pinned Deployment (`outline/`).
 - Конфликт порта 443: ocserv слушает 443 tcp+udp; если outline/ingress уже
   заняли 443 под `hostNetwork`, развести по портам или нодам (`vpn/ocserv.yaml`).
 - Нет доверенного arm64-образа ocserv — собрать свой (`vpn/ocserv.yaml`).
-- Конфиги ocserv, `outline-ss-rust` и `outline-ws-rust` в ConfigMap — заглушки
+- Конфиги ocserv, `outline-server` и `outline-client` в ConfigMap — заглушки
   (`vpn/ocserv.yaml`, `outline/*.yaml`).
 
 ## Раскладка по классам данных

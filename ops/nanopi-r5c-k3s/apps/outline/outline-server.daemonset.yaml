@@ -1,23 +1,23 @@
-# outline-ss-rust — server data plane.
+# outline-server — server data plane.
 # Variant A: DaemonSet — same edge role on every node. Delete if pinning instead.
 # No PVC: stateless, config via ConfigMap, secrets via Secret (out of git).
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: outline-ss-rust
+  name: outline-server
   namespace: outline
 spec:
   selector:
-    matchLabels: { app: outline-ss-rust }
+    matchLabels: { app: outline-server }
   template:
     metadata:
-      labels: { app: outline-ss-rust }
+      labels: { app: outline-server }
     spec:
       hostNetwork: true                 # physical uplink / low-overhead ingress
       dnsPolicy: ClusterFirstWithHostNet
       containers:
-        - name: outline-ss-rust
-          image: <REGISTRY>/outline-ss-rust:<TAG>    # TODO: build arm64 image + push
+        - name: outline-server
+          image: <REGISTRY>/outline-server:<TAG>    # TODO: build arm64 image + push
           args: ["--config", "/etc/outline/config.toml"]
           securityContext:
             capabilities:

@@ -1,28 +1,28 @@
-# outline-ws-rust — client (SOCKS5/TUN ingress, uplink LB).
+# outline-client — client (SOCKS5/TUN ingress, uplink LB).
 # Variant B: pinned Deployment — bound to a specific node's uplink. Delete if
 # a DaemonSet fits instead. No PVC: stateless, config via ConfigMap/Secret.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: outline-ws-rust
+  name: outline-client
   namespace: outline
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
-    matchLabels: { app: outline-ws-rust }
+    matchLabels: { app: outline-client }
   template:
     metadata:
-      labels: { app: outline-ws-rust }
+      labels: { app: outline-client }
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       nodeSelector:
         kubernetes.io/hostname: k3s-1   # TODO: pin to the node owning the uplink
       containers:
-        - name: outline-ws-rust
-          image: <REGISTRY>/outline-ws-rust:<TAG>     # TODO: build arm64 image + push
+        - name: outline-client
+          image: <REGISTRY>/outline-client:<TAG>     # TODO: build arm64 image + push
           args: ["--config", "/etc/outline/config.toml"]
           securityContext:
             capabilities:

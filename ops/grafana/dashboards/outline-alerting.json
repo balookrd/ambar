@@ -754,7 +754,7 @@
       "type": "timeseries",
       "id": 14,
       "title": "Рестарты клиента по интервалам (ClientRestarted)",
-      "description": "Число рестартов outline-ws-rust в каждом интервале (changes от времени старта процесса). Наглядная история срабатываний ClientRestarted — видна независимо от того, был ли рестарт в последний час.",
+      "description": "Число рестартов outline-client в каждом интервале (changes от времени старта процесса). Наглядная история срабатываний ClientRestarted — видна независимо от того, был ли рестарт в последний час.",
       "datasource": {
         "type": "prometheus",
         "uid": "adnsc1wi03doga"

@@ -139,7 +139,7 @@ groups:
               # lossy for hours with nobody affected — senko was at 44% on
               # 2026-08-11 while nuxt2 carried the traffic cleanly — and mailing
               # about it is noise the operator learns to ignore. The lossy
-              # standby stays visible on the ws-rust dashboard (Uplink
+              # standby stays visible on the outline-client dashboard (Uplink
               # Comparison table), it just no longer wakes anyone.
               #
               # This also subsumes the older `uplink_enabled == 1` guard. That
@@ -232,7 +232,7 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: 'outline-ws-rust restarted on {{ $labels.instance }}'
+          summary: 'outline-client restarted on {{ $labels.instance }}'
           description: >-
             Fires while the client's process is younger than 3 minutes, read
             straight off outline_ws_start_time_seconds. It used to be inferred

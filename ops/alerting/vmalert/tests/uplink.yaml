@@ -150,7 +150,7 @@ tests:
         exp_alerts:
           - exp_labels: {instance: ubuntu, severity: info}
             exp_annotations:
-              summary: 'outline-ws-rust restarted on ubuntu'
+              summary: 'outline-client restarted on ubuntu'
               description: 'The client process is younger than 3 minutes.'
       - eval_time: 10m
         groupname: uplink

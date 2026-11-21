@@ -46,7 +46,7 @@ ssh sysadm@198.51.100.105 'docker logs --since 2m grafana 2>&1 | grep "provision
 Особенности режима `--nas`:
 
 - Дашборды собираются из трёх мест. Кроме этого каталога, скрипт забирает
-  `bins/outline-ss-rust/grafana/` и `bins/outline-ws-rust/grafana/` (если файлы
+  `bins/outline-server/grafana/` и `bins/outline-client/grafana/` (если файлы
   не переданы аргументами). Провайдер стоит с `disableDeletion: false`, и
   дашборд, не попавший в каталог `/volume2/grafana/dashboards`, будет удалён из БД при
   следующем старте.
@@ -96,8 +96,8 @@ ssh mmv@198.51.100.102 'sudo docker update --restart=unless-stopped grafana && s
 ## Дашборды
 
 Дашборды, не привязанные к бинарю, лежат в [`dashboards/`](dashboards/);
-дашборды бинарей — в `bins/outline-ws-rust/grafana/` и
-`bins/outline-ss-rust/grafana/`. Раскатывайте их все разом
+дашборды бинарей — в `bins/outline-client/grafana/` и
+`bins/outline-server/grafana/`. Раскатывайте их все разом
 (`./dashboards/deploy.sh --nas` собирает все три каталога) — см. «Раскатка».
 
 ### Дашборд `outline alerting`

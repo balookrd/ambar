@@ -33,8 +33,8 @@ if [ ${#files[@]} -eq 0 ]; then
 		# directory gets DELETED from the database on the next start.
 		bins_dir="${OUTLINE_PROXY_BINS_DIR:-../../../../outline-proxy/bins}"
 		[ -d "$bins_dir" ] || bins_dir="../../../bins"
-		files+=("$bins_dir"/outline-ss-rust/grafana/*.json)
-		files+=("$bins_dir"/outline-ws-rust/grafana/*.json)
+		files+=("$bins_dir"/outline-server/grafana/*.json)
+		files+=("$bins_dir"/outline-client/grafana/*.json)
 	fi
 fi
 [ ${#files[@]} -gt 0 ] || { echo "no dashboards to deploy" >&2; exit 1; }

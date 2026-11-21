@@ -85,7 +85,7 @@ scrape_configs:
     - source_labels: [hostname]
       target_label: instance
 - job_name: rust-ss-exporter
-  # VM otherwise keeps idle scrape sockets open; outline-ss-rust logs them as
+  # VM otherwise keeps idle scrape sockets open; outline-server logs them as
   # HeaderTimeout on .102/.104. Close after every scrape instead. This is only
   # HTTP connection reuse for scraping, not the Grafana dead-man heartbeat.
   disable_keepalive: true
