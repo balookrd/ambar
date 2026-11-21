@@ -31,7 +31,8 @@ ops/
 
 The cluster workloads migrated from pure NFS/local storage to `ambar` replicated block storage:
 - CSI Driver manifests are maintained in [`deploy/`](../deploy/) (`ambar-controller`, `ambar-agent`, CRDs, and StorageClasses).
-- StorageClasses: `ambar-r2` (2 replicas + witness) and `ambar-r3` (3 full replicas) backed by LVM volume group `k3s-vg` on NVMe.
+- StorageClasses: `ambar-r2` (2 replicas + witness, `Delete`), `ambar-r3` (3 full replicas, `Delete`), and `ambar-r3-retain` (3 full replicas, `Retain`, recommended for production PVCs) backed by LVM volume group `k3s-vg` on NVMe.
+- Observability: `ambar` agent `:9770/metrics` scraped by VictoriaMetrics (`nas-monitoring/victoria-metrics/scrape.yaml`), 8 alert rules in `alerting/vmalert/rules.yaml` (group `ambar`), and the [`ambar storage`](grafana/dashboards/ambar-storage.json) Grafana dashboard.
 - Physical node provisioning and benchmark scripts reside in [`stand/`](../stand/) (`r5c-*.sh`).
 - Control plane high availability is provided by `kube-vip` (VIP `198.18.1.30:6443`, managed via [`stand/r5c-kube-vip.sh`](../stand/r5c-kube-vip.sh)).
 

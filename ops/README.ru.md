@@ -31,7 +31,8 @@ ops/
 
 Прикладная нагрузка кластера переведена на реплицируемое блочное хранилище `ambar`:
 - Манифесты самого CSI-драйвера находятся в [`deploy/`](../deploy/) (`ambar-controller`, `ambar-agent`, CRD `ReplicatedVolume` и StorageClasses).
-- Классы хранилища: `ambar-r2` (2 копии + witness) и `ambar-r3` (3 дисковые копии) поверх LVM volume group `k3s-vg` на NVMe.
+- Классы хранилища: `ambar-r2` (2 копии + witness, `Delete`), `ambar-r3` (3 дисковые копии, `Delete`) и `ambar-r3-retain` (3 дисковые копии, `Retain`, рекомендуемый класс для рабочих PVC) поверх LVM volume group `k3s-vg` на NVMe.
+- Мониторинг и алертинг: метрики агента `:9770/metrics` собираются VictoriaMetrics (`nas-monitoring/victoria-metrics/scrape.yaml`), 8 правил в `alerting/vmalert/rules.yaml` (группа `ambar`) и дашборд Grafana [`ambar storage`](grafana/dashboards/ambar-storage.json).
 - Скрипты подготовки физических узлов и бенчмарков собраны в [`stand/`](../stand/) (`r5c-*.sh`).
 - Отказоустойчивый Control Plane обеспечивается `kube-vip` (VIP `198.18.1.30:6443`, автоматизирован через [`stand/r5c-kube-vip.sh`](../stand/r5c-kube-vip.sh)).
 

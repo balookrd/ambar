@@ -115,7 +115,7 @@ ssh mmv@198.51.100.102 'sudo docker update --restart=unless-stopped grafana && s
 | Панель | Запрос (сокращённо) | Что показывает |
 |--------|---------------------|----------------|
 | Активных алертов | `count(ALERTS{alertstate="firing",alertname!="DeadMansSwitch"})` | сколько алертов горит сейчас; `DeadMansSwitch` исключён, он firing всегда; ноль — норма |
-| Правил в работе | `count(vmalert_alerts_firing)` | сколько правил загрузил vmalert; меньше восьми — не тот `rules.yaml` в ConfigMap `vmalert-rules` или он не перечитался (`vmalert_config_last_reload_successful`, лог пода) |
+| Правил в работе | `count(vmalert_alerts_firing)` | сколько правил загрузил vmalert; меньше десяти — не тот `rules.yaml` в ConfigMap `vmalert-rules` или он не перечитался (`vmalert_config_last_reload_successful`, лог пода); актуально — 18 правил в 5 группах |
 | Ошибок вычисления за 24ч | `sum(increase(vmalert_alerting_rules_errors_total[24h]))` | правило, которое не вычисляется, не сработает никогда; ноль обязателен. При недоступной VictoriaMetrics панель пуста: метрики vmalert лежат в ней же, этот случай ловит пульс `DeadMansSwitch` |
 | Пропущенных тактов за час | `sum(increase(vmalert_iteration_missed_total[1h]))` | такты, которые vmalert пропустил, потому что предыдущий не закончился; ненулевое значение — алерт придёт с задержкой |
 | Уведомления по каналам (за час) | `alertmanager_notifications_total` и `alertmanager_notifications_failed_total` по `integration` | отправки по `email`, `telegram`, `webhook`; `webhook` — пульс, около 20 в час (по одной отправке на наблюдателя раз в ~6 минут), `email` и `telegram` растут только на настоящих срабатываниях; линии `failed` должны быть нулевыми |
@@ -184,6 +184,27 @@ scrape-конфига сам не попадает — его добавляют
 [`scrape.yaml`](../nas-monitoring/victoria-metrics/scrape.yaml) и выкладывают
 через `ops/nas-monitoring/deploy.sh`.
 
+### Дашборд `ambar storage`
+
+[`dashboards/ambar-storage.json`](dashboards/ambar-storage.json)
+(uid `ambar-storage`) — состояние реплицируемого хранилища `ambar` поверх LVM
+`k3s-vg` и DRBD 9 (16 панелей, фильтры по `$node` и `$volume`):
+
+- **Обзор кластера**: число онлайн-агентов `:9770`, тома без кворума, флаги
+  split-brain, узлы с taint `no-quorum`, активные алерты `Ambar*` и версия
+  модуля ядра DRBD (`ambar_module_info`).
+- **Тома и репликация**: сводная таблица по томам, графики `UpToDate`-реплик,
+  `ambar_volume_out_of_sync_bytes` по парам пиров и событий кворума/`StandAlone`.
+- **Бюджет LVM и состояние узлов**: выделенный объём `ambar_node_allocated_bytes`
+  относительно квоты 80 GiB (`ambar-nodes`), доступность агентов и taint узлов.
+- **Производительность DRBD**: IOPS, пропускная способность и средняя задержка
+  записи/`flush` по устройствам `drbd*` из `node-exporter`.
+
+Метрики `ambar` собираются VictoriaMetrics job `ambar` в
+[`scrape.yaml`](../nas-monitoring/victoria-metrics/scrape.yaml) с портов `:9770`
+узлов `k3s-1..3`. При точечной раскатке одного файла на NAS передавайте его
+аргументом: `./ops/grafana/dashboards/deploy.sh --nas ambar-storage.json`.
+
 ## Алертинг
 
 С 2026-11-09 алертинг Grafana выключен (`GF_UNIFIED_ALERTING_ENABLED=false` в
@@ -197,7 +218,7 @@ scrape-конфига сам не попадает — его добавляют
 
 | Что | Где |
 |-----|-----|
-| правила (8 штук), пороги, `for`, `keep_firing_for` | [`ops/alerting/vmalert/rules.yaml`](../alerting/vmalert/rules.yaml); обоснование чисел — комментарии над правилами и [спека](../../docs/superpowers/specs/2026-08-07-uplink-email-alerting-design.md) |
+| правила (18 штук в 5 группах), пороги, `for`, `keep_firing_for` | [`ops/alerting/vmalert/rules.yaml`](../alerting/vmalert/rules.yaml); обоснование чисел `uplink` — комментарии над правилами и [спека](../../docs/superpowers/specs/2026-08-07-uplink-email-alerting-design.md) |
 | маршруты и получатели (`owner`, `owner-events`, `heartbeat-observers`) | [`ops/alerting/alertmanager/alertmanager.yml`](../alerting/alertmanager/alertmanager.yml) |
 | раскатка и офлайн-проверки | `./ops/alerting/deploy.sh`, `./ops/alerting/test.sh` |
 | пульс `DeadMansSwitch` | [`ops/heartbeat/README.md`](../heartbeat/README.md) |

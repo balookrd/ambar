@@ -157,3 +157,78 @@ groups:
           severity: none
         annotations:
           summary: 'pulse from vmalert in k3s, always firing on purpose'
+
+  - name: ambar
+    interval: 1m
+    rules:
+      - alert: AmbarAgentDown
+        expr: 'up{job="ambar"} < 1'
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'ambar agent on {{ $labels.instance }} is down'
+          description: 'No successful scrape of port 9770 for 3 minutes: agent crashed, DRBD module failed to load, or node is unreachable.'
+
+      - alert: AmbarSplitBrain
+        expr: 'ambar_volume_manual_check_needed > 0'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'ambar split-brain on {{ $labels.node }} for volume {{ $labels.volume }}'
+          description: 'Auto-adjust attempts for StandAlone connection exhausted; manual DRBD split-brain resolution is required.'
+
+      - alert: AmbarVolumeNoQuorum
+        expr: 'ambar_volume_quorum == 0'
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'ambar volume {{ $labels.volume }} lost quorum on {{ $labels.node }}'
+          description: 'DRBD quorum is 0 for over 2 minutes: check lan0 interconnect and peer nodes.'
+
+      - alert: AmbarVolumeSingleReplica
+        expr: 'ambar_volume_uptodate_replicas < 2'
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'ambar volume {{ $labels.volume }} has fewer than 2 UpToDate replicas (seen from {{ $labels.node }})'
+          description: 'Redundancy is lost; one more node failure will halt volume I/O.'
+
+      - alert: AmbarVolumeStandalone
+        expr: 'ambar_volume_standalone_connections > 0'
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'ambar volume {{ $labels.volume }} has StandAlone connection on {{ $labels.node }}'
+          description: 'DRBD connection remained StandAlone for over 3 minutes without auto-reconnecting.'
+
+      - alert: AmbarVolumeDegraded
+        expr: 'ambar_volume_out_of_sync_bytes > 0'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'ambar volume {{ $labels.volume }} out of sync with {{ $labels.peer }} on {{ $labels.node }}'
+          description: 'Non-zero out_of_sync_bytes persisted for over 10 minutes: resync is stuck or peer is disconnected.'
+
+      - alert: AmbarNodeTainted
+        expr: 'ambar_node_tainted > 0'
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'k3s node {{ $labels.node }} carries ambar no-quorum taint'
+          description: 'Node has ambar.balookrd.github.io/no-quorum:NoSchedule taint for over 2 minutes.'
+
+      - alert: AmbarStorageBudgetHigh
+        expr: 'ambar_node_allocated_bytes / 85899345920 > 0.80'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'ambar LVM budget on {{ $labels.node }} is above 80 percent'
+          description: 'Allocated volume bytes exceeded 80 percent of the 80 GiB k3s-vg budget configured in ambar-nodes.'

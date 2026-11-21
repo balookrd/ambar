@@ -190,3 +190,20 @@ scrape_configs:
       regex: (?:https://)?(alertmanager-[0-9]+)\..*
       target_label: instance
       replacement: $1
+- job_name: ambar
+  static_configs:
+  - targets:
+    - 198.18.1.51:9770
+    labels:
+      hostname: 'k3s-1'
+  - targets:
+    - 198.18.1.52:9770
+    labels:
+      hostname: 'k3s-2'
+  - targets:
+    - 198.18.1.53:9770
+    labels:
+      hostname: 'k3s-3'
+  relabel_configs:
+    - source_labels: [hostname]
+      target_label: instance

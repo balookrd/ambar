@@ -26,3 +26,16 @@ parameters:
   replicas: "2"
   protocol: "C"
   csi.storage.k8s.io/fstype: ext4
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ambar-r3-retain
+provisioner: ambar.balookrd.github.io
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+reclaimPolicy: Retain
+parameters:
+  replicas: "3"
+  protocol: "C"
+  csi.storage.k8s.io/fstype: ext4

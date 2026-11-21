@@ -30,7 +30,7 @@ VictoriaMetrics ──запрос раз в 1 мин──► vmalert ──а�
                                                                          (heartbeat-watch: нет пульса 15 мин → письмо)
 ```
 
-- vmalert (`monitoring/vmalert`) каждую минуту выполняет 8 правил из `vmalert/rules.yaml` против `http://victoria-metrics.monitoring:8428`. Свои серии `ALERTS` и `ALERTS_FOR_STATE` он пишет туда же (`-remoteWrite.url`) и по ним восстанавливает таймеры `for` после рестарта (`-remoteRead.url`). Запущен с `-external.url=https://vmalert.k3s.fleet.example`, благодаря чему ссылка на источник (`Source:`) в уведомлениях Alertmanager ведёт на рабочий Ingress. Дашборд [`outline alerting`](../grafana/dashboards/outline-alerting.json) читает эти серии.
+- vmalert (`monitoring/vmalert`) каждую минуту выполняет 18 правил из `vmalert/rules.yaml` против `http://victoria-metrics.monitoring:8428`. Свои серии `ALERTS` и `ALERTS_FOR_STATE` он пишет туда же (`-remoteWrite.url`) и по ним восстанавливает таймеры `for` после рестарта (`-remoteRead.url`). Запущен с `-external.url=https://vmalert.k3s.fleet.example`, благодаря чему ссылка на источник (`Source:`) в уведомлениях Alertmanager ведёт на рабочий Ingress. Дашборд [`outline alerting`](../grafana/dashboards/outline-alerting.json) читает эти серии.
 - Alertmanager (`monitoring/alertmanager`) группирует алерты и доставляет их по маршрутам из `alertmanager/alertmanager.yml`. Запущен с `--web.external-url=https://alertmanager.k3s.fleet.example` (ссылки на silences и Web UI). Конфиг приезжает Secret'ом `alertmanager-config`, пароль SMTP — Secret'ом `alertmanager-smtp`.
 - Оба пода без `nodeSelector` и без PVC: отказ одного узла k3s не убирает алертинг вместе с VictoriaMetrics.
 - Правило `DeadMansSwitch` горит всегда, его уведомления и есть пульс. Приёмник `heartbeat-watch` работает на внешних cloud-релеях `relay-a` и `relay-b` (проект `outline-proxy`).
@@ -39,7 +39,7 @@ VictoriaMetrics ──запрос раз в 1 мин──► vmalert ──а�
 
 ## Правила
 
-Файл [`vmalert/rules.yaml`](vmalert/rules.yaml), четыре группы (`uplink`, `nodes`, `backups`, `heartbeat`), интервал вычисления `1m`, у `backups` — `5m`. Пороги, `for` и `keep_firing_for` перенесены из Grafana без изменений. Обоснование каждого числа — в комментариях над правилами и в
+Файл [`vmalert/rules.yaml`](vmalert/rules.yaml), пять групп (`uplink`, `nodes`, `backups`, `heartbeat`, `ambar`), интервал вычисления `1m`, у `backups` — `5m`. Пороги, `for` и `keep_firing_for` для группы `uplink` перенесены из Grafana без изменений. Обоснование каждого числа для `uplink` — в комментариях над правилами и в
 [спеке](../../docs/superpowers/specs/2026-08-07-uplink-email-alerting-design.md); здесь оно не дублируется.
 
 | Алерт | Выражение (сокращённо) | `for` | `keep_firing_for` | `severity` | Получатель |
@@ -54,6 +54,14 @@ VictoriaMetrics ──запрос раз в 1 мин──► vmalert ──а�
 | `BackupStale` | `time() - max by (backup) (last_over_time(nas_backup_last_success_timestamp_seconds[8d])) > 26 * 3600` | 10m | — | warning | `owner` |
 | `BackupMissing` | `absent_over_time(nas_backup_last_success_timestamp_seconds{backup="…"}[8d])` для `vmbackup`, `grafana`, `jellyfin` | 10m | — | warning | `owner` |
 | `DeadMansSwitch` | `count(up) >= 1` | 0s | — | none | `heartbeat-observers` |
+| `AmbarAgentDown` | `up{job="ambar"} < 1` | 3m | — | critical | `owner` |
+| `AmbarSplitBrain` | `ambar_volume_manual_check_needed > 0` | 1m | — | critical | `owner` |
+| `AmbarVolumeNoQuorum` | `ambar_volume_quorum == 0` | 2m | — | critical | `owner` |
+| `AmbarVolumeSingleReplica` | `ambar_volume_uptodate_replicas < 2` | 5m | — | critical | `owner` |
+| `AmbarVolumeStandalone` | `ambar_volume_standalone_connections > 0` | 3m | — | warning | `owner` |
+| `AmbarVolumeDegraded` | `ambar_volume_out_of_sync_bytes > 0` | 10m | — | warning | `owner` |
+| `AmbarNodeTainted` | `ambar_node_tainted > 0` | 2m | — | warning | `owner` |
+| `AmbarStorageBudgetHigh` | `ambar_node_allocated_bytes / 85899345920 > 0.80` | 15m | — | warning | `owner` |
 
 Ряд `nas_backup_last_success_timestamp_seconds{backup}` пишут сами контейнеры бэкапа на NAS после успешного прогона, раз в сутки, через `/api/v1/import/prometheus` VictoriaMetrics: `vmbackup` и `grafana-backup` из [`ops/nas-monitoring`](../nas-monitoring/README.md), `jellyfin-backup` из [`ops/nas-jellyfin-backup`](../nas-jellyfin-backup/README.md). Значение — Unix-время успеха. Ряд редкий, поэтому в выражении `last_over_time`: без него ряд выпадает из запроса через 5 минут после записи. Новый бэкап добавляется в `BackupMissing` отдельным селектором, `absent_over_time` не знает имён, которых не видел.
 
@@ -93,7 +101,7 @@ VictoriaMetrics ──запрос раз в 1 мин──► vmalert ──а�
 | Шаг | Что проверяет |
 |-----|---------------|
 | аннотации | в `summary` и `description` нет `<`, `>`, `&` |
-| `vmalert-tool unittest` | `vmalert/tests/{uplink,nodes,backups,heartbeat}.yaml`: срабатывание, `for`, `keep_firing_for`, точное совпадение меток и аннотаций |
+| `vmalert-tool unittest` | `vmalert/tests/{uplink,nodes,backups,heartbeat,ambar}.yaml`: срабатывание, `for`, `keep_firing_for`, точное совпадение меток и аннотаций |
 | рендер | `deploy.sh --render` подставляет фиктивные секреты, плейсхолдеров не остаётся |
 | `amtool check-config` | синтаксис и ссылки на получателей в `alertmanager.yml` |
 | `amtool config routes test` | каждый алерт попадает к ожидаемому получателю (включая `DeadMansSwitch` с меткой `shadow=true` и произвольный `AlertingSelfTest`) |

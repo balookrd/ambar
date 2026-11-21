@@ -1,0 +1,172 @@
+rule_files: [../rules.yaml]
+evaluation_interval: 1m
+tests:
+  - name: AmbarAgentDown fires after 3m and ignores other jobs
+    interval: 1m
+    input_series:
+      - series: 'up{job="ambar",instance="k3s-1"}'
+        values: '1 0x5'
+      - series: 'up{job="ambar",instance="k3s-2"}'
+        values: '1 0 0 1x3'
+      - series: 'up{job="node-exporter",instance="k3s-3"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        groupname: ambar
+        alertname: AmbarAgentDown
+        exp_alerts: []
+      - eval_time: 5m
+        groupname: ambar
+        alertname: AmbarAgentDown
+        exp_alerts:
+          - exp_labels: {job: ambar, instance: k3s-1, severity: critical}
+            exp_annotations:
+              summary: 'ambar agent on k3s-1 is down'
+              description: 'No successful scrape of port 9770 for 3 minutes: agent crashed, DRBD module failed to load, or node is unreachable.'
+
+  - name: AmbarSplitBrain fires after 1m when manual check is needed
+    interval: 1m
+    input_series:
+      - series: 'ambar_volume_manual_check_needed{node="k3s-1",volume="pvc-1111"}'
+        values: '0 1x3'
+      - series: 'ambar_volume_manual_check_needed{node="k3s-2",volume="pvc-1111"}'
+        values: '0x4'
+    alert_rule_test:
+      - eval_time: 1m
+        groupname: ambar
+        alertname: AmbarSplitBrain
+        exp_alerts: []
+      - eval_time: 3m
+        groupname: ambar
+        alertname: AmbarSplitBrain
+        exp_alerts:
+          - exp_labels: {node: k3s-1, volume: pvc-1111, severity: critical}
+            exp_annotations:
+              summary: 'ambar split-brain on k3s-1 for volume pvc-1111'
+              description: 'Auto-adjust attempts for StandAlone connection exhausted; manual DRBD split-brain resolution is required.'
+
+  - name: AmbarVolumeNoQuorum fires after 2m
+    interval: 1m
+    input_series:
+      - series: 'ambar_volume_quorum{node="k3s-3",volume="pvc-1111"}'
+        values: '1 0x4'
+      - series: 'ambar_volume_quorum{node="k3s-1",volume="pvc-1111"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 2m
+        groupname: ambar
+        alertname: AmbarVolumeNoQuorum
+        exp_alerts: []
+      - eval_time: 4m
+        groupname: ambar
+        alertname: AmbarVolumeNoQuorum
+        exp_alerts:
+          - exp_labels: {node: k3s-3, volume: pvc-1111, severity: critical}
+            exp_annotations:
+              summary: 'ambar volume pvc-1111 lost quorum on k3s-3'
+              description: 'DRBD quorum is 0 for over 2 minutes: check lan0 interconnect and peer nodes.'
+
+  - name: AmbarVolumeSingleReplica fires after 5m when fewer than 2 UpToDate
+    interval: 1m
+    input_series:
+      - series: 'ambar_volume_uptodate_replicas{node="k3s-1",volume="pvc-1111"}'
+        values: '3 1x7'
+      - series: 'ambar_volume_uptodate_replicas{node="k3s-2",volume="pvc-2222"}'
+        values: '2x8'
+    alert_rule_test:
+      - eval_time: 4m
+        groupname: ambar
+        alertname: AmbarVolumeSingleReplica
+        exp_alerts: []
+      - eval_time: 7m
+        groupname: ambar
+        alertname: AmbarVolumeSingleReplica
+        exp_alerts:
+          - exp_labels: {node: k3s-1, volume: pvc-1111, severity: critical}
+            exp_annotations:
+              summary: 'ambar volume pvc-1111 has fewer than 2 UpToDate replicas (seen from k3s-1)'
+              description: 'Redundancy is lost; one more node failure will halt volume I/O.'
+
+  - name: AmbarVolumeStandalone fires after 3m
+    interval: 1m
+    input_series:
+      - series: 'ambar_volume_standalone_connections{node="k3s-2",volume="pvc-1111"}'
+        values: '0 1x5'
+      - series: 'ambar_volume_standalone_connections{node="k3s-1",volume="pvc-1111"}'
+        values: '0 1 0x4'
+    alert_rule_test:
+      - eval_time: 2m
+        groupname: ambar
+        alertname: AmbarVolumeStandalone
+        exp_alerts: []
+      - eval_time: 5m
+        groupname: ambar
+        alertname: AmbarVolumeStandalone
+        exp_alerts:
+          - exp_labels: {node: k3s-2, volume: pvc-1111, severity: warning}
+            exp_annotations:
+              summary: 'ambar volume pvc-1111 has StandAlone connection on k3s-2'
+              description: 'DRBD connection remained StandAlone for over 3 minutes without auto-reconnecting.'
+
+  - name: AmbarVolumeDegraded fires after 10m of non-zero out_of_sync_bytes
+    interval: 1m
+    input_series:
+      - series: 'ambar_volume_out_of_sync_bytes{node="k3s-1",peer="k3s-3",volume="pvc-1111"}'
+        values: '0 4096x12'
+      - series: 'ambar_volume_out_of_sync_bytes{node="k3s-1",peer="k3s-2",volume="pvc-1111"}'
+        values: '0 4096x5 0x7'
+    alert_rule_test:
+      - eval_time: 9m
+        groupname: ambar
+        alertname: AmbarVolumeDegraded
+        exp_alerts: []
+      - eval_time: 12m
+        groupname: ambar
+        alertname: AmbarVolumeDegraded
+        exp_alerts:
+          - exp_labels: {node: k3s-1, peer: k3s-3, volume: pvc-1111, severity: warning}
+            exp_annotations:
+              summary: 'ambar volume pvc-1111 out of sync with k3s-3 on k3s-1'
+              description: 'Non-zero out_of_sync_bytes persisted for over 10 minutes: resync is stuck or peer is disconnected.'
+
+  - name: AmbarNodeTainted fires after 2m
+    interval: 1m
+    input_series:
+      - series: 'ambar_node_tainted{node="k3s-3"}'
+        values: '0 1x4'
+      - series: 'ambar_node_tainted{node="k3s-1"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        groupname: ambar
+        alertname: AmbarNodeTainted
+        exp_alerts: []
+      - eval_time: 4m
+        groupname: ambar
+        alertname: AmbarNodeTainted
+        exp_alerts:
+          - exp_labels: {node: k3s-3, severity: warning}
+            exp_annotations:
+              summary: 'k3s node k3s-3 carries ambar no-quorum taint'
+              description: 'Node has ambar.balookrd.github.io/no-quorum:NoSchedule taint for over 2 minutes.'
+
+  - name: AmbarStorageBudgetHigh fires after 15m above 80 percent of 80 GiB
+    interval: 1m
+    input_series:
+      - series: 'ambar_node_allocated_bytes{node="k3s-1"}'
+        values: '70000000000x18'
+      - series: 'ambar_node_allocated_bytes{node="k3s-2"}'
+        values: '68719476735x18'
+    alert_rule_test:
+      - eval_time: 14m
+        groupname: ambar
+        alertname: AmbarStorageBudgetHigh
+        exp_alerts: []
+      - eval_time: 16m
+        groupname: ambar
+        alertname: AmbarStorageBudgetHigh
+        exp_alerts:
+          - exp_labels: {node: k3s-1, severity: warning}
+            exp_annotations:
+              summary: 'ambar LVM budget on k3s-1 is above 80 percent'
+              description: 'Allocated volume bytes exceeded 80 percent of the 80 GiB k3s-vg budget configured in ambar-nodes.'
