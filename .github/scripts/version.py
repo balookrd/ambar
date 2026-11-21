@@ -115,22 +115,25 @@ def cmd_self_test(root: Path) -> int:
             f"Cargo.toml ({cargo_version}) and Cargo.lock ({lock_version}) are out of sync"
         )
 
+    target_version = "99.12.0" if cargo_version != "99.12.0" else "99.12.1"
+    other_version = "99.12.1" if target_version == "99.12.0" else "99.12.0"
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_root = Path(tmp)
         shutil.copy2(root / "Cargo.toml", tmp_root / "Cargo.toml")
         shutil.copy2(root / "Cargo.lock", tmp_root / "Cargo.lock")
 
-        cmd_set(tmp_root, "26.11.0")
-        cmd_check(tmp_root, "26.11.0")
+        cmd_set(tmp_root, target_version)
+        cmd_check(tmp_root, target_version)
         got_cargo, got_lock = read_versions(tmp_root)
-        assert got_cargo == "26.11.0", f"expected 26.11.0, got {got_cargo}"
-        assert got_lock == "26.11.0", f"expected 26.11.0, got {got_lock}"
+        assert got_cargo == target_version, f"expected {target_version}, got {got_cargo}"
+        assert got_lock == target_version, f"expected {target_version}, got {got_lock}"
 
         for bad in ("26.01.0", "26.13.0", "1.2.3", "v26.11.0", "26.11.0\n"):
             expect_exit(validate_calver, bad)
             expect_exit(cmd_set, tmp_root, bad)
 
-        expect_exit(cmd_check, tmp_root, "26.11.1")
+        expect_exit(cmd_check, tmp_root, other_version)
 
         # Verify no unrelated lines in Cargo.toml or Cargo.lock changed.
         orig_cargo_lines = (root / "Cargo.toml").read_text(encoding="utf-8").splitlines()
