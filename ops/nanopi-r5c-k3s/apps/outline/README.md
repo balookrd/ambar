@@ -18,8 +18,8 @@
 
 | Файл | Объект | Что уже задано |
 |---|---|---|
-| `outline-server.daemonset.yaml` | `DaemonSet` | `hostNetwork: true`, `NET_ADMIN` (SO_MARK / fwmark), ConfigMap `outline-ss-config` + Secret `outline-ss-secrets` |
-| `outline-client.deployment.yaml` | `Deployment` | `hostNetwork: true`, `nodeSelector` на `k3s-1`, `NET_ADMIN`, `/dev/net/tun` через `hostPath`, ConfigMap `outline-ws-config` + Secret `outline-ws-secrets` |
+| `outline-server.daemonset.yaml` | `DaemonSet` | `hostNetwork: true`, `NET_ADMIN` (SO_MARK / fwmark), ConfigMap `outline-server-config` + Secret `outline-server-secrets` |
+| `outline-client.deployment.yaml` | `Deployment` | `hostNetwork: true`, `nodeSelector` на `k3s-1`, `NET_ADMIN`, `/dev/net/tun` через `hostPath`, ConfigMap `outline-client-config` + Secret `outline-client-secrets` |
 
 Образ (`<REGISTRY>/…:<TAG>`) и конфиг в ConfigMap — заглушки, поэтому `deploy.sh`
 оба файла пропускает. После выбора варианта лишний файл удалить.

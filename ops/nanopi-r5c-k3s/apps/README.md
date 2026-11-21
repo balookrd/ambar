@@ -270,7 +270,7 @@ KUBECONFIG=~/.kube/k3s-home.yaml kubectl -n monitoring \
 |---|---|---|
 | HTTP (Grafana, outline-ui, z2m frontend, VictoriaMetrics, реестр) | Traefik Ingress | `198.51.100.200` (VIP MetalLB) |
 | MQTT L4 (внешние клиенты) | LoadBalancer мимо Traefik | `198.51.100.201` |
-| outline-ss/ws, ocserv | hostNetwork, свои порты | IP прибитой ноды |
+| outline-server/client, ocserv | hostNetwork, свои порты | IP прибитой ноды |
 
 Пул MetalLB `198.51.100.200–210` исключить из DHCP роутера. DNS: wildcard
 `*.k3s.fleet.example → 198.51.100.200` на Keenetic, только внутри LAN. Сертификат
@@ -303,7 +303,7 @@ Ingress-объекты, не трогая workloads. Пока приложени
 | `mosquitto`, `zigbee2mqtt`, все 5 сервисов `smarthome` | стейт / `devices.json` / БД | PVC `ambar-r3-retain` (RWO, 3 реплики DRBD) |
 | реестр | блобы OCI | PVC `registry-data` (`10Gi`, `ambar-r3-retain`, 3 реплики DRBD; `registry-gc` по `podAffinity`) |
 | ocserv | `ocpasswd` | PVC `ocserv-passwd` (`256Mi`, шаблон `ambar-r3-retain`) |
-| outline-ss/ws, ocserv | сертификаты/конфиг | Secret/ConfigMap, без PVC |
+| outline-server/client, ocserv | сертификаты/конфиг | Secret/ConfigMap, без PVC |
 
 ## Конвенции
 

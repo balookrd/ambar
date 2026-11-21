@@ -46,7 +46,7 @@ MQTT идёт мимо Traefik, чтобы рестарт ingress не рвал 
 
 ## Что не через ingress
 
-- outline-ss/ws, ocserv — `hostNetwork`, свои публичные порты на прибитой ноде,
+- outline-server/client, ocserv — `hostNetwork`, свои публичные порты на прибитой ноде,
   минуют и MetalLB, и Traefik.
 
 ## Установка

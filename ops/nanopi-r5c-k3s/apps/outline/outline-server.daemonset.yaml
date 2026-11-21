@@ -31,15 +31,15 @@ spec:
         - name: config
           projected:
             sources:
-              - configMap: { name: outline-ss-config }
-              - secret:    { name: outline-ss-secrets }   # PSK/keys — create out of band
+              - configMap: { name: outline-server-config }
+              - secret:    { name: outline-server-secrets }   # PSK/keys — create out of band
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: outline-ss-config
+  name: outline-server-config
   namespace: outline
 data:
   config.toml: |
     # TODO: server config (listeners, outbound, control). No secrets here —
-    # PSK/keys go into the outline-ss-secrets Secret and are projected together.
+    # PSK/keys go into the outline-server-secrets Secret and are projected together.

@@ -37,8 +37,8 @@ spec:
         - name: config
           projected:
             sources:
-              - configMap: { name: outline-ws-config }
-              - secret:    { name: outline-ws-secrets }   # UUID/tokens — create out of band
+              - configMap: { name: outline-client-config }
+              - secret:    { name: outline-client-secrets }   # UUID/tokens — create out of band
         - name: tun
           hostPath:
             path: /dev/net/tun
@@ -47,9 +47,9 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: outline-ws-config
+  name: outline-client-config
   namespace: outline
 data:
   config.toml: |
     # TODO: client config (uplinks, routing, TUN). No secrets here — UUID/tokens
-    # go into the outline-ws-secrets Secret and are projected together.
+    # go into the outline-client-secrets Secret and are projected together.
