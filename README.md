@@ -85,12 +85,16 @@ Agent CLI flags:
 - `--metrics-bind <ip>`: bind address for metrics (default: `0.0.0.0`).
 
 Exported Prometheus metrics:
-- `ambar_node_allocated_bytes{node}`: total allocated sparse volume file bytes on the node.
+- `ambar_node_allocated_bytes{node}`: total allocated volume storage on the node in bytes.
 - `ambar_node_tainted{node}`: `1` if node is tainted with `no-quorum:NoSchedule`, `0` otherwise.
+- `ambar_volume_uptodate_replicas{node, volume}`: count of `UpToDate` disk replicas visible for the volume.
+- `ambar_volume_out_of_sync_bytes{node, peer, volume}`: out-of-sync bytes between this node and a peer.
 - `ambar_volume_quorum{node, volume}`: `1` if the volume has DRBD quorum on the node, `0` otherwise.
 - `ambar_volume_standalone_connections{node, volume}`: count of peer connections in `StandAlone` state.
 - `ambar_volume_manual_check_needed{node, volume}`: `1` if auto-adjust attempts are exhausted (split-brain alert), `0` otherwise.
 - `ambar_module_info{version}`: DRBD kernel module version info metric.
+
+StorageClasses in [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 replicas, `Delete`), `ambar-r2` (2 replicas + witness, `Delete`), and `ambar-r3-retain` (3 replicas, `Retain`, recommended for production workloads). Monitoring scrape targets, `vmalert` rules, and the `ambar-storage` Grafana dashboard live under [`ops/`](ops/README.md).
 
 ## NanoPi R5C Benchmarks
 

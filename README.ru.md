@@ -85,12 +85,16 @@ kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica move my-vol node
 - `--metrics-bind <ip>`: адрес привязки сервера метрик (по умолчанию: `0.0.0.0`).
 
 Экспортируемые метрики Prometheus:
-- `ambar_node_allocated_bytes{node}`: суммарный выделенный объём разреженных файлов томов на узле.
+- `ambar_node_allocated_bytes{node}`: суммарный выделенный объём томов на узле в байтах.
 - `ambar_node_tainted{node}`: `1`, если на узле выставлен taint `no-quorum:NoSchedule`, иначе `0`.
+- `ambar_volume_uptodate_replicas{node, volume}`: число дисковых реплик в состоянии `UpToDate` для данного тома.
+- `ambar_volume_out_of_sync_bytes{node, peer, volume}`: объём несинхронизированных данных с пиром в байтах.
 - `ambar_volume_quorum{node, volume}`: `1`, если у тома на узле есть кворум DRBD, иначе `0`.
 - `ambar_volume_standalone_connections{node, volume}`: число соединений тома в состоянии `StandAlone`.
 - `ambar_volume_manual_check_needed{node, volume}`: `1`, если исчерпаны попытки adjust (алерт split-brain), иначе `0`.
 - `ambar_module_info{version}`: информационная метрика с версией модуля ядра DRBD.
+
+Классы хранения в [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 копии, `Delete`), `ambar-r2` (2 копии + witness, `Delete`) и `ambar-r3-retain` (3 копии, `Retain`, рекомендуемый класс для боевых нагрузок). Конфигурация скрейпа VictoriaMetrics, правила `vmalert` и дашборд Grafana `ambar-storage` находятся в [`ops/`](ops/README.ru.md).
 
 ## Замеры на целевом железе (NanoPi R5C)
 
