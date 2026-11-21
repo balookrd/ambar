@@ -1,0 +1,1427 @@
+{
+  "uid": "netcraze-system",
+  "title": "Netcraze Router — System & WAN",
+  "description": "Системные метрики, статусы и трафик WAN/GRE-туннелей роутера Netcraze Ultra (NC-1812) через snmp-exporter и VictoriaMetrics.",
+  "tags": [
+    "netcraze",
+    "router",
+    "snmp"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "Netcraze — Interfaces",
+      "type": "link",
+      "url": "/d/netcraze-interfaces",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Сводка",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "SNMP статус",
+      "description": "Состояние последнего опроса роутера через snmp-exporter (up{job=\"netcraze-snmp\"}).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "up{job=\"netcraze-snmp\"}",
+          "legendFormat": "SNMP",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Uptime",
+      "description": "Время непрерывной работы роутера по SNMPv2-MIB::sysUpTime.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 3,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "sysUpTime{job=\"netcraze-snmp\"} / 100",
+          "legendFormat": "Uptime",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 600
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Устройство и прошивка",
+      "description": "Модель и версия NDMS из SNMPv2-MIB::sysDescr.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 7,
+        "x": 7,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "sysDescr{job=\"netcraze-snmp\"}",
+          "legendFormat": "{{sysDescr}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "name",
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "CPU",
+      "description": "Суммарная загрузка CPU за 5 минут (User + Nice + System относительно всех тиков).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 14,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "100 * (rate(ssCpuRawUser{job=\"netcraze-snmp\"}[5m]) + rate(ssCpuRawNice{job=\"netcraze-snmp\"}[5m]) + rate(ssCpuRawSystem{job=\"netcraze-snmp\"}[5m])) / clamp_min(rate(ssCpuRawUser{job=\"netcraze-snmp\"}[5m]) + rate(ssCpuRawNice{job=\"netcraze-snmp\"}[5m]) + rate(ssCpuRawSystem{job=\"netcraze-snmp\"}[5m]) + rate(ssCpuRawIdle{job=\"netcraze-snmp\"}[5m]), 1e-6)",
+          "legendFormat": "CPU",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "RAM (реальная)",
+      "description": "Реально занятая память без освобождаемых буферов и page cache: (memTotalReal - memAvailReal - memBuffer - memCached) / memTotalReal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "100 * (memTotalReal{job=\"netcraze-snmp\"} - memAvailReal{job=\"netcraze-snmp\"} - memBuffer{job=\"netcraze-snmp\"} - memCached{job=\"netcraze-snmp\"}) / memTotalReal{job=\"netcraze-snmp\"}",
+          "legendFormat": "RAM",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 75
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Load 1m",
+      "description": "Средняя нагрузка за 1 минуту (UCD-SNMP-MIB::laLoadInt / 100).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 19,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "laLoadInt{job=\"netcraze-snmp\",laNames=\"Load-1\"} / 100",
+          "legendFormat": "Load 1m",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 4
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 7,
+      "title": "Диск OPKG",
+      "description": "Заполнение смонтированного USB/OPKG-раздела (/tmp/mnt/OPKG/, без UUID-дубликата).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "max(dskPercent{job=\"netcraze-snmp\",dskPath!~\"/tmp/mnt/[0-9a-f]{8}-[0-9a-f]{4}-.*\"})",
+          "legendFormat": "OPKG",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 75
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 8,
+      "title": "Статус WAN (ISP1 / ISP2)",
+      "description": "Оперативный статус внешних интерфейсов провайдеров (ifOperStatus).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "ifOperStatus{job=\"netcraze-snmp\",ifName=~\"ISP.*\"}",
+          "legendFormat": "{{ifName}} ({{ifAlias}})",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "DOWN",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "horizontal",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 9,
+      "title": "Статус GRE-туннелей (Gre0 / Gre1)",
+      "description": "Оперативный статус GRE-туннелей (outline-gre0 / outline-gre1).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "ifOperStatus{job=\"netcraze-snmp\",ifName=~\"Gre.*\"}",
+          "legendFormat": "{{ifName}} ({{ifAlias}})",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "DOWN",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "horizontal",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "title": "WAN и GRE-туннели",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Трафик WAN (бит/с)",
+      "description": "Входящий (RX) и исходящий (TX) битрейт на интерфейсах провайдеров ISP1 / ISP2 по 64-битным счётчикам ifHC*Octets.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInOctets{job=\"netcraze-snmp\",ifName=~\"ISP.*\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} ({{ifAlias}}) RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutOctets{job=\"netcraze-snmp\",ifName=~\"ISP.*\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} ({{ifAlias}}) TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never"
+          },
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Трафик GRE-туннелей (бит/с)",
+      "description": "Входящий (RX) и исходящий (TX) битрейт через GRE-туннели outline-gre0 и outline-gre1.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInOctets{job=\"netcraze-snmp\",ifName=~\"Gre.*\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} ({{ifAlias}}) RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutOctets{job=\"netcraze-snmp\",ifName=~\"Gre.*\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} ({{ifAlias}}) TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never"
+          },
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Пакеты в секунду на WAN и GRE (PPS)",
+      "description": "Частота unicast-пакетов (RX и TX) на интерфейсах ISP* и Gre*.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInUcastPkts{job=\"netcraze-snmp\",ifName=~\"ISP.*|Gre.*\"}[2m])",
+          "legendFormat": "{{ifName}} RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutUcastPkts{job=\"netcraze-snmp\",ifName=~\"ISP.*|Gre.*\"}[2m])",
+          "legendFormat": "{{ifName}} TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "pps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "title": "Ресурсы системы (CPU, Load, RAM)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 15,
+      "title": "CPU по режимам (%)",
+      "description": "Распределение активного времени CPU по счётчикам UCD-SNMP-MIB::ssCpuRaw* (User, System, Nice).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "100 * rate(ssCpuRawUser{job=\"netcraze-snmp\"}[2m]) / clamp_min(rate(ssCpuRawUser{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawNice{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawSystem{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawIdle{job=\"netcraze-snmp\"}[2m]), 1e-6)",
+          "legendFormat": "User"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "100 * rate(ssCpuRawSystem{job=\"netcraze-snmp\"}[2m]) / clamp_min(rate(ssCpuRawUser{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawNice{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawSystem{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawIdle{job=\"netcraze-snmp\"}[2m]), 1e-6)",
+          "legendFormat": "System"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "100 * rate(ssCpuRawNice{job=\"netcraze-snmp\"}[2m]) / clamp_min(rate(ssCpuRawUser{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawNice{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawSystem{job=\"netcraze-snmp\"}[2m]) + rate(ssCpuRawIdle{job=\"netcraze-snmp\"}[2m]), 1e-6)",
+          "legendFormat": "Nice"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 45,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Load Average",
+      "description": "Средняя очередь выполнения процессов за 1, 5 и 15 минут (laLoadInt / 100).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "laLoadInt{job=\"netcraze-snmp\"} / 100",
+          "legendFormat": "{{laNames}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "decimals": 2,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Оперативная память (RAM)",
+      "description": "Распределение RAM (Used, Buffers, Cached, Free) и общий объём Total по UCD-SNMP-MIB::memory.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "(memTotalReal{job=\"netcraze-snmp\"} - memAvailReal{job=\"netcraze-snmp\"} - memBuffer{job=\"netcraze-snmp\"} - memCached{job=\"netcraze-snmp\"}) * 1024",
+          "legendFormat": "Used"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "memBuffer{job=\"netcraze-snmp\"} * 1024",
+          "legendFormat": "Buffers"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "memCached{job=\"netcraze-snmp\"} * 1024",
+          "legendFormat": "Cached"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "memAvailReal{job=\"netcraze-snmp\"} * 1024",
+          "legendFormat": "Free"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "memTotalReal{job=\"netcraze-snmp\"} * 1024",
+          "legendFormat": "Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Total"
+            },
+            "properties": [
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 103,
+      "title": "Диск USB/OPKG и стек TCP/UDP",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "USB/OPKG диск (занято / свободно / всего)",
+      "description": "Ёмкость и использование накопителя /tmp/mnt/OPKG/ (исключён дубликат по UUID).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "dskUsed{job=\"netcraze-snmp\",dskPath!~\"/tmp/mnt/[0-9a-f]{8}-[0-9a-f]{4}-.*\"} * 1024",
+          "legendFormat": "{{dskPath}} Used"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "dskAvail{job=\"netcraze-snmp\",dskPath!~\"/tmp/mnt/[0-9a-f]{8}-[0-9a-f]{4}-.*\"} * 1024",
+          "legendFormat": "{{dskPath}} Avail"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "dskTotal{job=\"netcraze-snmp\",dskPath!~\"/tmp/mnt/[0-9a-f]{8}-[0-9a-f]{4}-.*\"} * 1024",
+          "legendFormat": "{{dskPath}} Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "USB/OPKG диск — заполнение места и Inodes (%)",
+      "description": "Процент занятого места (dskPercent) и индексных дескрипторов (dskPercentNode).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "dskPercent{job=\"netcraze-snmp\",dskPath!~\"/tmp/mnt/[0-9a-f]{8}-[0-9a-f]{4}-.*\"}",
+          "legendFormat": "{{dskPath}} Space %"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "dskPercentNode{job=\"netcraze-snmp\",dskPath!~\"/tmp/mnt/[0-9a-f]{8}-[0-9a-f]{4}-.*\"}",
+          "legendFormat": "{{dskPath}} Inodes %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never"
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "TCP: установленные соединения и события (/с)",
+      "description": "Текущие соединения локального TCP-стека роутера (tcpCurrEstab, левая ось) и частота открытий/ошибок/ретрансмитов/RST (правая ось).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "tcpCurrEstab{job=\"netcraze-snmp\"}",
+          "legendFormat": "Established"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(tcpActiveOpens{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "ActiveOpens/s"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(tcpPassiveOpens{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "PassiveOpens/s"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(tcpAttemptFails{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "AttemptFails/s"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(tcpRetransSegs{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "RetransSegs/s"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(tcpOutRsts{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "OutRsts/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*/s$"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "ops"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "UDP: датаграммы и ошибки (/с)",
+      "description": "64-битные счётчики входящих/исходящих UDP-датаграмм, недоступных портов (udpNoPorts) и ошибок приёма (udpInErrors).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(udpHCInDatagrams{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "RX datagrams/s"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(udpHCOutDatagrams{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "TX datagrams/s"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(udpNoPorts{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "NoPorts/s"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(udpInErrors{job=\"netcraze-snmp\"}[2m])",
+          "legendFormat": "InErrors/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "pps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

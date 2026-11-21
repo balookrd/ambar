@@ -120,3 +120,18 @@ services:
       - /:/host:ro,rslave
     mem_limit: 128m
     restart: unless-stopped
+
+  snmp-exporter:
+    image: prom/snmp-exporter@sha256:e5f1aba929145cea2a3bad89c29959efaec0dc26fb87e3761414616a1a392c1c # v0.31.0
+    container_name: snmp-exporter
+    user: "1000:1000"
+    command:
+      - --config.file=/etc/snmp_exporter/snmp.yml
+      - --config.file=/etc/snmp_exporter/extra/netcraze-extra.yml
+      - --snmp.module-concurrency=4
+    ports:
+      - "127.0.0.1:9116:9116"
+    volumes:
+      - ./snmp-exporter:/etc/snmp_exporter/extra:ro
+    mem_limit: 128m
+    restart: unless-stopped

@@ -1,0 +1,1086 @@
+{
+  "uid": "netcraze-interfaces",
+  "title": "Netcraze Router — Interfaces",
+  "description": "Детальный сетевой мониторинг интерфейсов Netcraze Ultra (NC-1812): сводная таблица, LAN-мосты, Wi-Fi 2.4/5 ГГц, физические порты 0..5, ошибки и сбросы.",
+  "tags": [
+    "netcraze",
+    "router",
+    "snmp"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "Netcraze — System & WAN",
+      "type": "link",
+      "url": "/d/netcraze-system",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "interface",
+        "label": "Интерфейс",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "adnsc1wi03doga"
+        },
+        "definition": "label_values(ifOperStatus{job=\"netcraze-snmp\"}, ifName)",
+        "query": {
+          "query": "label_values(ifOperStatus{job=\"netcraze-snmp\"}, ifName)",
+          "refId": "interface"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Сводная таблица интерфейсов",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "id": 1,
+      "title": "Интерфейсы ($interface)",
+      "description": "Статус, скорость линка (для физических портов), текущий RX/TX (бит/с), ошибки и сбросы по IF-MIB / ifXTable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "max by (ifIndex, ifName, ifAlias, ifDescr) (ifOperStatus{job=\"netcraze-snmp\",ifName=~\"$interface\"})",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "max by (ifIndex, ifName, ifAlias, ifDescr) (ifHighSpeed{job=\"netcraze-snmp\",ifName=~\"$interface\"})",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "sum by (ifIndex, ifName, ifAlias, ifDescr) (rate(ifHCInOctets{job=\"netcraze-snmp\",ifName=~\"$interface\"}[2m]) * 8)",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "sum by (ifIndex, ifName, ifAlias, ifDescr) (rate(ifHCOutOctets{job=\"netcraze-snmp\",ifName=~\"$interface\"}[2m]) * 8)",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "sum by (ifIndex, ifName, ifAlias, ifDescr) (rate(ifInErrors{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m]) + rate(ifOutErrors{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m]))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "sum by (ifIndex, ifName, ifAlias, ifDescr) (rate(ifInDiscards{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m]) + rate(ifOutDiscards{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m]))",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "ifIndex": 0,
+              "ifName": 1,
+              "ifAlias": 2,
+              "ifDescr": 3,
+              "Value #A": 4,
+              "Value #B": 5,
+              "Value #C": 6,
+              "Value #D": 7,
+              "Value #E": 8,
+              "Value #F": 9
+            },
+            "renameByName": {
+              "ifIndex": "#",
+              "ifName": "Интерфейс",
+              "ifAlias": "Описание",
+              "ifDescr": "Системное имя",
+              "Value #A": "Статус",
+              "Value #B": "Линк (Мбит/с)",
+              "Value #C": "RX",
+              "Value #D": "TX",
+              "Value #E": "Ошибки/с",
+              "Value #F": "Сбросы/с"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Статус"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "UP",
+                        "color": "green"
+                      },
+                      "2": {
+                        "text": "DOWN",
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Линк (Мбит/с)"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "—"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "RX"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bps"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TX"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bps"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ошибки/с"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "pps"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 0.1
+                    },
+                    {
+                      "color": "red",
+                      "value": 10
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Сбросы/с"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "pps"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 0.1
+                    },
+                    {
+                      "color": "red",
+                      "value": 10
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "RX",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "title": "LAN-мосты и Wi-Fi",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Мосты Home / Guest (бит/с)",
+      "description": "Битрейт RX и TX на логических мостах локальной и гостевой сетей.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInOctets{job=\"netcraze-snmp\",ifName=~\"Home|Guest\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutOctets{job=\"netcraze-snmp\",ifName=~\"Home|Guest\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never"
+          },
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Wi-Fi 2.4 / 5 ГГц (бит/с)",
+      "description": "Битрейт RX и TX на точках доступа AccessPoint, AccessPoint_5G, GuestWiFi, GuestWiFi_5G.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInOctets{job=\"netcraze-snmp\",ifName=~\"AccessPoint.*|GuestWiFi.*\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutOctets{job=\"netcraze-snmp\",ifName=~\"AccessPoint.*|GuestWiFi.*\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never"
+          },
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Wi-Fi: ошибки и сбросы пакетов (/с)",
+      "description": "Интенсивность ошибок (ifInErrors/ifOutErrors) и сбросов (ifInDiscards/ifOutDiscards) на беспроводных интерфейсах.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifInErrors{job=\"netcraze-snmp\",ifName=~\"AccessPoint.*|GuestWiFi.*\"}[5m])",
+          "legendFormat": "{{ifName}} in_err"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifOutErrors{job=\"netcraze-snmp\",ifName=~\"AccessPoint.*|GuestWiFi.*\"}[5m])",
+          "legendFormat": "{{ifName}} out_err"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifInDiscards{job=\"netcraze-snmp\",ifName=~\"AccessPoint.*|GuestWiFi.*\"}[5m])",
+          "legendFormat": "{{ifName}} in_drop"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifOutDiscards{job=\"netcraze-snmp\",ifName=~\"AccessPoint.*|GuestWiFi.*\"}[5m])",
+          "legendFormat": "{{ifName}} out_drop"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "pps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "title": "Физические порты Ethernet (0..5)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "id": 7,
+      "title": "Статус физических портов 0..5",
+      "description": "Состояние линка на физических портах 0..5.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "ifOperStatus{job=\"netcraze-snmp\",ifName=~\"[0-5]\"}",
+          "legendFormat": "Порт {{ifName}} ({{ifDescr}})",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "DOWN",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 8,
+      "title": "Скорость линка портов 0..5 (Мбит/с)",
+      "description": "Скорость согласованного линка по ifHighSpeed (100 / 1000 / 2500 Мбит/с).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "ifHighSpeed{job=\"netcraze-snmp\",ifName=~\"[0-5]\"}",
+          "legendFormat": "Порт {{ifName}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "green",
+                "value": 1000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "Трафик физических портов 0..5 (бит/с)",
+      "description": "Битрейт RX и TX на физических Ethernet-портах 0..5.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInOctets{job=\"netcraze-snmp\",ifName=~\"[0-5]\"}[2m]) * 8",
+          "legendFormat": "Порт {{ifName}} RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutOctets{job=\"netcraze-snmp\",ifName=~\"[0-5]\"}[2m]) * 8",
+          "legendFormat": "Порт {{ifName}} TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 103,
+      "title": "Детальный анализ по фильтру $interface",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Трафик $interface (бит/с)",
+      "description": "Битрейт RX и TX по выбранным в фильтре $interface интерфейсам.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInOctets{job=\"netcraze-snmp\",ifName=~\"$interface\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutOctets{job=\"netcraze-snmp\",ifName=~\"$interface\"}[2m]) * 8",
+          "legendFormat": "{{ifName}} TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Пакеты/с $interface (PPS)",
+      "description": "Unicast пакеты/с (ifHCInUcastPkts / ifHCOutUcastPkts) по фильтру $interface.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCInUcastPkts{job=\"netcraze-snmp\",ifName=~\"$interface\"}[2m])",
+          "legendFormat": "{{ifName}} RX"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifHCOutUcastPkts{job=\"netcraze-snmp\",ifName=~\"$interface\"}[2m])",
+          "legendFormat": "{{ifName}} TX"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "pps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Ошибки $interface (/с)",
+      "description": "Частота входящих и исходящих ошибок (ifInErrors / ifOutErrors) по фильтру $interface.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifInErrors{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m])",
+          "legendFormat": "{{ifName}} in_err"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifOutErrors{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m])",
+          "legendFormat": "{{ifName}} out_err"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "pps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "Сбросы $interface (/с)",
+      "description": "Частота сброшенных пакетов (ifInDiscards / ifOutDiscards) по фильтру $interface.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "adnsc1wi03doga"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifInDiscards{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m])",
+          "legendFormat": "{{ifName}} in_drop"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "adnsc1wi03doga"
+          },
+          "expr": "rate(ifOutDiscards{job=\"netcraze-snmp\",ifName=~\"$interface\"}[5m])",
+          "legendFormat": "{{ifName}} out_drop"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "pps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

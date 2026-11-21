@@ -15,7 +15,7 @@ fi
 
 echo "==> vmalert-tool unittest"
 docker run --rm -v "$PWD/vmalert:/w" -w /w "$VMALERT_TOOL" \
-	unittest --files=tests/uplink.yaml --files=tests/nodes.yaml --files=tests/heartbeat.yaml --files=tests/backups.yaml --files=tests/ambar.yaml
+	unittest --files=tests/uplink.yaml --files=tests/nodes.yaml --files=tests/heartbeat.yaml --files=tests/backups.yaml --files=tests/ambar.yaml --files=tests/netcraze.yaml
 
 ALERTMANAGER=prom/alertmanager@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
 
@@ -59,5 +59,8 @@ route owner               alertname=AlertingSelfTest instance=selftest
 route owner               alertname=AmbarSplitBrain instance=k3s-1
 route owner               alertname=AmbarAgentDown instance=k3s-1
 route owner               alertname=AmbarVolumeDegraded instance=k3s-2
+route owner-events        alertname=NetcrazeRebooted instance=netcraze
+route owner               alertname=NetcrazeSnmpDown instance=netcraze
+route owner               alertname=NetcrazeWanDown instance=netcraze
 
 echo "==> all checks passed"

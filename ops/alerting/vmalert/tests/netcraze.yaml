@@ -1,0 +1,121 @@
+rule_files: [../rules.yaml]
+evaluation_interval: 1m
+tests:
+  - name: NetcrazeSnmpDown fires after 3m and ignores other jobs
+    interval: 1m
+    input_series:
+      - series: 'up{job="netcraze-snmp",instance="netcraze"}'
+        values: '1 0x5'
+      - series: 'up{job="ambar",instance="k3s-1"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        groupname: netcraze
+        alertname: NetcrazeSnmpDown
+        exp_alerts: []
+      - eval_time: 5m
+        groupname: netcraze
+        alertname: NetcrazeSnmpDown
+        exp_alerts:
+          - exp_labels: {job: netcraze-snmp, instance: netcraze, severity: critical}
+            exp_annotations:
+              summary: 'Netcraze SNMP scrape on netcraze is down'
+              description: 'No successful SNMP scrape of the router for 3 minutes: snmp-exporter container stopped, service snmp disabled, or router unreachable.'
+
+  - name: NetcrazeRebooted fires when sysUpTime is under 600s
+    interval: 1m
+    input_series:
+      - series: 'sysUpTime{job="netcraze-snmp",instance="netcraze"}'
+        values: '100000 12000 18000'
+    alert_rule_test:
+      - eval_time: 0m
+        groupname: netcraze
+        alertname: NetcrazeRebooted
+        exp_alerts: []
+      - eval_time: 1m
+        groupname: netcraze
+        alertname: NetcrazeRebooted
+        exp_alerts:
+          - exp_labels: {job: netcraze-snmp, instance: netcraze, severity: warning}
+            exp_annotations:
+              summary: 'Netcraze router netcraze rebooted'
+              description: 'Router sysUpTime is under 10 minutes.'
+
+  - name: NetcrazeWanDown fires only for admin-enabled ISP interfaces
+    interval: 1m
+    input_series:
+      - series: 'ifOperStatus{job="netcraze-snmp",instance="netcraze",ifIndex="9",ifName="ISP2",ifAlias="Beeline"}'
+        values: '1 2x5'
+      - series: 'ifAdminStatus{job="netcraze-snmp",instance="netcraze",ifIndex="9",ifName="ISP2",ifAlias="Beeline"}'
+        values: '1x6'
+      - series: 'ifOperStatus{job="netcraze-snmp",instance="netcraze",ifIndex="10",ifName="ISP1",ifAlias="Rostelecom"}'
+        values: '2x6'
+      - series: 'ifAdminStatus{job="netcraze-snmp",instance="netcraze",ifIndex="10",ifName="ISP1",ifAlias="Rostelecom"}'
+        values: '2x6'
+      - series: 'ifOperStatus{job="netcraze-snmp",instance="netcraze",ifIndex="33",ifName="Home",ifAlias="Home network"}'
+        values: '2x6'
+      - series: 'ifAdminStatus{job="netcraze-snmp",instance="netcraze",ifIndex="33",ifName="Home",ifAlias="Home network"}'
+        values: '1x6'
+    alert_rule_test:
+      - eval_time: 2m
+        groupname: netcraze
+        alertname: NetcrazeWanDown
+        exp_alerts: []
+      - eval_time: 4m
+        groupname: netcraze
+        alertname: NetcrazeWanDown
+        exp_alerts:
+          - exp_labels: {job: netcraze-snmp, instance: netcraze, ifIndex: "9", ifName: ISP2, ifAlias: Beeline, severity: warning}
+            exp_annotations:
+              summary: 'Netcraze WAN ISP2 (Beeline) is down'
+              description: 'Administratively enabled WAN interface has non-up operStatus for over 2 minutes.'
+
+  - name: NetcrazeMemoryHigh ignores page cache and buffers
+    interval: 1m
+    input_series:
+      - series: 'memTotalReal{job="netcraze-snmp",instance="netcraze"}'
+        values: '1000000x18'
+      - series: 'memAvailReal{job="netcraze-snmp",instance="netcraze"}'
+        values: '50000x18'
+      - series: 'memBuffer{job="netcraze-snmp",instance="netcraze"}'
+        values: '200000x1 20000x17'
+      - series: 'memCached{job="netcraze-snmp",instance="netcraze"}'
+        values: '300000x1 30000x17'
+    alert_rule_test:
+      - eval_time: 1m
+        groupname: netcraze
+        alertname: NetcrazeMemoryHigh
+        exp_alerts: []
+      - eval_time: 16m
+        groupname: netcraze
+        alertname: NetcrazeMemoryHigh
+        exp_alerts: []
+      - eval_time: 17m
+        groupname: netcraze
+        alertname: NetcrazeMemoryHigh
+        exp_alerts:
+          - exp_labels: {job: netcraze-snmp, instance: netcraze, severity: warning}
+            exp_annotations:
+              summary: 'Netcraze RAM usage on netcraze is above 85 percent'
+              description: 'Effective memory usage excluding buffers and page cache exceeded 85 percent for 15 minutes.'
+
+  - name: NetcrazeDiskHigh fires for OPKG after 15m and ignores UUID alias
+    interval: 1m
+    input_series:
+      - series: 'dskPercent{job="netcraze-snmp",instance="netcraze",dskPath="/tmp/mnt/OPKG/"}'
+        values: '2 90x17'
+      - series: 'dskPercent{job="netcraze-snmp",instance="netcraze",dskPath="/tmp/mnt/2741d6c8-36d1-4b8e-b0dd-8e5f6c24da4b/"}'
+        values: '90x18'
+    alert_rule_test:
+      - eval_time: 14m
+        groupname: netcraze
+        alertname: NetcrazeDiskHigh
+        exp_alerts: []
+      - eval_time: 17m
+        groupname: netcraze
+        alertname: NetcrazeDiskHigh
+        exp_alerts:
+          - exp_labels: {job: netcraze-snmp, instance: netcraze, dskPath: /tmp/mnt/OPKG/, severity: warning}
+            exp_annotations:
+              summary: 'Netcraze disk /tmp/mnt/OPKG/ usage is above 85 percent'
+              description: 'Mounted router filesystem exceeded 85 percent capacity for 15 minutes.'

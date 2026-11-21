@@ -50,6 +50,14 @@ route:
       group_interval: 5m
       repeat_interval: 24h
 
+    # Router reboot: event route without resolved notice (same pattern as NodeRebooted).
+    - receiver: owner-events
+      matchers: ['alertname="NetcrazeRebooted"']
+      group_by: [alertname, instance]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 24h
+
 receivers:
   - name: blackhole
 

@@ -23,7 +23,7 @@ ops/
 ├── alerting/            # Alertmanager configs, vmalert rules, and rule unit tests
 ├── grafana/             # Grafana dashboards, alert policies, and provisioning
 ├── k3s/                 # Cluster maintenance CronJobs (registry-gc)
-├── nas-monitoring/      # Docker Compose stack for NAS (VictoriaMetrics, Grafana, backups)
+├── nas-monitoring/      # Docker Compose stack for NAS (VictoriaMetrics, Grafana, snmp-exporter, backups)
 └── nas-jellyfin-backup/ # Incremental Jellyfin backup scripts for NAS
 ```
 
@@ -33,6 +33,7 @@ The cluster workloads migrated from pure NFS/local storage to `ambar` replicated
 - CSI Driver manifests are maintained in [`deploy/`](../deploy/) (`ambar-controller`, `ambar-agent`, CRDs, and StorageClasses).
 - StorageClasses: `ambar-r2` (2 replicas + witness, `Delete`), `ambar-r3` (3 full replicas, `Delete`), and `ambar-r3-retain` (3 full replicas, `Retain`, recommended for production PVCs) backed by LVM volume group `k3s-vg` on NVMe.
 - Observability: `ambar` agent `:9770/metrics` scraped by VictoriaMetrics (`nas-monitoring/victoria-metrics/scrape.yaml`), 8 alert rules in `alerting/vmalert/rules.yaml` (group `ambar`), and the [`ambar storage`](grafana/dashboards/ambar-storage.json) Grafana dashboard.
+- Edge router monitoring: Netcraze Ultra SNMP metrics scraped via `snmp-exporter` on the NAS (`nas-monitoring/snmp-exporter/netcraze-extra.yml`, job `netcraze-snmp`), 5 alert rules in `alerting/vmalert/rules.yaml` (group `netcraze`), and Grafana dashboards [`netcraze-system`](grafana/dashboards/netcraze-system.json) and [`netcraze-interfaces`](grafana/dashboards/netcraze-interfaces.json).
 - Physical node provisioning and benchmark scripts reside in [`stand/`](../stand/) (`r5c-*.sh`).
 - Control plane high availability is provided by `kube-vip` (VIP `198.18.1.30:6443`, managed via [`stand/r5c-kube-vip.sh`](../stand/r5c-kube-vip.sh)).
 

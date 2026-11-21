@@ -1,0 +1,145 @@
+# Дополнительные модули snmp_exporter для Netcraze Ultra (NDMS 5.01),
+# которых нет во встроенном /etc/snmp_exporter/snmp.yml образа v0.31.0.
+# Загружается вторым флагом --config.file; yaml.v2 мерджит ключи modules.
+modules:
+  netcraze_disk:
+    walk:
+    - 1.3.6.1.4.1.2021.9
+    metrics:
+    - name: dskTotal
+      oid: 1.3.6.1.4.1.2021.9.1.6
+      type: gauge
+      help: Total size of the disk/partition (kBytes) - 1.3.6.1.4.1.2021.9.1.6
+      indexes:
+      - labelname: dskIndex
+        type: gauge
+      lookups:
+      - labels:
+        - dskIndex
+        labelname: dskPath
+        oid: 1.3.6.1.4.1.2021.9.1.2
+        type: DisplayString
+      - labels: []
+        labelname: dskIndex
+    - name: dskAvail
+      oid: 1.3.6.1.4.1.2021.9.1.7
+      type: gauge
+      help: Available space on the disk (kBytes) - 1.3.6.1.4.1.2021.9.1.7
+      indexes:
+      - labelname: dskIndex
+        type: gauge
+      lookups:
+      - labels:
+        - dskIndex
+        labelname: dskPath
+        oid: 1.3.6.1.4.1.2021.9.1.2
+        type: DisplayString
+      - labels: []
+        labelname: dskIndex
+    - name: dskUsed
+      oid: 1.3.6.1.4.1.2021.9.1.8
+      type: gauge
+      help: Used space on the disk (kBytes) - 1.3.6.1.4.1.2021.9.1.8
+      indexes:
+      - labelname: dskIndex
+        type: gauge
+      lookups:
+      - labels:
+        - dskIndex
+        labelname: dskPath
+        oid: 1.3.6.1.4.1.2021.9.1.2
+        type: DisplayString
+      - labels: []
+        labelname: dskIndex
+    - name: dskPercent
+      oid: 1.3.6.1.4.1.2021.9.1.9
+      type: gauge
+      help: Percentage of space used on disk - 1.3.6.1.4.1.2021.9.1.9
+      indexes:
+      - labelname: dskIndex
+        type: gauge
+      lookups:
+      - labels:
+        - dskIndex
+        labelname: dskPath
+        oid: 1.3.6.1.4.1.2021.9.1.2
+        type: DisplayString
+      - labels: []
+        labelname: dskIndex
+    - name: dskPercentNode
+      oid: 1.3.6.1.4.1.2021.9.1.10
+      type: gauge
+      help: Percentage of inodes used on disk - 1.3.6.1.4.1.2021.9.1.10
+      indexes:
+      - labelname: dskIndex
+        type: gauge
+      lookups:
+      - labels:
+        - dskIndex
+        labelname: dskPath
+        oid: 1.3.6.1.4.1.2021.9.1.2
+        type: DisplayString
+      - labels: []
+        labelname: dskIndex
+
+  netcraze_tcp_udp:
+    walk:
+    - 1.3.6.1.2.1.6
+    - 1.3.6.1.2.1.7
+    metrics:
+    - name: tcpActiveOpens
+      oid: 1.3.6.1.2.1.6.5
+      type: counter
+      help: Number of times TCP connections have made a direct transition to the SYN-SENT state - 1.3.6.1.2.1.6.5
+    - name: tcpPassiveOpens
+      oid: 1.3.6.1.2.1.6.6
+      type: counter
+      help: Number of times TCP connections have made a direct transition to the SYN-RCVD state - 1.3.6.1.2.1.6.6
+    - name: tcpAttemptFails
+      oid: 1.3.6.1.2.1.6.7
+      type: counter
+      help: Number of times TCP connections have made a direct transition to CLOSED from SYN-SENT/SYN-RCVD - 1.3.6.1.2.1.6.7
+    - name: tcpEstabResets
+      oid: 1.3.6.1.2.1.6.8
+      type: counter
+      help: Number of times TCP connections have made a direct transition to CLOSED from ESTABLISHED/CLOSE-WAIT - 1.3.6.1.2.1.6.8
+    - name: tcpCurrEstab
+      oid: 1.3.6.1.2.1.6.9
+      type: gauge
+      help: Number of TCP connections currently in ESTABLISHED or CLOSE-WAIT state - 1.3.6.1.2.1.6.9
+    - name: tcpInSegs
+      oid: 1.3.6.1.2.1.6.10
+      type: counter
+      help: Total number of TCP segments received - 1.3.6.1.2.1.6.10
+    - name: tcpOutSegs
+      oid: 1.3.6.1.2.1.6.11
+      type: counter
+      help: Total number of TCP segments sent - 1.3.6.1.2.1.6.11
+    - name: tcpRetransSegs
+      oid: 1.3.6.1.2.1.6.12
+      type: counter
+      help: Total number of TCP segments retransmitted - 1.3.6.1.2.1.6.12
+    - name: tcpInErrs
+      oid: 1.3.6.1.2.1.6.14
+      type: counter
+      help: Total number of TCP segments received in error - 1.3.6.1.2.1.6.14
+    - name: tcpOutRsts
+      oid: 1.3.6.1.2.1.6.15
+      type: counter
+      help: Number of TCP segments sent containing the RST flag - 1.3.6.1.2.1.6.15
+    - name: udpNoPorts
+      oid: 1.3.6.1.2.1.7.2
+      type: counter
+      help: Total number of received UDP datagrams for which there was no application at the destination port - 1.3.6.1.2.1.7.2
+    - name: udpInErrors
+      oid: 1.3.6.1.2.1.7.3
+      type: counter
+      help: Number of received UDP datagrams that could not be delivered for reasons other than lack of application - 1.3.6.1.2.1.7.3
+    - name: udpHCInDatagrams
+      oid: 1.3.6.1.2.1.7.8
+      type: counter
+      help: Total number of UDP datagrams delivered to UDP users (64-bit) - 1.3.6.1.2.1.7.8
+    - name: udpHCOutDatagrams
+      oid: 1.3.6.1.2.1.7.9
+      type: counter
+      help: Total number of UDP datagrams sent from this entity (64-bit) - 1.3.6.1.2.1.7.9

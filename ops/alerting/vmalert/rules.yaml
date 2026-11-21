@@ -232,3 +232,58 @@ groups:
         annotations:
           summary: 'ambar LVM budget on {{ $labels.node }} is above 80 percent'
           description: 'Allocated volume bytes exceeded 80 percent of the 80 GiB k3s-vg budget configured in ambar-nodes.'
+
+  - name: netcraze
+    interval: 1m
+    rules:
+      - alert: NetcrazeSnmpDown
+        expr: 'up{job="netcraze-snmp"} < 1'
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Netcraze SNMP scrape on {{ $labels.instance }} is down'
+          description: 'No successful SNMP scrape of the router for 3 minutes: snmp-exporter container stopped, service snmp disabled, or router unreachable.'
+
+      # Аналог NodeRebooted: sysUpTime в timeticks (1/100 s), окно 10 минут.
+      # Маршрут owner-events отбрасывает resolved-уведомление.
+      - alert: NetcrazeRebooted
+        expr: 'sysUpTime{job="netcraze-snmp"} / 100 < 600'
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Netcraze router {{ $labels.instance }} rebooted'
+          description: 'Router sysUpTime is under 10 minutes.'
+
+      # Проверяем только административно включённые WAN (ifAdminStatus == 1),
+      # чтобы вручную отключённый резервный провайдер не создавал шум.
+      - alert: NetcrazeWanDown
+        expr: 'ifOperStatus{job="netcraze-snmp",ifName=~"ISP.*"} != 1 and on (instance, ifIndex) ifAdminStatus{job="netcraze-snmp"} == 1'
+        for: 2m
+        keep_firing_for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Netcraze WAN {{ $labels.ifName }} ({{ $labels.ifAlias }}) is down'
+          description: 'Administratively enabled WAN interface has non-up operStatus for over 2 minutes.'
+
+      # Реальная занятая память без освобождаемых buffers и page cache.
+      - alert: NetcrazeMemoryHigh
+        expr: '(memTotalReal{job="netcraze-snmp"} - memAvailReal{job="netcraze-snmp"} - memBuffer{job="netcraze-snmp"} - memCached{job="netcraze-snmp"}) / memTotalReal{job="netcraze-snmp"} > 0.85'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Netcraze RAM usage on {{ $labels.instance }} is above 85 percent'
+          description: 'Effective memory usage excluding buffers and page cache exceeded 85 percent for 15 minutes.'
+
+      # Исключаем UUID-алиас монтирования USB-накопителя (/tmp/mnt/<UUID>/),
+      # дублирующий /tmp/mnt/OPKG/.
+      - alert: NetcrazeDiskHigh
+        expr: 'dskPercent{job="netcraze-snmp",dskPath!~"/tmp/mnt/[0-9a-f]{8}-[0-9a-f]{4}-.*"} > 85'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Netcraze disk {{ $labels.dskPath }} usage is above 85 percent'
+          description: 'Mounted router filesystem exceeded 85 percent capacity for 15 minutes.'

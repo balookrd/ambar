@@ -16,11 +16,12 @@ dest=/volume1/docker/monitoring
 
 docker compose -f docker-compose.yaml config -q
 
-ssh "$host" "mkdir -p $dest/victoria-metrics $dest/grafana/datasources $dest/grafana/dashboards-provider $dest/backup"
+ssh "$host" "mkdir -p $dest/victoria-metrics $dest/grafana/datasources $dest/grafana/dashboards-provider $dest/snmp-exporter $dest/backup"
 scp -q -O docker-compose.yaml "$host:$dest/"
 scp -q -O victoria-metrics/scrape.yaml "$host:$dest/victoria-metrics/"
 scp -q -O grafana/datasources/*.yaml "$host:$dest/grafana/datasources/"
 scp -q -O grafana/dashboards-provider/*.yaml "$host:$dest/grafana/dashboards-provider/"
+scp -q -O snmp-exporter/*.yml "$host:$dest/snmp-exporter/"
 scp -q -O backup/* "$host:$dest/backup/"
 ssh "$host" "test -s $dest/secrets/smtp" ||
 	{ echo "missing $dest/secrets/smtp on the NAS (README.md)" >&2; exit 1; }

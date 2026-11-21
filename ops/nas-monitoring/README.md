@@ -1,6 +1,6 @@
 # VictoriaMetrics и Grafana на NAS
 
-Compose-проект с VictoriaMetrics, Grafana, node-exporter и двумя контейнерами бэкапа. Работает на UGREEN NAS `198.51.100.105` (UGOS, docker) с 2026-11-09; до этого VictoriaMetrics и Grafana жили в k3s (namespace `monitoring`, данные на `local-path` узла `k3s-1`). Документ нужен владельцу парка, который выкатывает конфигурацию на NAS, обновляет дашборды или восстанавливает данные.
+Compose-проект с VictoriaMetrics, Grafana, node-exporter, snmp-exporter и двумя контейнерами бэкапа. Работает на UGREEN NAS `198.51.100.105` (UGOS, docker) с 2026-11-09; до этого VictoriaMetrics и Grafana жили в k3s (namespace `monitoring`, данные на `local-path` узла `k3s-1`). Документ нужен владельцу парка, который выкатывает конфигурацию на NAS, обновляет дашборды или восстанавливает данные.
 
 Реальные имена узлов, домены и адреса парка в этом документе заменены условными: `fleet.example` — домен парка; `198.51.100.0/24` — домашняя сеть (`.105` — NAS). Соответствие — в локальном некоммитируемом `FLEET.local.md`.
 
@@ -19,6 +19,7 @@ Compose-проект с VictoriaMetrics, Grafana, node-exporter и двумя к
 | `victoria-metrics` | `8428` | `/volume2/victoria-metrics` (NVMe, shared folder с флагом `C`, без снапшотов) | `vmbackup` |
 | `grafana` | `3000` | `/volume2/grafana` (NVMe, SQLite `grafana.db`, каталог дашбордов `dashboards/`) | `grafana-backup` |
 | `node-exporter` | `9100` | корень хоста `/` (только чтение, `ro,rslave`) | нет |
+| `snmp-exporter` | `127.0.0.1:9116` | встроенный `snmp.yml` + `./snmp-exporter/netcraze-extra.yml` (только чтение) | нет |
 | `vmbackup` | нет | читает `/volume2/victoria-metrics` через API снапшота VictoriaMetrics | `/volume1/k8s/backup/victoria-metrics` (HDD), ежедневно в `01:15` UTC, инкрементально; в `-dst` хранится одна копия, ротации нет |
 | `grafana-backup` | нет | читает `/volume2/grafana/grafana.db` | `/volume1/k8s/backup/grafana/grafana-YYYYmmdd-HHMM.db.gz` (HDD), ежедневно в `00:30` UTC, хранит 7 последних (`KEEP = 7` в `backup/grafana-backup.py`) |
 
@@ -39,10 +40,11 @@ curl -s http://198.51.100.105:8428/api/v1/query \
 
 Значение — секунды с последнего успеха; в норме не больше 86400 плюс длительность прогона.
 
-Образы закреплены по digest в `docker-compose.yaml` (VictoriaMetrics и vmbackup v1.155.0, Grafana v13.3.0, бэкап Grafana — `python:3.12-alpine`).
+Образы закреплены по digest в `docker-compose.yaml` (VictoriaMetrics и vmbackup v1.155.0, Grafana v13.3.0, snmp-exporter v0.31.0, бэкап Grafana — `python:3.12-alpine`).
 
-Связь с k3s:
+Связь с k3s и сетью:
 
+- `snmp-exporter` опрашивает роутер Netcraze Ultra `198.51.100.1:161` по SNMPv2c (`auth: public_v2`), объединяя встроенные модули (`system`, `if_mib`, `ucd_la_table`, `ucd_memory`, `ucd_system_stats`) с дополнительными модулями `netcraze_disk` (USB/OPKG `dskTable`) и `netcraze_tcp_udp` (`TCP-MIB`, `UDP-MIB`) из [`snmp-exporter/netcraze-extra.yml`](snmp-exporter/netcraze-extra.yml). VictoriaMetrics скрейпит роутер в job `netcraze-snmp` (`30s`) по внутреннему адресу `snmp-exporter:9116`.
 - В k3s остались Service `victoria-metrics` и `grafana` в namespace `monitoring` без selector'а и вручную написанные EndpointSlice `victoria-metrics-nas` и `grafana-nas` с адресом NAS. Адреса `victoria-metrics.monitoring:8428` (vmalert, `smarthome/power`, `smarthome/humidity`) и ingress `vm.k3s.fleet.example`, `grafana.k3s.fleet.example` остались прежними. Манифесты: [`victoria-metrics-nas.yaml`](../nanopi-r5c-k3s/apps/monitoring/victoria-metrics-nas.yaml) и [`grafana-nas.yaml`](../nanopi-r5c-k3s/apps/monitoring/grafana-nas.yaml). Адрес NAS меняется правкой EndpointSlice.
 - vmalert и Alertmanager остаются в k3s. VictoriaMetrics на NAS скрейпит их через Traefik (job `vmalert`, три реплики Alertmanager), а датасорс `alertmanager-k3s` в Grafana ходит на ingress Alertmanager; см. `victoria-metrics/scrape.yaml` и `grafana/datasources/datasources.yaml`.
 - Датасорс `prometheus` (uid `adnsc1wi03doga`) указывает на `http://victoria-metrics:8428` внутри compose-сети. UID менять нельзя: дашборды ссылаются на него, и при другом UID все панели окажутся пустыми.
@@ -81,7 +83,7 @@ curl -s http://198.51.100.105:8428/api/v1/query \
 ssh sysadm@198.51.100.105 'cd /volume1/docker/monitoring && docker compose ps'
 ```
 
-Все пять контейнеров в состоянии `Up`, у `victoria-metrics` статус `healthy`.
+Все шесть контейнеров в состоянии `Up`, у `victoria-metrics` статус `healthy`.
 
 `scrape.yaml` перечитывается без рестарта: в compose задан `-promscrape.configCheckInterval=1m`, так что после `deploy.sh` изменения подхватываются в течение минуты. Состояние целей: `http://198.51.100.105:8428/targets`.
 

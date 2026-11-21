@@ -207,3 +207,29 @@ scrape_configs:
   relabel_configs:
     - source_labels: [hostname]
       target_label: instance
+- job_name: netcraze-snmp
+  scrape_interval: 30s
+  scrape_timeout: 15s
+  metrics_path: /snmp
+  params:
+    auth: [public_v2]
+    module:
+      - system
+      - if_mib
+      - ucd_la_table
+      - ucd_memory
+      - ucd_system_stats
+      - netcraze_disk
+      - netcraze_tcp_udp
+  static_configs:
+  - targets:
+    - 198.18.1.1
+    labels:
+      hostname: 'netcraze'
+  relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [hostname]
+      target_label: instance
+    - target_label: __address__
+      replacement: snmp-exporter:9116
