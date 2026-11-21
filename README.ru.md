@@ -131,6 +131,8 @@ kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica move my-vol node
 | `image/` | Dockerfile, загрузчик модуля, тесты образа |
 | `stand/` | скрипты стенда, установка драйвера и сквозная проверка; см. `stand/README.md` |
 | `stand/spike/` | скрипты опытов и образцы `drbdsetup status --json` |
+| `.github/` | GitHub Actions CI, workflow релизов CalVer и вспомогательные скрипты |
+| `cliff.toml`, `CHANGELOG.md`, `CHANGELOG.ru.md` | конфигурация `git-cliff` для release notes и двуязычная история изменений |
 
 ## Архитектура хранилища узла (LVM)
 
@@ -242,6 +244,29 @@ cargo test
 - [`ops/nanopi-r5c-k3s/`](ops/nanopi-r5c-k3s/README.md): Подробное руководство по настройке узлов, сетевая топология (`wan0` 198.18.1.0/24, `lan0` 10.10.10.0/24), разметка NVMe под LVM и отказоустойчивый Control Plane на базе kube-vip.
 - [`stand/`](stand/README.md#физический-кластер-nanopi-r5c-скрипты-r5c-sh): Скрипты автоматизации обслуживания физического кластера (`stand/r5c-*.sh`), включая онлайн-миграцию на LVM (`stand/r5c-migrate-lvm.sh`), управление kube-vip (`stand/r5c-kube-vip.sh`) и замеры производительности fio.
 - [`ops/alerting/`](ops/alerting/README.md) и [`ops/grafana/`](ops/grafana/README.md): Правила алертов VictoriaMetrics и дашборды Grafana для мониторинга кластера и хранилища.
+
+## Релизы
+
+`ambar` использует теги CalVer (`vYY.M.PATCH` без ведущего нуля у месяца,
+например `v26.11.0`), публикуемые как GitHub Releases (*Tag Release*). В каждый
+релиз входят статические Linux `musl`-бинарники
+(`ambar-<version>-aarch64-unknown-linux-musl.tar.gz` и
+`ambar-<version>-x86_64-unknown-linux-musl.tar.gz`), файл `SHA256SUMS.txt` и
+автоматически сгенерированные release notes. Контейнерный образ `ambar-drbd`,
+содержащий модуль ядра DRBD под конкретный `KVER` хоста, по-прежнему
+собирается локально через `image/build.sh`. Версия схемы Kubernetes CRD
+(`v1alpha1`) остаётся независимой от тегов релизов.
+
+Ручной workflow [*Release*](.github/workflows/release.yml) принимает
+необязательную серию `YY.M` (по умолчанию текущий месяц UTC), вычисляет
+следующий patch-номер по существующим тегам `vYY.M.*`, обновляет `Cargo.toml`
+и `Cargo.lock` с помощью [`.github/scripts/version.py`](.github/scripts/version.py),
+отправляет в `main` коммит `release: cut v<версия>` и печатает команду
+`git tag -s v<версия>` для локального запуска. Push подписанного тега запускает
+[*Tag Release*](.github/workflows/tag-release.yml), который проверяет синхронность
+версий в манифестах, собирает оба `musl`-бинарника, формирует release notes
+через `git-cliff` ([`.github/scripts/gen-release-notes.sh`](.github/scripts/gen-release-notes.sh))
+и публикует GitHub Release со статусом `latest`. Подробнее — в [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
 ## Лицензия
 

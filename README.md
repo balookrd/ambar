@@ -131,6 +131,8 @@ Summary:
 | `image/` | Dockerfile, module loader, image tests |
 | `stand/` | test stand scripts, driver install and end-to-end check; see `stand/README.md` (Russian) |
 | `stand/spike/` | experiment scripts and `drbdsetup status --json` samples |
+| `.github/` | GitHub Actions CI, CalVer release workflows, and release helper scripts |
+| `cliff.toml`, `CHANGELOG.md`, `CHANGELOG.ru.md` | `git-cliff` release-notes config and bilingual changelog |
 
 ## Node storage topology (LVM)
 
@@ -242,6 +244,28 @@ All production operational assets for the 3-node NanoPi R5C cluster (`k3s-1..3`)
 - [`ops/nanopi-r5c-k3s/`](ops/nanopi-r5c-k3s/README.md): Detailed hardware setup guide, network layout (`wan0` 198.18.1.0/24, `lan0` 10.10.10.0/24), LVM NVMe partitioning, and HA Control Plane with kube-vip.
 - [`stand/`](stand/README.md#физический-кластер-nanopi-r5c-скрипты-r5c-sh): Automation scripts for physical cluster maintenance (`stand/r5c-*.sh`), including LVM migration (`stand/r5c-migrate-lvm.sh`), kube-vip management (`stand/r5c-kube-vip.sh`), and fio performance benchmarks.
 - [`ops/alerting/`](ops/alerting/README.md) & [`ops/grafana/`](ops/grafana/README.md): VictoriaMetrics alert rules and Grafana dashboards for cluster and storage observability.
+
+## Releases
+
+`ambar` uses CalVer tags (`vYY.M.PATCH` without a leading zero in the month,
+e.g. `v26.11.0`) published as GitHub Releases (`Tag Release`). Each release
+publishes static Linux `musl` binaries (`ambar-<version>-aarch64-unknown-linux-musl.tar.gz`
+and `ambar-<version>-x86_64-unknown-linux-musl.tar.gz`), `SHA256SUMS.txt`, and
+automatically generated release notes. The container image `ambar-drbd`, which
+bundles a DRBD kernel module compiled for a specific host `KVER`, continues to
+be built locally with `image/build.sh`. The Kubernetes CRD API version
+(`v1alpha1`) remains independent of release tags.
+
+The manual [*Release*](.github/workflows/release.yml) workflow accepts an
+optional `YY.M` series (defaulting to the current UTC month), computes the next
+patch number from existing `vYY.M.*` tags, updates `Cargo.toml` and `Cargo.lock`
+via [`.github/scripts/version.py`](.github/scripts/version.py), pushes a
+`release: cut v<version>` commit to `main`, and prints the `git tag -s v<version>`
+command to run locally. Pushing that signed tag triggers
+[*Tag Release*](.github/workflows/tag-release.yml), which verifies manifest
+versions, builds both Linux `musl` targets, generates release notes with
+`git-cliff` ([`.github/scripts/gen-release-notes.sh`](.github/scripts/gen-release-notes.sh)),
+and publishes the GitHub Release as `latest`. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

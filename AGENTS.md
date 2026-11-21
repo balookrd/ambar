@@ -54,7 +54,8 @@
 ## Рабочий процесс
 
 - Спецификации и планы (`docs/superpowers/**`) пишутся на русском языке.
-- Двуязычная документация (`README.md`/`README.ru.md`, `docs/*.md`/`docs/*.ru.md`) обновляется синхронно в обеих версиях.
+- Двуязычная документация (`README.md`/`README.ru.md`, `CHANGELOG.md`/`CHANGELOG.ru.md`, `docs/*.md`/`docs/*.ru.md`) обновляется синхронно в обеих версиях.
+- Релизы ведутся по CalVer (`vYY.M.PATCH`): подготовка коммита `release: cut v...` через ручной workflow `.github/workflows/release.yml`, публикация бинарников `musl` и release notes (`git-cliff`) через `.github/workflows/tag-release.yml` по локальному подписанному тегу `git tag -s`.
 - Перед коммитом проверять форматирование и линтер:
   ```bash
   cargo fmt --check

@@ -1,0 +1,49 @@
+# git-cliff configuration for ambar.
+# Release notes cover the whole repository across CalVer tags (`vYY.M.PATCH`),
+# driven by .github/scripts/gen-release-notes.sh.
+
+[changelog]
+header = ""
+body = """
+{% if version %}## What's Changed in {{ version }}{% else %}## Unreleased{% endif %}
+{% set breaking = commits | filter(attribute="breaking", value=true) -%}
+{% if breaking | length > 0 %}
+### ⚠️ BREAKING CHANGES
+{% for commit in breaking -%}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.breaking_description | default(value=commit.message) | upper_first }}
+{% endfor -%}
+{% endif -%}
+{% for group, group_commits in commits | filter(attribute="breaking", value=false) | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in group_commits -%}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | upper_first }}
+{% endfor -%}
+{% endfor -%}
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+filter_unconventional = true    # release:/Merge/non-conventional subjects are dropped
+protect_breaking_commits = true # feat!/refactor! survive even when the type is skipped
+filter_commits = true           # commits not matched into a kept group are dropped
+topo_order = false
+sort_commits = "oldest"
+# Sort keys "<!-- N -->" order the sections; `striptags` strips them in the body.
+commit_parsers = [
+  { message = "^feat", group = "<!-- 1 -->⭐ Features" },
+  { message = "^fix", group = "<!-- 2 -->🐛 Bug Fixes" },
+  { message = "^perf", group = "<!-- 3 -->⚡ Performance" },
+  { message = "^style", skip = true },
+  { message = "^refactor", skip = true },
+  { message = "^docs", skip = true },
+  { message = "^test", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^build", skip = true },
+  { message = "^ops", skip = true },
+  { message = "^bench", skip = true },
+  { message = "^Merge", skip = true },
+  { message = ".*", skip = true },
+]
