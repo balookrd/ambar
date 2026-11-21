@@ -71,10 +71,10 @@ metadata:
   namespace: vpn
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: nfs-client
+  storageClassName: ambar-r3-retain
   resources:
     requests:
-      storage: 100Mi
+      storage: 256Mi
 ---
 # The ocserv-certs Secret is NOT here — create it out of band before deploy
 # (see ocserv-certs.secret.example.yaml). deploy.sh skips *.example.yaml, and

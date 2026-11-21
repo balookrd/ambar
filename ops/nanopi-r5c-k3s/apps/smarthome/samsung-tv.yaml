@@ -25,6 +25,8 @@ spec:
   template:
     metadata:
       labels: { app: samsung-tv }
+      annotations:
+        descheduler.alpha.kubernetes.io/evict: "true"
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

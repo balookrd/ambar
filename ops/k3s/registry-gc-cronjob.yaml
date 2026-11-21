@@ -2,15 +2,18 @@
 #
 # The registry runs with REGISTRY_STORAGE_DELETE_ENABLED=true, so tags get
 # DELETEd over time (e.g. retiring old image versions). A manifest DELETE only
-# unlinks the manifest — the underlying blobs stay on the NFS backend until
+# unlinks the manifest — the underlying blobs stay on the volume until
 # `registry garbage-collect` sweeps them, so without this they accumulate.
 #
-# This job reuses the registry:2.8.3 image and mounts the SAME NFS export the
-# registry Deployment mounts (RWX, so a parallel mount alongside the running
-# registry is fine). It runs GC against the image's default config, whose
-# storage.filesystem.rootdirectory is /var/lib/registry; GC reads the storage
-# backend directly and does not itself require delete.enabled. --delete-untagged
-# additionally drops manifests left with no tag.
+# This job reuses the registry:2.8.3 image and mounts the SAME PVC
+# (registry-data, StorageClass ambar-r3-retain, ReadWriteOnce) as the registry
+# Deployment. Because ReadWriteOnce block storage attaches on one node at a time,
+# required podAffinity pins the job pod to the node currently running
+# app: registry so both pods share the mounted filesystem on that host. It runs
+# GC against the image's default config, whose storage.filesystem.rootdirectory
+# is /var/lib/registry; GC reads the storage backend directly and does not
+# itself require delete.enabled. --delete-untagged additionally drops manifests
+# left with no tag.
 #
 # GC is NOT run with the registry in read-only mode, so a push landing in the
 # same instant as the sweep could in theory lose a just-uploaded, not-yet-linked
@@ -18,8 +21,8 @@
 # for a small private registry this is an acceptable trade against the
 # complexity of toggling the Deployment read-only around the job.
 #
-# Storage backend: NFS 198.18.1.105:/volume1/k8s/registry — keep this in
-# sync with the registry Deployment's `data` volume if the export ever moves.
+# Storage backend: PVC registry-data (ambar-r3-retain) — keep this in sync with
+# the registry Deployment's `data` volume.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -37,6 +40,13 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app: registry
+                  topologyKey: kubernetes.io/hostname
           containers:
             - name: gc
               image: registry:2.8.3
@@ -56,6 +66,5 @@ spec:
                 limits: { memory: 256Mi }
           volumes:
             - name: data
-              nfs:
-                server: 198.18.1.105
-                path: /volume1/k8s/registry
+              persistentVolumeClaim:
+                claimName: registry-data

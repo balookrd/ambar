@@ -55,12 +55,14 @@ namespace, а синглтоны разбросаны по шести namespace.
 | `thresholds` / `targetThresholds` `pods` | `1` | источник — узел выше среднего больше чем на 1 п.п. подов (≈1,1 пода), приёмник — ниже на столько же |
 | `thresholds` / `targetThresholds` `memory` | `3` | то же по memory requests, 3 п.п. ≈ 120 МиБ |
 | `maxNoOfPodsToEvictTotal` | `2` | не больше двух выселений за прогон |
-| `DefaultEvictor` | защита local storage и PVC | поды с `emptyDir` (Alertmanager) и с PVC не трогаются; Alertmanager и Traefik и так стоят по одной реплике на узел |
+| `DefaultEvictor` | защита local storage и PVC (`PodsWithPVC`) | поды с `emptyDir` (Alertmanager) и PVC (`mosquitto`, `zigbee2mqtt`, `nfs-client` и будущие PVC по умолчанию) не трогаются; `smarthome/*` и `registry` разрешены точечно аннотацией `descheduler.alpha.kubernetes.io/evict: "true"`. Alertmanager и Traefik и так стоят по одной реплике на узел |
 
-Выселенный под рестартует (у синглтонов `Recreate`): zigbee2mqtt и другие
-сервисы `smarthome` в 04:15 могут быть недоступны ~30 с. Внутри полосы ничего не
-двигается; одно выселение меняет загрузку узла на 0,9 п.п. по подам, а ширина
-полосы 2 п.п., поэтому приёмник не становится источником и поды не ходят туда-обратно.
+Выселенный под рестартует (у синглтонов `Recreate`): сервисы `smarthome` или
+`registry` в 04:15 могут быть недоступны ~10–30 с, тогда как `mosquitto` и
+`zigbee2mqtt` защищены от ночной ротации, чтобы не обрывать активные сессии
+устройств. Внутри полосы ничего не двигается; одно выселение меняет загрузку
+узла на 0,9 п.п. по подам, а ширина полосы 2 п.п., поэтому приёмник не
+становится источником и поды не ходят туда-обратно.
 
 Ручной прогон с той же политикой:
 
@@ -224,9 +226,11 @@ Stateful-подов на `local-path` в кластере нет: VictoriaMetric
 экспорте принадлежат `1000:10`. Провижнер делает только `chmod`, ему этого
 хватает. Копировать данные на экспорт — `rsync -rlptH`, без `-o -g`.
 
-Тома z2m, mosquitto, smarthome и реестра подключены inline (`nfs:` в манифесте), а
-не через `nfs-client`: их данные перенесены руками и лежат в каталогах с
-осмысленными именами, тогда как провижнер называет каталоги по uid тома.
+Рабочие тома z2m, mosquitto, smarthome и реестра переведены на PVC
+`ambar-r3-retain`, а прежние каталоги в корне экспорта NAS (`zigbee2mqtt-data`,
+`mosquitto-data`, `smarthome`, `registry`) оставлены нетронутыми как холодный
+откат. В отличие от автосозданных томов `nfs-client` в `pvc/`, эти каталоги
+созданы руками с осмысленными именами.
 
 ## outline-ui
 
@@ -296,8 +300,8 @@ Ingress-объекты, не трогая workloads. Пока приложени
 | VictoriaMetrics | TSDB | NVMe NAS `/volume2/victoria-metrics`, docker ([`ops/nas-monitoring/`](../../nas-monitoring/README.md)) |
 | Grafana | SQLite | NVMe NAS `/volume2/grafana`, docker (там же) |
 | `mosquitto`, `zigbee2mqtt`, все 5 сервисов `smarthome` | стейт / `devices.json` / БД | PVC `ambar-r3-retain` (RWO, 3 реплики DRBD) |
-| реестр | блобы OCI | inline NFS-том (до переноса на `ambar-r3-retain`) |
-| ocserv | `ocpasswd` | PVC `nfs-client` (мелкий) |
+| реестр | блобы OCI | PVC `registry-data` (`10Gi`, `ambar-r3-retain`, 3 реплики DRBD; `registry-gc` по `podAffinity`) |
+| ocserv | `ocpasswd` | PVC `ocserv-passwd` (`256Mi`, шаблон `ambar-r3-retain`) |
 | outline-ss/ws, ocserv | сертификаты/конфиг | Secret/ConfigMap, без PVC |
 
 ## Конвенции

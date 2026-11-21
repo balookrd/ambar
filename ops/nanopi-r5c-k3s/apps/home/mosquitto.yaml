@@ -36,7 +36,7 @@ data:
     persistence true
     persistence_file mosquitto.db
     persistence_location /mosquitto/data
-    autosave_interval 1800
+    autosave_interval 300
     autosave_on_changes false
 
     log_dest stdout
@@ -103,8 +103,8 @@ spec:
             - { name: config, mountPath: /mosquitto/config/acl_spruthub.conf,   subPath: acl_spruthub.conf }
           readinessProbe:
             tcpSocket: { port: 1883 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: 1
+            periodSeconds: 2
           resources:
             requests: { cpu: 20m, memory: 32Mi }
             limits:   { memory: 128Mi }

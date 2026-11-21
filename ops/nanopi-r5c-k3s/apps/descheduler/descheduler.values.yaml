@@ -42,8 +42,11 @@
 #   - pods with local storage (emptyDir) — Alertmanager. Its three replicas
 #     sit one per node under required anti-affinity, so a move has nowhere to
 #     go anyway; the protection just skips a pointless eviction;
-#   - pods with a PVC (nfs-client provisioner; grafana/VM only if rolled back
-#     from the NAS to k3s, see ops/nas-monitoring/README.md);
+#   - pods with a PVC by default (`PodsWithPVC` protects mosquitto,
+#     zigbee2mqtt, nfs-client, and future stateful PVCs against unintended
+#     churn). Services whose brief Recreate restart is harmless (`smarthome/*`,
+#     `registry`) opt into balancing via pod annotation
+#     `descheduler.alpha.kubernetes.io/evict: "true"`;
 #   - system-cluster-critical pods (coredns), DaemonSets, bare pods;
 #   - Traefik: three replicas pinned one per node by the same kind of
 #     anti-affinity, plus its PodDisruptionBudget (maxUnavailable: 1).

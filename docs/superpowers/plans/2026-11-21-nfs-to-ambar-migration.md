@@ -49,10 +49,11 @@
 - [x] `smarthome/samsung-tv` → PVC `samsung-tv-conf` (`256Mi`, `ambar-r3-retain`, `fsGroup: 1000`).
 - [x] `home/zigbee2mqtt` → PVC `zigbee2mqtt-data` (`1Gi`, `ambar-r3-retain`).
 
-## Волна 3 — Реестр образов и шаблон VPN (отложено до отдельного решения)
+## Волна 3 — Реестр образов, шаблон VPN и политика переезда `mosquitto`/`descheduler`
 
-- [ ] `registry/registry` + `registry/registry-gc` → PVC `registry-data` (`10Gi`, `ambar-r3-retain`, `uid=0`, `podAffinity` для `registry-gc`, тестовый прогон GC).
-- [ ] `vpn/ocserv` (шаблон) → заменить `nfs-client` `100Mi` на `ambar-r3-retain` `256Mi` в `ops/nanopi-r5c-k3s/apps/vpn/ocserv.yaml`.
+- [x] `registry/registry` + `registry/registry-gc` → PVC `registry-data` (`10Gi`, `ambar-r3-retain`, `uid=0`, `podAffinity` для `registry-gc`, тестовый прогон GC).
+- [x] `vpn/ocserv` (шаблон) → заменить `nfs-client` `100Mi` на `ambar-r3-retain` `256Mi` в `ops/nanopi-r5c-k3s/apps/vpn/ocserv.yaml`.
+- [x] Защита `mosquitto` и `zigbee2mqtt` от планового выселения (`PodsWithPVC` в `descheduler`) + точечный opt-in `descheduler.alpha.kubernetes.io/evict: "true"` на `smarthome/*` и `registry` + ускорение `readinessProbe` (`1s`/`2s`) и `autosave_interval 300` в `mosquitto`.
 
 ---
 
@@ -120,3 +121,27 @@
    - `ambar_node_allocated_bytes` на каждой ноде: `2981232640` байт (~2.78 GiB).
    - Горящих алертов `Ambar*` в `vmalert` нет.
    - Исходные каталоги на NAS (`/volume1/k8s/smarthome/{humidity,power,samsung_tv}`, `/volume1/k8s/zigbee2mqtt-data`) оставлены нетронутыми как холодный откат.
+
+---
+
+## Фактические результаты Волны 3 и настройки `mosquitto`/`descheduler`
+
+**Дата проведения:** 2026-11-21 (15:04–15:09 MSK)
+
+1. **`registry/registry` + `registry-gc` → `registry-data` (`10Gi`, `ambar-r3-retain`):**
+   - PV/RV: `pvc-f267e05c-0b2a-493f-9d5e-ffb36d81eec9` (`minor: 1007`, `port: 7007`).
+   - Перенос через `pod/registry-migrator` (`uid=0`, `busybox:1.36`): `src_files=533 dst_files=533`, `VERIFY_OK` без расхождений по `sha256sum`.
+   - Под `registry-6557d7dbc4-9zmjr` запущен на `k3s-3` (`1/1 Running`, 0 рестартов, `/dev/drbd1007` смонтирован на `/var/lib/registry`), внешний `GET https://registry.k3s.beerloga.su/v2/` → `401`, `/v2/_catalog` → `["conditioner","humidity","outline-ui","power","presence","probe","samsung_tv"]`.
+   - `ReplicatedVolume`: `Primary` на `k3s-3`, `Secondary` на `k3s-1` и `k3s-2`, 3/3 `UpToDate`, `quorum: true`.
+   - Тестовый ручной Job `registry-gc-verify` (`registry-gc-verify-8xkth`) запланировался через `podAffinity` на `k3s-3` и успешно завершился за 5 с (`158 blobs marked, 0 blobs and 0 manifests eligible for deletion`) без прерывания работы `registry`, после чего удалён.
+2. **Шаблон `ops/nanopi-r5c-k3s/apps/vpn/ocserv.yaml`:**
+   - PVC `ocserv-passwd` обновлён на `storageClassName: ambar-r3-retain`, `storage: 256Mi` (в кластер не применялся из-за плейсхолдера `<REGISTRY>/<TAG>`).
+3. **Защита `mosquitto`/`zigbee2mqtt` и настройка `descheduler`:**
+   - В `ops/nanopi-r5c-k3s/apps/descheduler/descheduler.values.yaml` оставлена защита `PodsWithPVC` (защищает `mosquitto`, `zigbee2mqtt`, `nfs-client` и будущие PVC по умолчанию; комментарий актуализирован).
+   - В шаблоны подов `smarthome/{conditioner,humidity,power,presence,samsung-tv}.yaml` и `registry/registry.yaml` добавлена opt-in аннотация `descheduler.alpha.kubernetes.io/evict: "true"` — они разрешены для ночной балансировки, а `mosquitto` и `zigbee2mqtt` остаются неподвижными при штатной работе.
+   - В `ops/nanopi-r5c-k3s/apps/home/mosquitto.yaml` задан `autosave_interval 300` (5 мин) и ускорена `readinessProbe` (`initialDelaySeconds: 1`, `periodSeconds: 2`). Восстановлено 2247 retained-сообщений, VIP `198.18.1.201:1883` отвечает, все 5 сервисов `smarthome` (`1/1 Running`, 0 рестартов, свежие heartbeat) и `zigbee2mqtt` обмениваются сообщениями.
+4. **Распределение подов и мониторинг VictoriaMetrics (финал всех 3 волн):**
+   - Распределение по узлам: `k3s-1` (`11` подов / `7` без DS / `192Mi` memory req), `k3s-2` (`11` / `7` / `358Mi`), `k3s-3` (`14` / `10` / `544Mi` — в `04:15 MSK` `descheduler` сможет разгрузить до 2 сервисов `smarthome`/`registry` с `k3s-3` на `k3s-1`).
+   - Все 8 боевых PVC (`mosquitto-data`, `zigbee2mqtt-data`, 5× `smarthome/*-conf`, `registry-data`) в `Bound` (`ambar-r3-retain`).
+   - VictoriaMetrics: `count(ambar_volume_quorum == 1) == 24`, `count(ambar_volume_uptodate_replicas == 3) == 24` (8 томов × 3 узла), `ambar_node_allocated_bytes == 13720510464` байт (~12.78 GiB) на каждой ноде, `vmalert_alerts_firing{alertname=~"Ambar.*"} == 0`.
+   - Исходные каталоги `/volume1/k8s/*` на NAS и `nfs-client` в `kube-system` сохранены нетронутыми.

@@ -5,10 +5,11 @@
 # certificate — so registries.yaml on the nodes stays untouched. A plain HTTP
 # registry would mean editing insecure-registries on all three nodes instead.
 #
-# Storage is NFS rather than local-path: a registry is blobs on a filesystem,
-# with no database and no locking, so a network filesystem is safe here (unlike
-# Grafana's and z2m's SQLite). The payoff is that the pod survives losing a node
-# and does not depend on which node comes back first after a cluster restart.
+# Storage is PVC registry-data (StorageClass ambar-r3-retain, 3 synchronous
+# DRBD replicas on NVMe LVM), replacing the legacy inline NFS volume on the NAS.
+# Strategy is Recreate (RWO block device); the weekly registry-gc CronJob uses
+# required podAffinity on app: registry so it mounts the same PVC on the same
+# node without stopping the registry.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -40,6 +41,8 @@ spec:
   template:
     metadata:
       labels: { app: registry }
+      annotations:
+        descheduler.alpha.kubernetes.io/evict: "true"
     spec:
       # Reschedule ~1.7 min after a host dies (40s NotReady detect + 60s here),
       # not the 5-min default. Stateless single replica — safe to move fast; the
@@ -71,9 +74,20 @@ spec:
             limits:   { memory: 256Mi }
       volumes:
         - name: data
-          nfs:
-            server: 198.18.1.105
-            path: /volume1/k8s/registry
+          persistentVolumeClaim:
+            claimName: registry-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+  namespace: registry
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ambar-r3-retain
+  resources:
+    requests:
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
