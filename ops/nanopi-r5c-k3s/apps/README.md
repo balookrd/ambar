@@ -153,9 +153,10 @@ IP — иначе переезд пода на другую ноду требо�
 экране телевизора. Образы собираются на маке и лежат в кластерном реестре
 `registry.k3s.fleet.example` (см. [`registry/README.md`](registry/README.md)).
 
-mosquitto перенесён с `198.51.100.102` 2026-08-10 — namespace `home`, данные на
-NFS (`mosquitto-data`), образ `eclipse-mosquitto:2.1.2-alpine` (тега без
-`-alpine` в ветке 2.1 не существует). Листенеров два: 1883 для всех и 1888
+mosquitto перенесён с `198.51.100.102` 2026-08-10 — namespace `home`, данные
+переведены на PVC `mosquitto-data` (`ambar-r3-retain`), образ
+`eclipse-mosquitto:2.1.2-alpine` (тега без `-alpine` в ветке 2.1 не существует).
+Листенеров два: 1883 для всех и 1888
 для spruthub, которому ACL закрывает `espresense/#`; потеря второго не даст
 ошибки, только утечку чужих топиков. ConfigMap монтируется тремя `subPath`, а
 не каталогом: mosquitto 2.1 отказывается открывать `acl_file`, если это
@@ -294,7 +295,8 @@ Ingress-объекты, не трогая workloads. Пока приложени
 |---|---|---|
 | VictoriaMetrics | TSDB | NVMe NAS `/volume2/victoria-metrics`, docker ([`ops/nas-monitoring/`](../../nas-monitoring/README.md)) |
 | Grafana | SQLite | NVMe NAS `/volume2/grafana`, docker (там же) |
-| mosquitto, zigbee2mqtt, сервисы `smarthome`, реестр | стейт | inline NFS-том |
+| mosquitto, `smarthome/conditioner`, `smarthome/presence` | стейт / `devices.json` | PVC `ambar-r3-retain` (RWO, 3 реплики DRBD) |
+| zigbee2mqtt, `smarthome/{humidity,power,samsung-tv}`, реестр | стейт | inline NFS-том (до переноса на `ambar-r3-retain`) |
 | ocserv | `ocpasswd` | PVC `nfs-client` (мелкий) |
 | outline-ss/ws, ocserv | сертификаты/конфиг | Secret/ConfigMap, без PVC |
 

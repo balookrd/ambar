@@ -9,10 +9,9 @@
 # -alpine form. Same digest as the `latest` the docker container on .102 was
 # running (sha256:6f8d8a94…), so this pins what production already had.
 #
-# Data on NFS, same as zigbee2mqtt. mosquitto.db is not SQLite: mosquitto
-# rewrites it whole on every autosave, with no locking and no page cache for a
-# network filesystem to tear. So the usual reason to avoid NFS does not apply,
-# and in exchange the pod is not nailed to whichever node holds the volume.
+# Data lives on PVC mosquitto-data (StorageClass ambar-r3-retain, 3 DRBD replicas
+# on NVMe LVM), replacing the legacy inline NFS volume on the NAS. Strategy is
+# Recreate because mosquitto.db has a single writer and :1883/:1888 bind once.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -111,12 +110,23 @@ spec:
             limits:   { memory: 128Mi }
       volumes:
         - name: data
-          nfs:
-            server: 198.18.1.105
-            path: /volume1/k8s/mosquitto-data
+          persistentVolumeClaim:
+            claimName: mosquitto-data
         - name: config
           configMap:
             name: mosquitto-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mosquitto-data
+  namespace: home
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ambar-r3-retain
+  resources:
+    requests:
+      storage: 512Mi
 ---
 # In-cluster access: z2m and the smarthome services reach the broker by this
 # name. They must NOT go through the LoadBalancer VIP — a pod talking to its
