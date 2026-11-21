@@ -112,7 +112,7 @@ ssh sysadm@198.51.100.105 'docker restart grafana'
 ssh sysadm@198.51.100.105 'docker logs --since 2m grafana 2>&1 | grep "provision dashboards"'
 ```
 
-Скрипт копирует JSON в `/volume2/grafana/dashboards` (в контейнере `/var/lib/grafana/dashboards`). Без аргументов он берёт дашборды из трёх мест: `ops/grafana/dashboards/`, `bins/outline-server/grafana/` и `bins/outline-client/grafana/`. Провайдер стоит с `disableDeletion: false`, поэтому дашборд, которого нет в каталоге, удаляется из базы при следующем старте Grafana. Выкладывайте все три источника разом; при передаче отдельных файлов остальные остаются в каталоге нетронутыми.
+Скрипт копирует JSON в `/volume2/grafana/dashboards` (в контейнере `/var/lib/grafana/dashboards`). Без аргументов он берёт все дашборды из единого каталога `ops/grafana/dashboards/` (включая `outline-server` и `outline-client`). Провайдер стоит с `disableDeletion: false`, поэтому дашборд, которого нет в каталоге, удаляется из базы при следующем старте Grafana. Выкладывайте каталог целиком; при передаче отдельных файлов остальные остаются в каталоге нетронутыми.
 
 Без рестарта изменения не видны: провижининг выполняется только при старте. Рестарт Grafana — действие на проде, согласуйте с владельцем.
 

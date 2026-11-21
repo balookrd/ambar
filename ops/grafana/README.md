@@ -1,7 +1,7 @@
 # Grafana
 
-Как устроена и раскатывается Grafana парка: дашборды из этого каталога и из
-`bins/*/grafana/`, бэкап, SMTP. Алертинг в Grafana выключен: правила и рассылка
+Как устроена и раскатывается Grafana парка: дашборды из [`dashboards/`](dashboards/),
+бэкап, SMTP. Алертинг в Grafana выключен: правила и рассылка
 живут в [`ops/alerting/`](../alerting/README.md) (vmalert и Alertmanager).
 
 Реальные имена узлов, домены и адреса парка в этом документе заменены условными: `fleet.example` — домен парка; `relay-a`…`relay-d` — промежуточные cloud-узлы; `exit-a`…`exit-e` — выходные узлы; `198.51.100.0/24` — домашняя сеть (`.102`, `.104` и т. д. — последний октет). Соответствие — в локальном некоммитируемом `FLEET.local.md`.
@@ -45,11 +45,11 @@ ssh sysadm@198.51.100.105 'docker logs --since 2m grafana 2>&1 | grep "provision
 
 Особенности режима `--nas`:
 
-- Дашборды собираются из трёх мест. Кроме этого каталога, скрипт забирает
-  `bins/outline-server/grafana/` и `bins/outline-client/grafana/` (если файлы
-  не переданы аргументами). Провайдер стоит с `disableDeletion: false`, и
-  дашборд, не попавший в каталог `/volume2/grafana/dashboards`, будет удалён из БД при
-  следующем старте.
+- Все дашборды (включая `outline-server` и `outline-client`) живут в едином
+  каталоге [`ops/grafana/dashboards/`](dashboards/). При запуске без
+  аргументов скрипт собирает весь каталог разом. Провайдер стоит с
+  `disableDeletion: false`, и дашборд, не попавший в `/volume2/grafana/dashboards`,
+  будет удалён из БД при следующем старте.
 - Скрипт только копирует файлы (`scp -O`) и на NAS ничего не удаляет. Убранный из
   репозитория дашборд остаётся в `/volume2/grafana/dashboards/` и после рестарта
   Grafana остаётся на экране. Чтобы удалить его, на NAS выполните
@@ -95,10 +95,20 @@ ssh mmv@198.51.100.102 'sudo docker update --restart=unless-stopped grafana && s
 
 ## Дашборды
 
-Дашборды, не привязанные к бинарю, лежат в [`dashboards/`](dashboards/);
-дашборды бинарей — в `bins/outline-client/grafana/` и
-`bins/outline-server/grafana/`. Раскатывайте их все разом
-(`./dashboards/deploy.sh --nas` собирает все три каталога) — см. «Раскатка».
+Все управляемые в git дашборды (как инфраструктурные, так и бинарей
+`outline-server`/`outline-client`) лежат в [`dashboards/`](dashboards/).
+При раскатке на NAS выкладывайте их все разом (`./ops/grafana/dashboards/deploy.sh --nas`
+без аргументов) — см. «Раскатка».
+
+### Дашборды `outline-server` и `outline-client`
+
+| Файл | Title / `uid` | Назначение |
+|---|---|---|
+| [`dashboards/outline-server-dashboard.json`](dashboards/outline-server-dashboard.json) | `outline-server` / `outline-ss-rust` | Операционный дашборд сервера: активные сессии и upstream'ы, ошибки TCP/UDP, WS upgrade/disconnect, трафик и throughput по пользователям, p95 TCP connect latency, UDP по HTTP/3 datagram |
+| [`dashboards/outline-client-dashboard.json`](dashboards/outline-client-dashboard.json) | `outline-client` / `outline-ws-rust` | Основной дашборд клиента (фильтры `instance`, `job`, `group`): трафик, latency, здоровье и policy-маршрутизация (`bypass_when_down`), mid-session retries, inactive-uplink leak, cluster/soft switch, пробы и standby, TUN, память/jemalloc, FD/потоки, carrier loss, RTT, UDP over H3 datagrams |
+| [`dashboards/outline-client-hang-diagnostics.json`](dashboards/outline-client-hang-diagnostics.json) | `outline-client hang diagnostics` / `outline-ws-rust-hang-diag` | Диагностика зависаний клиента: свежесть standby-пула, H3/QUIC-стойлы, капы понижения режима, сигналы зависания TUN TCP, payload-integrity ошибки, корреляция probe vs user-flow, аннотации переключений аплинка |
+
+*(Multi-instance UI с управлением активацией аплинков отдаётся отдельным сервисом `outline-ui`, а не Grafana.)*
 
 ### Дашборд `outline alerting`
 

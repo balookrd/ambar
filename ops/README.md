@@ -21,7 +21,9 @@ ops/
 │       ├── storage/     # NFS provisioner (historical/fallback storage)
 │       └── vpn/         # AnyConnect (ocserv) VPN gateway
 ├── alerting/            # Alertmanager configs, vmalert rules, and rule unit tests
-├── grafana/             # Grafana dashboards, alert policies, and provisioning
+├── grafana/             # Grafana dashboards (incl. outline-server/outline-client), alert policies, provisioning
+├── heartbeat/           # Dead-man switch receiver (heartbeat-watch on relay-a/relay-b)
+├── hostacct/            # Per-LAN-host traffic accounting on GRE gre1 (nftables + node_exporter textfile)
 ├── k3s/                 # Cluster maintenance CronJobs (registry-gc)
 ├── nas-monitoring/      # Docker Compose stack for NAS (VictoriaMetrics, Grafana, snmp-exporter, backups)
 └── nas-jellyfin-backup/ # Incremental Jellyfin backup scripts for NAS

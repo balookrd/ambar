@@ -24,18 +24,12 @@ esac
 files=("$@")
 if [ ${#files[@]} -eq 0 ]; then
 	# A bare glob would pass the literal "*.json" through on an empty directory.
+	# Every dashboard (including outline-server and outline-client) lives here,
+	# and on the NAS they must all be deployed together: the provider runs with
+	# disableDeletion=false, so a dashboard missing from the mounted directory
+	# gets DELETED from the database on the next start.
 	shopt -s nullglob
 	files=(*.json)
-	if [ "$nas" = 1 ]; then
-		# Binary-specific dashboards live next to their binaries, and on the
-		# NAS they must all be deployed together: the provider runs with
-		# disableDeletion=false, so a dashboard missing from the mounted
-		# directory gets DELETED from the database on the next start.
-		bins_dir="${OUTLINE_PROXY_BINS_DIR:-../../../../outline-proxy/bins}"
-		[ -d "$bins_dir" ] || bins_dir="../../../bins"
-		files+=("$bins_dir"/outline-server/grafana/*.json)
-		files+=("$bins_dir"/outline-client/grafana/*.json)
-	fi
 fi
 [ ${#files[@]} -gt 0 ] || { echo "no dashboards to deploy" >&2; exit 1; }
 

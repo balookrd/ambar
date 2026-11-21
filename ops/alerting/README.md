@@ -33,7 +33,7 @@ VictoriaMetrics ──запрос раз в 1 мин──► vmalert ──а�
 - vmalert (`monitoring/vmalert`) каждую минуту выполняет 23 правила из `vmalert/rules.yaml` против `http://victoria-metrics.monitoring:8428`. Свои серии `ALERTS` и `ALERTS_FOR_STATE` он пишет туда же (`-remoteWrite.url`) и по ним восстанавливает таймеры `for` после рестарта (`-remoteRead.url`). Запущен с `-external.url=https://vmalert.k3s.fleet.example`, благодаря чему ссылка на источник (`Source:`) в уведомлениях Alertmanager ведёт на рабочий Ingress. Дашборд [`outline alerting`](../grafana/dashboards/outline-alerting.json) читает эти серии.
 - Alertmanager (`monitoring/alertmanager`) группирует алерты и доставляет их по маршрутам из `alertmanager/alertmanager.yml`. Запущен с `--web.external-url=https://alertmanager.k3s.fleet.example` (ссылки на silences и Web UI). Конфиг приезжает Secret'ом `alertmanager-config`, пароль SMTP — Secret'ом `alertmanager-smtp`.
 - Оба пода без `nodeSelector` и без PVC: отказ одного узла k3s не убирает алертинг вместе с VictoriaMetrics.
-- Правило `DeadMansSwitch` горит всегда, его уведомления и есть пульс. Приёмник `heartbeat-watch` работает на внешних cloud-релеях `relay-a` и `relay-b` (проект `outline-proxy`).
+- Правило `DeadMansSwitch` горит всегда, его уведомления и есть пульс. Приёмник `heartbeat-watch` работает на внешних cloud-релеях `relay-a` и `relay-b` ([`ops/heartbeat/`](../heartbeat/README.md)).
 
 Семантика ошибок: нет данных — нет алерта; запрос упал — ничего не отправляется (как было `noDataState: OK` и `execErrState: OK` в Grafana). Мёртвую VictoriaMetrics ловит не массовое срабатывание правил, а замолчавший `DeadMansSwitch`.
 
