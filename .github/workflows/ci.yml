@@ -43,9 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: image/test-loader.sh
-      - run: bash -n image/*.sh stand/*.sh stand/spike/*.sh
+      - run: bash -n image/*.sh stand/*.sh stand/spike/*.sh .github/scripts/*.sh
+      - name: Release scripts self-test
+        run: python3 .github/scripts/version.py self-test
       - name: Manifests parse
         run: |
           # Ruby 3.2.3 is on the ubuntu-latest image (PyYAML is not).
-          ruby -ryaml -e 'ARGV.each { |f| YAML.load_stream(File.read(f)) }' deploy/*.yaml
+          ruby -ryaml -e 'ARGV.each { |f| YAML.load_stream(File.read(f)) }' deploy/*.yaml .github/workflows/*.yml
           python3 -c 'import json; json.load(open("deploy/crd.json"))'
