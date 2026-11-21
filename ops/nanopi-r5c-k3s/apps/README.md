@@ -55,14 +55,14 @@ namespace, а синглтоны разбросаны по шести namespace.
 | `thresholds` / `targetThresholds` `pods` | `1` | источник — узел выше среднего больше чем на 1 п.п. подов (≈1,1 пода), приёмник — ниже на столько же |
 | `thresholds` / `targetThresholds` `memory` | `3` | то же по memory requests, 3 п.п. ≈ 120 МиБ |
 | `maxNoOfPodsToEvictTotal` | `2` | не больше двух выселений за прогон |
-| `DefaultEvictor` | защита local storage и PVC (`PodsWithPVC`) | поды с `emptyDir` (Alertmanager) и PVC (`mosquitto`, `zigbee2mqtt`, `nfs-client` и будущие PVC по умолчанию) не трогаются; `smarthome/*` и `registry` разрешены точечно аннотацией `descheduler.alpha.kubernetes.io/evict: "true"`. Alertmanager и Traefik и так стоят по одной реплике на узел |
+| `DefaultEvictor` | защита local storage и PVC (`PodsWithPVC`) | поды с `emptyDir` (Alertmanager) и PVC (`mosquitto`, `nfs-client` и будущие PVC по умолчанию) не трогаются; `zigbee2mqtt`, `smarthome/*` и `registry` разрешены точечно аннотацией `descheduler.alpha.kubernetes.io/evict: "true"`. Alertmanager и Traefik и так стоят по одной реплике на узел |
 
-Выселенный под рестартует (у синглтонов `Recreate`): сервисы `smarthome` или
-`registry` в 04:15 могут быть недоступны ~10–30 с, тогда как `mosquitto` и
-`zigbee2mqtt` защищены от ночной ротации, чтобы не обрывать активные сессии
-устройств. Внутри полосы ничего не двигается; одно выселение меняет загрузку
-узла на 0,9 п.п. по подам, а ширина полосы 2 п.п., поэтому приёмник не
-становится источником и поды не ходят туда-обратно.
+Выселенный под рестартует (у синглтонов `Recreate`): `zigbee2mqtt`, сервисы
+`smarthome` или `registry` в 04:15 могут быть недоступны ~10–30 с, тогда как
+`mosquitto` защищён от ночной ротации, чтобы не сбрасывать in-memory очереди и
+не вызывать волну переподключений устройств. Внутри полосы ничего не двигается;
+одно выселение меняет загрузку узла на 0,9 п.п. по подам, а ширина полосы 2 п.п.,
+поэтому приёмник не становится источником и поды не ходят туда-обратно.
 
 Ручной прогон с той же политикой:
 

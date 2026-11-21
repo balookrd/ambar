@@ -37,6 +37,8 @@ spec:
   template:
     metadata:
       labels: { app: zigbee2mqtt }
+      annotations:
+        descheduler.alpha.kubernetes.io/evict: "true"
     spec:
       securityContext:
         runAsUser: 1000       # matches the image and the migrated files
