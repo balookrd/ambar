@@ -20,8 +20,7 @@ single Rust binary running as a DaemonSet.
 | Production run | ambar is deployed on a production 3-node NanoPi R5C cluster in namespace `ambar-system`, running alongside existing production services |
 | Measurements on the target hardware (NanoPi R5C) | completed, see test report [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 | LVM direct block backend (phase 5) | implemented and verified on the NanoPi R5C cluster; 4K `fsync` latency reduced to 12.65 ms (r3) / 10.03 ms (r2) without loopback or ext4 double journaling ([spec](docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md)) |
-| Control plane HA (kube-vip) | implemented and active on the 3-node NanoPi R5C cluster: VIP `198.51.100.30:6443` with automated ARP failover and scripts in [`stand/r5c-kube-vip.sh`](stand/r5c-kube-vip.sh) |
-| Cluster operations & workloads | manifests, hardware provisioning guides, monitoring and alerting configs live in the dedicated [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) project |
+| Control plane HA (kube-vip) | verified on the 3-node NanoPi R5C cluster: VIP `198.51.100.30:6443` with automated ARP failover |
 
 ## What it does
 
@@ -94,7 +93,7 @@ Exported Prometheus metrics:
 - `ambar_volume_manual_check_needed{node, volume}`: `1` if auto-adjust attempts are exhausted (split-brain alert), `0` otherwise.
 - `ambar_module_info{version}`: DRBD kernel module version info metric.
 
-StorageClasses in [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 replicas, `Delete`), `ambar-r2` (2 replicas + witness, `Delete`), and `ambar-r3-retain` (3 replicas, `Retain`, recommended for production workloads). Monitoring scrape targets, `vmalert` rules, and the `ambar-storage` Grafana dashboard live in the dedicated [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) project under `ops/`.
+StorageClasses in [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 replicas, `Delete`), `ambar-r2` (2 replicas + witness, `Delete`), and `ambar-r3-retain` (3 replicas, `Retain`, recommended for persistent workloads). Metrics are exported by the driver in Prometheus format on port `:9770/metrics`.
 
 ## NanoPi R5C Benchmarks
 
@@ -161,14 +160,16 @@ On bare-metal clusters (such as the FriendlyElec NanoPi R5C target setup), nodes
 - **Dynamic ambar LVs**: The remaining ~84 GiB of unallocated Physical Extents is dynamically provisioned by `ambar-agent` for DRBD replicated volumes.
 - **Direct Block DRBD**: DRBD 9 uses `/dev/k3s-vg/pvc-<UUID>` directly as its backing disk. This bypasses the host filesystem VFS layer, eliminates loopback devices, and eliminates double journaling (`ext4` on the volume + `ext4/JBD2` on the host).
 
-## Deploying ambar on NanoPi R5C cluster
+## Deploying ambar with LVM backend
 
-Hardware preparation for NanoPi R5C nodes, network topology (`wan0`/`lan0`), NVMe LVM partitioning, and HA k3s deployment with `kube-vip` are centralized in the [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) repository under [`nodes/nanopi-r5c-k3s/`](file:///home/user/IdeaProjects/infra-repo/nodes/nanopi-r5c-k3s).
+Prerequisites on cluster nodes:
+1. `drbd` kernel module loaded (version 9.3+).
+2. LVM Volume Group provisioned (defaults to `k3s-vg`).
+3. Node storage capacity configured via `ConfigMap ambar-nodes` (see [`deploy/nodes-configmap.example.yaml`](deploy/nodes-configmap.example.yaml)).
 
-To deploy the `ambar` driver on a provisioned k3s cluster:
-Deploy the DaemonSet with `--volume-group=k3s-vg` and configure per-node volume quotas in `ConfigMap ambar-nodes`:
+Deploy the DaemonSet and StorageClasses:
 ```bash
-stand/r5c-deploy.sh
+kubectl apply -f deploy/
 ```
 
 ## Requirements for the image and the stand
@@ -222,15 +223,6 @@ only on Linux; on macOS run the suite in a container as well:
 another cluster the image and the `ambar-nodes` ConfigMap must be set for that
 cluster (see the comments in `deploy/daemonset.yaml` and
 `deploy/nodes-configmap.example.yaml`).
-
-## Cluster operations and workloads
-
-All production operational assets for the 3-node NanoPi R5C cluster (`k3s-1..3`), hardware provisioning, ingress, monitoring, and workload manifests are maintained in the dedicated [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) project:
-
-- [`infra-repo/ops/`](file:///home/user/IdeaProjects/infra-repo/ops/README.md): Production cluster deployment manifests, Traefik ingress, MetalLB L2 load balancer, and migrated apps (`smarthome`, `ingress`, `registry`, etc.).
-- [`infra-repo/ops/nanopi-r5c-k3s/`](file:///home/user/IdeaProjects/infra-repo/ops/nanopi-r5c-k3s/README.md): Detailed hardware setup guide, network layout (`wan0` 198.51.100.0/24, `lan0` 10.10.10.0/24), LVM NVMe partitioning, and HA Control Plane with kube-vip.
-- [`stand/`](stand/README.md#физический-кластер-nanopi-r5c-скрипты-r5c-sh): Automation scripts for physical cluster maintenance (`stand/r5c-*.sh`), including LVM migration (`stand/r5c-migrate-lvm.sh`), kube-vip management (`stand/r5c-kube-vip.sh`), and fio performance benchmarks.
-- [`infra-repo/ops/alerting/`](file:///home/user/IdeaProjects/infra-repo/ops/alerting/README.md) & [`infra-repo/ops/grafana/`](file:///home/user/IdeaProjects/infra-repo/ops/grafana/README.md): VictoriaMetrics alert rules and Grafana dashboards for cluster and storage observability.
 
 ## Releases
 

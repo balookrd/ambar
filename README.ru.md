@@ -20,8 +20,7 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; др�
 | Запуск на боевом кластере | ambar развернут на боевом кластере из 3 узлов NanoPi R5C в namespace `ambar-system`, работает параллельно с существующими боевыми сервисами |
 | Замеры на целевом железе (NanoPi R5C) | выполнены, ссылка на протокол [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 | Прямой блочный LVM бэкенд (фаза 5) | реализован и проверен на кластере NanoPi R5C; задержка 4K `fsync` снижена до 12.65 мс (r3) / 10.03 мс (r2) без loopback и двойного журналирования ext4 ([спека](docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md)) |
-| Отказоустойчивый Control Plane (kube-vip) | реализован и работает на боевом 3-нодовом кластере NanoPi R5C: виртуальный IP `198.51.100.30:6443` с автоматическим ARP failover и скриптами в [`stand/r5c-kube-vip.sh`](stand/r5c-kube-vip.sh) |
-| Эксплуатация кластера и нагрузки | манифесты нагрузок, гайды по подготовке железа, конфиги мониторинга и алертинга вынесены в проект [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) |
+| Отказоустойчивый Control Plane (kube-vip) | проверен на 3-нодовом кластере NanoPi R5C: виртуальный IP `198.51.100.30:6443` с автоматическим ARP failover |
 
 ## Что делает драйвер
 
@@ -94,7 +93,7 @@ kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica move my-vol node
 - `ambar_volume_manual_check_needed{node, volume}`: `1`, если исчерпаны попытки adjust (алерт split-brain), иначе `0`.
 - `ambar_module_info{version}`: информационная метрика с версией модуля ядра DRBD.
 
-Классы хранения в [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 копии, `Delete`), `ambar-r2` (2 копии + witness, `Delete`) и `ambar-r3-retain` (3 копии, `Retain`, рекомендуемый класс для боевых нагрузок). Конфигурация скрейпа VictoriaMetrics, правила `vmalert` и дашборд Grafana `ambar-storage` находятся в выделенном проекте [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) в каталоге `ops/`.
+Классы хранения в [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 копии, `Delete`), `ambar-r2` (2 копии + witness, `Delete`) и `ambar-r3-retain` (3 копии, `Retain`, рекомендуемый класс для постоянных томов). Метрики экспортируются драйвером в формате Prometheus на порту `:9770/metrics`.
 
 ## Замеры на целевом железе (NanoPi R5C)
 
@@ -161,14 +160,16 @@ AST-карту репозитория в `.code-index/` (через `ast-grep`, 
 - **Динамические блочные тома ambar**: Оставшиеся ~84 ГБ свободных PE динамически нарезаются агентом `ambar-agent` под блочные реплицируемые тома DRBD.
 - **Прямая передача блочных устройств в DRBD**: DRBD 9 работает с блочным устройством `/dev/k3s-vg/pvc-<UUID>` напрямую. Это исключает промежуточный слой VFS хостовой файловой системы, убирает loopback-устройства и ликвидирует двойное журналирование (`ext4` внутри тома + хостовый `ext4/JBD2`).
 
-## Развертывание ambar на кластере NanoPi R5C
+## Развертывание ambar с LVM-бэкендом
 
-Подготовка аппаратных узлов NanoPi R5C, сетевой топологии (`wan0`/`lan0`), разметка NVMe под LVM и развертывание отказоустойчивого кластера k3s с `kube-vip` централизованно ведутся в репозитории [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) в каталоге [`nodes/nanopi-r5c-k3s/`](file:///home/user/IdeaProjects/infra-repo/nodes/nanopi-r5c-k3s).
+Для работы драйвера на узлах кластера должны быть предварительно настроены:
+1. Загружен модуль ядра `drbd` (версии 9.3+).
+2. Выделена LVM Volume Group (по умолчанию `k3s-vg`).
+3. Подготовлен `ConfigMap ambar-nodes` со списком узлов и емкостями хранилища (пример в [`deploy/nodes-configmap.example.yaml`](deploy/nodes-configmap.example.yaml)).
 
-Для развертывания драйвера `ambar` поверх готового кластера:
-Запуск DaemonSet с аргументом `--volume-group=k3s-vg` и квотами емкости узлов в `ConfigMap ambar-nodes`:
+Развертывание DaemonSet и StorageClass:
 ```bash
-stand/r5c-deploy.sh
+kubectl apply -f deploy/
 ```
 
 ## Требования для образа и стенда
@@ -222,15 +223,6 @@ cargo test
 манифесты не применялись; для другого кластера образ и `ConfigMap ambar-nodes`
 задаются под этот кластер (см. комментарии в `deploy/daemonset.yaml` и
 `deploy/nodes-configmap.example.yaml`).
-
-## Эксплуатация кластера и рабочие нагрузки
-
-Все материалы по эксплуатации боевого кластера из трёх плат NanoPi R5C (`k3s-1..3`), подготовке железа, ingress, мониторингу и нагрузкам вынесены в выделенный проект [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/):
-
-- [`infra-repo/ops/`](file:///home/user/IdeaProjects/infra-repo/ops/README.ru.md): Манифесты боевого кластера, ingress Traefik, L2-балансировщик MetalLB и перенесённые сервисы (`smarthome`, `ingress`, `registry` и др.).
-- [`infra-repo/ops/nanopi-r5c-k3s/`](file:///home/user/IdeaProjects/infra-repo/ops/nanopi-r5c-k3s/README.md): Подробное руководство по настройке узлов, сетевая топология (`wan0` 198.51.100.0/24, `lan0` 10.10.10.0/24), разметка NVMe под LVM и отказоустойчивый Control Plane на базе kube-vip.
-- [`stand/`](stand/README.md#физический-кластер-nanopi-r5c-скрипты-r5c-sh): Скрипты автоматизации обслуживания физического кластера (`stand/r5c-*.sh`), включая онлайн-миграцию на LVM (`stand/r5c-migrate-lvm.sh`), управление kube-vip (`stand/r5c-kube-vip.sh`) и замеры производительности fio.
-- [`infra-repo/ops/alerting/`](file:///home/user/IdeaProjects/infra-repo/ops/alerting/README.md) и [`infra-repo/ops/grafana/`](file:///home/user/IdeaProjects/infra-repo/ops/grafana/README.md): Правила алертов VictoriaMetrics и дашборды Grafana для мониторинга кластера и хранилища.
 
 ## Релизы
 

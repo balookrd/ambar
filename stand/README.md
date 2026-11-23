@@ -329,9 +329,7 @@ stand/install.sh && stand/failure-e2e.sh
 
 ## Физический кластер NanoPi R5C
 
-Базовые скрипты развертывания нод кластера NanoPi R5C (`r5c-init-node.sh`, `r5c-install-k3s.sh`, `r5c-kube-vip.sh`, `r5c-preflight.sh`) перенесены в репозиторий [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) в каталог [`nodes/nanopi-r5c-k3s/provision/`](file:///home/user/IdeaProjects/infra-repo/nodes/nanopi-r5c-k3s/provision).
-
-В этом каталоге собраны специализированные скрипты для сборки, раскатки и бенчмаркинга ambar:
+В этом каталоге собраны специализированные скрипты для сборки, раскатки и бенчмаркинга ambar на физическом кластере NanoPi R5C:
 
 | Скрипт | Назначение |
 |---|---|
