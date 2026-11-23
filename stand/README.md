@@ -327,19 +327,17 @@ stand/install.sh && stand/failure-e2e.sh
 
 
 
-## Физический кластер NanoPi R5C (скрипты `r5c-*.sh`)
+## Физический кластер NanoPi R5C
 
-Для развертывания, обслуживания и бенчмаркинга боевого кластера из трёх плат FriendlyElec NanoPi R5C (`k3s-1..3`) используются специализированные скрипты:
+Базовые скрипты развертывания нод кластера NanoPi R5C (`r5c-init-node.sh`, `r5c-install-k3s.sh`, `r5c-kube-vip.sh`, `r5c-preflight.sh`) перенесены в репозиторий [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) в каталог [`nodes/nanopi-r5c-k3s/provision/`](file:///home/user/IdeaProjects/infra-repo/nodes/nanopi-r5c-k3s/provision).
+
+В этом каталоге собраны специализированные скрипты для сборки, раскатки и бенчмаркинга ambar:
 
 | Скрипт | Назначение |
 |---|---|
-| `stand/r5c-lib.sh` | Общая библиотека: адресация узлов (`wan0` 198.51.100.51..53, `lan0` 10.10.10.11..53), SSH-параметры (`mmv`), сбор метрик cgroup v2 и RSS процесса `k3s-server` |
-| `stand/r5c-preflight.sh` | Проверка готовности узлов: сетевая связность, модуль DRBD 9.3.4, права sudo и структура дисков |
-| `stand/r5c-init-node.sh` | Подготовка узла: создание LVM VG `k3s-vg`, форматирование LV `lv_k3s` (35 ГБ под `/var/lib/rancher`) на NVMe |
-| `stand/r5c-install-k3s.sh` | Инициализация и подключение серверов K3s (HA embedded etcd) с флагами `--cluster-init`, `--tls-san 198.51.100.30` и отключением встроенных traefik/servicelb |
-| `stand/r5c-kube-vip.sh` | Управление Static Pods `kube-vip`: развертывание, статус лидера Lease `plndr-cp-lock` и удаление для виртуального IP `198.51.100.30:6443` |
 | `stand/r5c-deploy.sh` | Сборка и выкатка образа `ambar-drbd:dev` на физический кластер через docker load и k3s ctr |
 | `stand/r5c-bench-local.sh` | Замер базовой задержки `fsync` 4K блочного устройства NVMe (`local-path`) |
 | `stand/r5c-bench-fsync.sh` | Инструментальный замер задержки `fsync` 4K для томов `ambar-r2` и `ambar-r3` через fio |
 | `stand/r5c-bench-load.sh` | Комплексный стресс-тест 5 томов под непрерывной 10-минутной нагрузкой fio с замером памяти и кворума |
 | `stand/r5c-migrate-lvm.sh` | Понодовая онлайн-миграция томов и хранилища K3s с loopback-файлов на прямые блочные устройства LVM без потери кворума |
+| `stand/r5c-lib.sh` | Общая библиотека: адресация узлов, SSH-параметры (`mmv`), сбор метрик cgroup v2 и RSS |

@@ -161,35 +161,15 @@ On bare-metal clusters (such as the FriendlyElec NanoPi R5C target setup), nodes
 - **Dynamic ambar LVs**: The remaining ~84 GiB of unallocated Physical Extents is dynamically provisioned by `ambar-agent` for DRBD replicated volumes.
 - **Direct Block DRBD**: DRBD 9 uses `/dev/k3s-vg/pvc-<UUID>` directly as its backing disk. This bypasses the host filesystem VFS layer, eliminates loopback devices, and eliminates double journaling (`ext4` on the volume + `ext4/JBD2` on the host).
 
-## Cluster node setup (NanoPi R5C)
+## Deploying ambar on NanoPi R5C cluster
 
-For bare-metal Debian 13 nodes, initialization and k3s installation scripts are provided in `stand/`:
+Hardware preparation for NanoPi R5C nodes, network topology (`wan0`/`lan0`), NVMe LVM partitioning, and HA k3s deployment with `kube-vip` are centralized in the [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) repository under [`nodes/nanopi-r5c-k3s/`](file:///home/user/IdeaProjects/infra-repo/nodes/nanopi-r5c-k3s).
 
-1. **Initialize LVM storage topology on clean nodes**:
-   Partition NVMe into `k3s-vg` and `lv_k3s` (35 GiB mounted at `/var/lib/rancher`):
-   ```bash
-   # On all nodes sequentially:
-   stand/r5c-init-node.sh all
-   # Or for a specific node:
-   stand/r5c-init-node.sh k3s-1
-   ```
-
-2. **Bootstrap the k3s cluster**:
-   Initialize the cluster on the seed node and join subsequent nodes via the dedicated replication network (`lan0`):
-   ```bash
-   # Bootstrap first node (cluster-init):
-   stand/r5c-install-k3s.sh k3s-1
-
-   # Join remaining nodes (token is retrieved automatically from the first node):
-   stand/r5c-install-k3s.sh k3s-2
-   stand/r5c-install-k3s.sh k3s-3
-   ```
-
-3. **Deploy ambar with LVM backend**:
-   Deploy the DaemonSet with `--volume-group=k3s-vg` and configure per-node volume quotas in `ConfigMap ambar-nodes`:
-   ```bash
-   stand/r5c-deploy.sh
-   ```
+To deploy the `ambar` driver on a provisioned k3s cluster:
+Deploy the DaemonSet with `--volume-group=k3s-vg` and configure per-node volume quotas in `ConfigMap ambar-nodes`:
+```bash
+stand/r5c-deploy.sh
+```
 
 ## Requirements for the image and the stand
 
