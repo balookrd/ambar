@@ -181,7 +181,7 @@ use super::local::{file_state, local, local_volumes, loops_holding, synced_marke
 use super::quorum::{QuorumTracker, VolumeQuorumCheck, check_volume_quorum};
 use super::standalone::StandaloneTracker;
 use super::status::node_status;
-use super::taint::reconcile_node_taint;
+use super::taint::{DEFAULT_TAINT_RESYNC_INTERVAL, TaintTracker, reconcile_node_taint};
 
 /// Next pass after one that ran a node-level action or changed the status.
 const PROGRESS_DELAY: Duration = Duration::from_secs(1);
@@ -1607,6 +1607,7 @@ impl Agent {
         &self,
         quorum_tracker: &mut QuorumTracker,
         standalone_tracker: &mut StandaloneTracker,
+        taint_tracker: &mut TaintTracker,
         now: std::time::Instant,
     ) -> Result<(), AgentError> {
         let statuses = match self.read_all_statuses().await {
@@ -1619,11 +1620,13 @@ impl Agent {
 
         // 1. Taint management (R32)
         let should_taint = crate::agent::taint::should_taint_node(&statuses);
-        if reconcile_node_taint(&*self.volumes, &self.node, should_taint)
-            .await
-            .is_ok()
+        if taint_tracker.needs_reconcile(should_taint, now)
+            && reconcile_node_taint(&*self.volumes, &self.node, should_taint)
+                .await
+                .is_ok()
         {
             self.is_tainted.store(should_taint, Ordering::SeqCst);
+            taint_tracker.record_synced(should_taint, now);
         }
 
         // 2. Quorum loss tracking and pod eviction (R33)
@@ -1739,13 +1742,14 @@ impl Agent {
         let mut quorum_tracker = QuorumTracker::new(self.options.quorum_loss_grace_period);
         let mut standalone_tracker =
             StandaloneTracker::new(self.options.adjust_attempts as usize, self.options.adjust_interval);
+        let mut taint_tracker = TaintTracker::new(DEFAULT_TAINT_RESYNC_INTERVAL);
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
                     let now = std::time::Instant::now();
-                    let _ = self.tick_failures(&mut quorum_tracker, &mut standalone_tracker, now).await;
+                    let _ = self.tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, now).await;
                 }
             }
         }

@@ -23,6 +23,49 @@ use ambar::paths::Paths;
 use ambar::reconcile::Reconciler;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// jemalloc tuning, read once at startup.
+///
+/// `background_thread:true` + `dirty_decay_ms:5000,muzzy_decay_ms:0` decays
+/// dirty extents back to the OS without waiting for allocator traffic.
+/// `calloc_madvise_threshold:0` prevents jemalloc 5.3.1 from zeroing reused
+/// extents below 8 MiB via `memset` and faulting unused pages into RSS.
+/// `MALLOC_CONF` in the environment overrides this without a rebuild.
+#[cfg(feature = "jemalloc")]
+#[unsafe(export_name = "malloc_conf")]
+pub static MALLOC_CONF: &[u8] =
+    b"background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:0,calloc_madvise_threshold:0\0";
+
+#[cfg(all(unix, feature = "jemalloc"))]
+fn allocator_page_sizes() -> Option<(usize, usize)> {
+    // SAFETY: `arenas.page` is a read-only `size_t` mallctl, read as `usize`.
+    let jemalloc = unsafe { tikv_jemalloc_ctl::raw::read::<usize>(b"arenas.page\0") }.ok()?;
+    // SAFETY: `sysconf` has no preconditions; it returns -1 on failure.
+    let kernel = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    Some((jemalloc, usize::try_from(kernel).ok()?))
+}
+
+#[cfg(all(unix, feature = "jemalloc"))]
+fn log_allocator_page_size() {
+    match allocator_page_sizes() {
+        Some((jemalloc, kernel)) if jemalloc == kernel => {
+            eprintln!("ambar-agent: jemalloc page size {jemalloc} matches kernel page size {kernel}");
+        }
+        Some((jemalloc, kernel)) => {
+            eprintln!(
+                "ambar-agent: warning: jemalloc page size ({jemalloc}) differs from kernel page size ({kernel}); \
+                 binary was built without JEMALLOC_SYS_WITH_LG_PAGE pin"
+            );
+        }
+        None => {
+            eprintln!("ambar-agent: warning: could not read jemalloc or kernel page size");
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -173,6 +216,8 @@ fn run_agent(
             node: NodeService::new(agent.clone(), nodes),
         };
         eprintln!("ambar-agent: node {node} started");
+        #[cfg(all(unix, feature = "jemalloc"))]
+        log_allocator_page_size();
         // Either side ending (an error, or the signal) stops the other one.
         let metrics_addr = options.metrics_addr.clone();
         let (agent_result, csi_result, metrics_result) = tokio::join!(
@@ -291,3 +336,7 @@ fn run_replica_cmd(cmd: ReplicaCommand) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))
     })
 }
+
+#[cfg(test)]
+#[path = "tests/main.rs"]
+mod tests;

@@ -1,0 +1,7 @@
+[env]
+# Pin jemalloc's page size to 4 KiB on 64-bit ARM Linux. jemalloc 5.3.1
+# (tikv-jemalloc-sys 0.7) otherwise defaults aarch64 Linux to 64 KiB pages,
+# while NanoPi R5C runs a 4 KiB-page kernel (16x coarser extents and purge
+# granularity). Target-prefixed so macOS (16 KiB pages) is untouched.
+AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_LG_PAGE = "12"
+AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "12"

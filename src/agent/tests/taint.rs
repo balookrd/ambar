@@ -111,3 +111,23 @@ async fn reconcile_reports_api_error() {
     fake.fail.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(reconcile_node_taint(&fake, "node1", true).await.is_err());
 }
+
+#[test]
+fn taint_tracker_reconciles_initially_on_change_and_after_resync_interval() {
+    let t0 = Instant::now();
+    let mut tracker = TaintTracker::new(Duration::from_secs(60));
+
+    assert!(tracker.needs_reconcile(false, t0));
+    tracker.record_synced(false, t0);
+
+    // Same state within resync interval -> skipped
+    assert!(!tracker.needs_reconcile(false, t0 + Duration::from_secs(59)));
+    // Same state at/after resync interval -> periodic resync
+    assert!(tracker.needs_reconcile(false, t0 + Duration::from_secs(60)));
+
+    // State transition triggers immediate reconcile even at the same instant
+    assert!(tracker.needs_reconcile(true, t0));
+    tracker.record_synced(true, t0 + Duration::from_secs(1));
+    assert!(!tracker.needs_reconcile(true, t0 + Duration::from_secs(30)));
+    assert!(tracker.needs_reconcile(false, t0 + Duration::from_secs(30)));
+}

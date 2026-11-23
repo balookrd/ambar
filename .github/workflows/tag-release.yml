@@ -63,6 +63,9 @@ jobs:
         run: cargo install cargo-zigbuild --locked
 
       - name: Build release binary
+        env:
+          AR: zig ar
+          RANLIB: zig ranlib
         run: cargo zigbuild --release --locked --target "${{ matrix.target }}"
 
       - name: Package artifact

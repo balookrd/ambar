@@ -7,7 +7,9 @@ IMAGE="${IMAGE:-ambar-drbd:dev}"
 cd "$(dirname "$0")"
 
 # The agent is cross-compiled on the host and copied into the build context.
-(cd .. && cargo zigbuild --release --locked --target aarch64-unknown-linux-musl)
+# zig ar/ranlib keeps host ar/ranlib (e.g. macOS) from failing to index ELF
+# archives built by tikv-jemalloc-sys's configure/make.
+(cd .. && AR="zig ar" RANLIB="zig ranlib" cargo zigbuild --release --locked --target aarch64-unknown-linux-musl)
 cp ../target/aarch64-unknown-linux-musl/release/ambar ambar
 
 docker buildx build \

@@ -193,7 +193,7 @@ For bare-metal Debian 13 nodes, initialization and k3s installation scripts are 
 | Docker | `docker buildx`, `linux/arm64` |
 | Kernel the module is built for | `6.12.116+deb13-arm64` (Debian 13 stock kernel) |
 | Rust | stable 1.100 or newer (the `rust-version` in `Cargo.toml`) |
-| For `image/build.sh` on the host | `cargo-zigbuild`, `zig`, and the target added with `rustup target add aarch64-unknown-linux-musl` (checked with zig 0.17.1 and rustc 1.100.0) |
+| For `image/build.sh` on the host | `cargo-zigbuild`, `zig`, and the target added with `rustup target add aarch64-unknown-linux-musl` (checked with zig 0.17.1 and rustc 1.100.0). Builds use `jemalloc` by default with 4 KiB pages pinned for `aarch64` Linux in `.cargo/config.toml`. |
 
 ## Build and test the image
 

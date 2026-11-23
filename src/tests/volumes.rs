@@ -97,6 +97,7 @@ pub(crate) struct FakeVolumes {
     /// not reached the object.
     pub(crate) drop_status_writes: AtomicBool,
     pub(crate) node_taints: Mutex<BTreeMap<String, Vec<(String, String)>>>,
+    pub(crate) taint_checks: AtomicU32,
     pub(crate) pods: Mutex<Vec<k8s_openapi::api::core::v1::Pod>>,
 }
 
@@ -488,6 +489,7 @@ impl Volumes for FakeVolumes {
     }
 
     async fn ensure_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        self.taint_checks.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             return Err(ApiError::Other("fake API failure".to_string()));
         }
@@ -502,6 +504,7 @@ impl Volumes for FakeVolumes {
     }
 
     async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+        self.taint_checks.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             return Err(ApiError::Other("fake API failure".to_string()));
         }

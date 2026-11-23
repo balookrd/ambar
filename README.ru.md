@@ -193,7 +193,7 @@ kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica move my-vol node
 | Docker | `docker buildx`, `linux/arm64` |
 | Ядро, под которое собран модуль | `6.12.116+deb13-arm64` (штатное ядро Debian 13) |
 | Rust | stable 1.100 или новее (`rust-version` в `Cargo.toml`) |
-| Для `image/build.sh` на хосте | `cargo-zigbuild`, `zig` и цель, добавленная командой `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.100.0) |
+| Для `image/build.sh` на хосте | `cargo-zigbuild`, `zig` и цель, добавленная командой `rustup target add aarch64-unknown-linux-musl` (проверено с zig 0.17.1 и rustc 1.100.0). Сборка использует `jemalloc` по умолчанию с 4-КиБ страницей для `aarch64` Linux, закреплённой в `.cargo/config.toml`. |
 
 ## Сборка и проверка образа
 

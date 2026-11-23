@@ -51,6 +51,11 @@
    - Тест отказов: `NODES="dv-1 dv-2 dv-3 dv-4" stand/failure-e2e.sh`
    - Очистка стенда: `NODES="dv-1 dv-2 dv-3 dv-4" stand/down.sh`
 
+5. **Аллокатор памяти (`jemalloc`)**:
+   - Фича `jemalloc` включена по умолчанию (`tikv-jemallocator` + `tikv-jemalloc-ctl`) с `MALLOC_CONF` (`background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:0,calloc_madvise_threshold:0`).
+   - Причина: `cargo zigbuild` (Zig 0.17.1) подменяет `musl mallocng` на `SmpAllocator` (`max_alloc_search = 1`, без возврата слабов `< 64 KiB`), что вызывало утечку ~800 МиБ/сутки из-за кросс-поточного `alloc → free` в `SystemRunner` и `tick_failures`.
+   - Страница jemalloc для `aarch64-unknown-linux-musl` / `gnu` закреплена на 4 КиБ (`LG_PAGE=12` в `.cargo/config.toml`), проверяется при старте агента и тестом `jemalloc_page_matches_the_kernel_page`.
+
 ## Рабочий процесс
 
 - Спецификации и планы (`docs/superpowers/**`) пишутся на русском языке.

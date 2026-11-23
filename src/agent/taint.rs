@@ -4,11 +4,48 @@
 //! has lost quorum. The taint is removed once all mounted volumes have quorum (or no volumes
 //! are mounted).
 
+use std::time::{Duration, Instant};
+
 use crate::agent::kube::{ApiError, Volumes};
 use crate::drbd::status::{ResourceStatus, Role};
 
 pub const NO_QUORUM_TAINT_KEY: &str = "ambar.balookrd.github.io/no-quorum";
 pub const NO_QUORUM_TAINT_EFFECT: &str = "NoSchedule";
+
+/// Periodic resynchronization interval for node taint state when `should_taint`
+/// has not changed (protects against manual external edits without polling the
+/// Kubernetes API every second).
+pub const DEFAULT_TAINT_RESYNC_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Tracks the last reconciled node taint state to avoid issuing a `GET /nodes/<node>`
+/// API call on every failure-loop tick when nothing changed.
+#[derive(Debug)]
+pub struct TaintTracker {
+    resync_interval: Duration,
+    last_synced: Option<(bool, Instant)>,
+}
+
+impl TaintTracker {
+    pub fn new(resync_interval: Duration) -> Self {
+        Self {
+            resync_interval,
+            last_synced: None,
+        }
+    }
+
+    pub fn needs_reconcile(&self, should_taint: bool, now: Instant) -> bool {
+        match self.last_synced {
+            None => true,
+            Some((synced_state, synced_at)) => {
+                synced_state != should_taint || now.saturating_duration_since(synced_at) >= self.resync_interval
+            }
+        }
+    }
+
+    pub fn record_synced(&mut self, tainted: bool, now: Instant) {
+        self.last_synced = Some((tainted, now));
+    }
+}
 
 /// Decides whether the node should have the `no-quorum` taint based on current DRBD resources.
 ///
