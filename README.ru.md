@@ -133,6 +133,13 @@ kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica move my-vol node
 | `stand/spike/` | скрипты опытов и образцы `drbdsetup status --json` |
 | `.github/` | GitHub Actions CI, workflow релизов CalVer и вспомогательные скрипты |
 | `cliff.toml`, `CHANGELOG.md`, `CHANGELOG.ru.md` | конфигурация `git-cliff` для release notes и двуязычная история изменений |
+| `scripts/code-index.py`, `sgconfig.yml`, `.mcp.json` | локальный AST-индекс кода (`.code-index/`, см. [`docs/CODE-INDEX.ru.md`](docs/CODE-INDEX.ru.md)) и конфигурация `ast-grep` |
+
+[`scripts/code-index.py`](scripts/code-index.py) генерирует локальную
+AST-карту репозитория в `.code-index/` (через `ast-grep`, с fallback на regex), а
+[`sgconfig.yml`](sgconfig.yml) и [`.mcp.json`](.mcp.json) подключают AST-поиск и
+рефакторинг через `ast-grep`; подробности — в
+[`docs/CODE-INDEX.ru.md`](docs/CODE-INDEX.ru.md).
 
 ## Архитектура хранилища узла (LVM)
 

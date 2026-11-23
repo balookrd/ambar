@@ -133,6 +133,13 @@ Summary:
 | `stand/spike/` | experiment scripts and `drbdsetup status --json` samples |
 | `.github/` | GitHub Actions CI, CalVer release workflows, and release helper scripts |
 | `cliff.toml`, `CHANGELOG.md`, `CHANGELOG.ru.md` | `git-cliff` release-notes config and bilingual changelog |
+| `scripts/code-index.py`, `sgconfig.yml`, `.mcp.json` | local AST-based code index (`.code-index/`, see [`docs/CODE-INDEX.md`](docs/CODE-INDEX.md)) and `ast-grep` configuration |
+
+[`scripts/code-index.py`](scripts/code-index.py) generates a local AST-backed
+structural map of the repository in `.code-index/` (using `ast-grep`, with a
+regex fallback), while [`sgconfig.yml`](sgconfig.yml) and [`.mcp.json`](.mcp.json)
+wire up `ast-grep` search and refactoring; usage is in
+[`docs/CODE-INDEX.md`](docs/CODE-INDEX.md).
 
 ## Node storage topology (LVM)
 
