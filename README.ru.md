@@ -21,7 +21,7 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; др�
 | Замеры на целевом железе (NanoPi R5C) | выполнены, ссылка на протокол [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 | Прямой блочный LVM бэкенд (фаза 5) | реализован и проверен на кластере NanoPi R5C; задержка 4K `fsync` снижена до 12.65 мс (r3) / 10.03 мс (r2) без loopback и двойного журналирования ext4 ([спека](docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md)) |
 | Отказоустойчивый Control Plane (kube-vip) | реализован и работает на боевом 3-нодовом кластере NanoPi R5C: виртуальный IP `198.51.100.30:6443` с автоматическим ARP failover и скриптами в [`stand/r5c-kube-vip.sh`](stand/r5c-kube-vip.sh) |
-| Эксплуатация кластера и нагрузки | манифесты нагрузок, гайды по подготовке железа, конфиги мониторинга и алертинга собраны в [`ops/`](ops/README.ru.md) |
+| Эксплуатация кластера и нагрузки | манифесты нагрузок, гайды по подготовке железа, конфиги мониторинга и алертинга вынесены в проект [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) |
 
 ## Что делает драйвер
 
@@ -94,7 +94,7 @@ kubectl -n ambar-system exec ds/ambar -c ambar -- ambar replica move my-vol node
 - `ambar_volume_manual_check_needed{node, volume}`: `1`, если исчерпаны попытки adjust (алерт split-brain), иначе `0`.
 - `ambar_module_info{version}`: информационная метрика с версией модуля ядра DRBD.
 
-Классы хранения в [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 копии, `Delete`), `ambar-r2` (2 копии + witness, `Delete`) и `ambar-r3-retain` (3 копии, `Retain`, рекомендуемый класс для боевых нагрузок). Конфигурация скрейпа VictoriaMetrics, правила `vmalert` и дашборд Grafana `ambar-storage` находятся в [`ops/`](ops/README.ru.md).
+Классы хранения в [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 копии, `Delete`), `ambar-r2` (2 копии + witness, `Delete`) и `ambar-r3-retain` (3 копии, `Retain`, рекомендуемый класс для боевых нагрузок). Конфигурация скрейпа VictoriaMetrics, правила `vmalert` и дашборд Grafana `ambar-storage` находятся в выделенном проекте [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) в каталоге `ops/`.
 
 ## Замеры на целевом железе (NanoPi R5C)
 
@@ -245,12 +245,12 @@ cargo test
 
 ## Эксплуатация кластера и рабочие нагрузки
 
-Все материалы по эксплуатации боевого кластера из трёх плат NanoPi R5C (`k3s-1..3`) и сопутствующей инфраструктуры собраны в репозитории:
+Все материалы по эксплуатации боевого кластера из трёх плат NanoPi R5C (`k3s-1..3`), подготовке железа, ingress, мониторингу и нагрузкам вынесены в выделенный проект [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/):
 
-- [`ops/`](ops/README.ru.md): Манифесты боевого кластера, ingress Traefik, L2-балансировщик MetalLB и перенесённые сервисы (`smarthome`, `ingress`, `registry` и др.).
-- [`ops/nanopi-r5c-k3s/`](ops/nanopi-r5c-k3s/README.md): Подробное руководство по настройке узлов, сетевая топология (`wan0` 198.51.100.0/24, `lan0` 10.10.10.0/24), разметка NVMe под LVM и отказоустойчивый Control Plane на базе kube-vip.
+- [`infra-repo/ops/`](file:///home/user/IdeaProjects/infra-repo/ops/README.ru.md): Манифесты боевого кластера, ingress Traefik, L2-балансировщик MetalLB и перенесённые сервисы (`smarthome`, `ingress`, `registry` и др.).
+- [`infra-repo/ops/nanopi-r5c-k3s/`](file:///home/user/IdeaProjects/infra-repo/ops/nanopi-r5c-k3s/README.md): Подробное руководство по настройке узлов, сетевая топология (`wan0` 198.51.100.0/24, `lan0` 10.10.10.0/24), разметка NVMe под LVM и отказоустойчивый Control Plane на базе kube-vip.
 - [`stand/`](stand/README.md#физический-кластер-nanopi-r5c-скрипты-r5c-sh): Скрипты автоматизации обслуживания физического кластера (`stand/r5c-*.sh`), включая онлайн-миграцию на LVM (`stand/r5c-migrate-lvm.sh`), управление kube-vip (`stand/r5c-kube-vip.sh`) и замеры производительности fio.
-- [`ops/alerting/`](ops/alerting/README.md) и [`ops/grafana/`](ops/grafana/README.md): Правила алертов VictoriaMetrics и дашборды Grafana для мониторинга кластера и хранилища.
+- [`infra-repo/ops/alerting/`](file:///home/user/IdeaProjects/infra-repo/ops/alerting/README.md) и [`infra-repo/ops/grafana/`](file:///home/user/IdeaProjects/infra-repo/ops/grafana/README.md): Правила алертов VictoriaMetrics и дашборды Grafana для мониторинга кластера и хранилища.
 
 ## Релизы
 

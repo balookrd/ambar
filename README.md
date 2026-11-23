@@ -21,7 +21,7 @@ single Rust binary running as a DaemonSet.
 | Measurements on the target hardware (NanoPi R5C) | completed, see test report [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 | LVM direct block backend (phase 5) | implemented and verified on the NanoPi R5C cluster; 4K `fsync` latency reduced to 12.65 ms (r3) / 10.03 ms (r2) without loopback or ext4 double journaling ([spec](docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md)) |
 | Control plane HA (kube-vip) | implemented and active on the 3-node NanoPi R5C cluster: VIP `198.51.100.30:6443` with automated ARP failover and scripts in [`stand/r5c-kube-vip.sh`](stand/r5c-kube-vip.sh) |
-| Cluster operations & workloads | manifests, hardware provisioning guides, monitoring and alerting configs consolidated in [`ops/`](ops/README.md) |
+| Cluster operations & workloads | manifests, hardware provisioning guides, monitoring and alerting configs live in the dedicated [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) project |
 
 ## What it does
 
@@ -94,7 +94,7 @@ Exported Prometheus metrics:
 - `ambar_volume_manual_check_needed{node, volume}`: `1` if auto-adjust attempts are exhausted (split-brain alert), `0` otherwise.
 - `ambar_module_info{version}`: DRBD kernel module version info metric.
 
-StorageClasses in [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 replicas, `Delete`), `ambar-r2` (2 replicas + witness, `Delete`), and `ambar-r3-retain` (3 replicas, `Retain`, recommended for production workloads). Monitoring scrape targets, `vmalert` rules, and the `ambar-storage` Grafana dashboard live under [`ops/`](ops/README.md).
+StorageClasses in [`deploy/storageclass.yaml`](deploy/storageclass.yaml): `ambar-r3` (3 replicas, `Delete`), `ambar-r2` (2 replicas + witness, `Delete`), and `ambar-r3-retain` (3 replicas, `Retain`, recommended for production workloads). Monitoring scrape targets, `vmalert` rules, and the `ambar-storage` Grafana dashboard live in the dedicated [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) project under `ops/`.
 
 ## NanoPi R5C Benchmarks
 
@@ -245,12 +245,12 @@ cluster (see the comments in `deploy/daemonset.yaml` and
 
 ## Cluster operations and workloads
 
-All production operational assets for the 3-node NanoPi R5C cluster (`k3s-1..3`) and supporting infrastructure are maintained in the repository:
+All production operational assets for the 3-node NanoPi R5C cluster (`k3s-1..3`), hardware provisioning, ingress, monitoring, and workload manifests are maintained in the dedicated [`infra-repo`](file:///home/user/IdeaProjects/infra-repo/) project:
 
-- [`ops/`](ops/README.md): Production cluster deployment manifests, Traefik ingress, MetalLB L2 load balancer, and migrated apps (`smarthome`, `ingress`, `registry`, etc.).
-- [`ops/nanopi-r5c-k3s/`](ops/nanopi-r5c-k3s/README.md): Detailed hardware setup guide, network layout (`wan0` 198.51.100.0/24, `lan0` 10.10.10.0/24), LVM NVMe partitioning, and HA Control Plane with kube-vip.
+- [`infra-repo/ops/`](file:///home/user/IdeaProjects/infra-repo/ops/README.md): Production cluster deployment manifests, Traefik ingress, MetalLB L2 load balancer, and migrated apps (`smarthome`, `ingress`, `registry`, etc.).
+- [`infra-repo/ops/nanopi-r5c-k3s/`](file:///home/user/IdeaProjects/infra-repo/ops/nanopi-r5c-k3s/README.md): Detailed hardware setup guide, network layout (`wan0` 198.51.100.0/24, `lan0` 10.10.10.0/24), LVM NVMe partitioning, and HA Control Plane with kube-vip.
 - [`stand/`](stand/README.md#физический-кластер-nanopi-r5c-скрипты-r5c-sh): Automation scripts for physical cluster maintenance (`stand/r5c-*.sh`), including LVM migration (`stand/r5c-migrate-lvm.sh`), kube-vip management (`stand/r5c-kube-vip.sh`), and fio performance benchmarks.
-- [`ops/alerting/`](ops/alerting/README.md) & [`ops/grafana/`](ops/grafana/README.md): VictoriaMetrics alert rules and Grafana dashboards for cluster and storage observability.
+- [`infra-repo/ops/alerting/`](file:///home/user/IdeaProjects/infra-repo/ops/alerting/README.md) & [`infra-repo/ops/grafana/`](file:///home/user/IdeaProjects/infra-repo/ops/grafana/README.md): VictoriaMetrics alert rules and Grafana dashboards for cluster and storage observability.
 
 ## Releases
 
