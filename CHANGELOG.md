@@ -32,8 +32,5 @@ Before adopting CalVer releases, the project completed Phases 0–5 and hardenin
   failure paths, atomic Kubernetes API JSON patches with `resourceVersion` tests,
   PVC-to-PV validation for pod eviction, path-traversal checks, and bounded
   metrics server concurrency.
-- **Production NanoPi R5C operations (`ops/`, `stand/`):** automated node
-  bootstrap and LVM migration scripts, `kube-vip` HA control-plane tooling,
-  cluster workloads, VictoriaMetrics alert rules, and Grafana dashboards.
 
 *Русская версия: [CHANGELOG.ru.md](CHANGELOG.ru.md)*

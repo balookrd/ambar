@@ -20,7 +20,6 @@ single Rust binary running as a DaemonSet.
 | Production run | ambar is deployed on a production 3-node NanoPi R5C cluster in namespace `ambar-system`, running alongside existing production services |
 | Measurements on the target hardware (NanoPi R5C) | completed, see test report [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 | LVM direct block backend (phase 5) | implemented and verified on the NanoPi R5C cluster; 4K `fsync` latency reduced to 12.65 ms (r3) / 10.03 ms (r2) without loopback or ext4 double journaling ([spec](docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md)) |
-| Control plane HA (kube-vip) | verified on the 3-node NanoPi R5C cluster: VIP `198.51.100.30:6443` with automated ARP failover |
 
 ## What it does
 

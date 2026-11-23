@@ -78,7 +78,7 @@
 
 ## 3. Методика измерений и тестирования
 
-Все этапы автоматизированы с помощью скрипта [`stand/bench-r5c.sh`](stand/bench-r5c.sh) и модулей библиотеки [`stand/r5c-lib.sh`](stand/r5c-lib.sh).
+Все этапы автоматизированы с помощью скрипта `bench-r5c.sh` и модулей библиотеки `r5c-lib.sh`.
 
 ### 3.1. Замер задержки ввода-вывода (4KiB `fdatasync`)
 1. **Тестовый профиль fio:**
@@ -147,7 +147,7 @@
 
 ### 5.1. Перцентильный профиль задержки `fdatasync`
 
-По результатам 30-секундных замеров fio (сырые артефакты: [`stand/baseline-local-path.json`](stand/baseline-local-path.json), [`stand/bench-fsync-r3.json`](stand/bench-fsync-r3.json), [`stand/bench-fsync-r2.json`](stand/bench-fsync-r2.json)):
+По результатам 30-секундных замеров fio (сырые артефакты: `baseline-local-path.json`, `bench-fsync-r3.json`, `bench-fsync-r2.json`):
 
 ```
  Латентность fsync (мс)
@@ -203,7 +203,7 @@ Longhorn показал в аналогичном тесте 13.6 мс. Прич
 
 ### 6.1. Потребление памяти подов `ambar` (cgroup v2 vs ps sum)
 
-За 10 минут непрерывной нагрузки 5 томами по 1 GiB зафиксированы следующие показатели (сырой артефакт: [`stand/bench-load-results.json`](stand/bench-load-results.json)):
+За 10 минут непрерывной нагрузки 5 томами по 1 GiB зафиксированы следующие показатели (сырой артефакт: `bench-load-results.json`):
 
 | Физический узел | cgroup v2 anon (max) | ps sum RSS (max) | Запас до лимита 64 МиБ (по cgroup anon) | Результат |
 |---|---|---|---|---|
@@ -235,7 +235,7 @@ Longhorn показал в аналогичном тесте 13.6 мс. Прич
 
 ### 6.3. Стабильность работы и телеметрия Prometheus
 
-На протяжении всех 600 секунд нагрузочного теста (10 сэмплов временного ряда, файл [`stand/bench-load-history.jsonl`](stand/bench-load-history.jsonl)):
+На протяжении всех 600 секунд нагрузочного теста (10 сэмплов временного ряда, файл `bench-load-history.jsonl`):
 - `ambar_volume_quorum`: **5 / 5 (100%)** — все 5 томов непрерывно удерживали кворум DRBD на всех узлах.
 - `ambar_volume_standalone_connections`: **0** — ни одной ошибки потери связи, рассинхронизации или перехода в split-brain (StandAlone).
 - `ambar_node_allocated_bytes`: ровно **5 368 832 000 байт** (5 GiB) на узле с 5 томами.

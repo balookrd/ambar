@@ -265,7 +265,7 @@ git commit -m "feat(stand): add automated safe node migration script to LVM" -- 
 - [ ] **Step 4: Выполнить миграцию узла `k3s-1`**
 
 Команда: `./stand/r5c-migrate-lvm.sh k3s-1`
-Ожидается: узел k3s-1 смигрирован, поды `home`/`smarthome` восстановили работу, статус Ready.
+Ожидается: узел k3s-1 смигрирован, поды пользовательских workload'ов восстановили работу, статус Ready.
 
 - [ ] **Step 5: Проверить статус кластера и свободное место LVM**
 
@@ -313,7 +313,7 @@ git commit -m "bench(r5c): record fsync 4K benchmark results on direct LVM backe
 - Modify: `README.md`
 - Modify: `README.ru.md`
 - Modify: `docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md` (добавление фактических замеров)
-- Modify: `~/.claude/projects/<project-slug>/memory/MEMORY.md`
+- Modify: `проектную документацию`
 
 **Interfaces:**
 - Produces: Актуальная двуязычная документация с описанием архитектуры LVM и инструкциями разметки узлов с нуля.

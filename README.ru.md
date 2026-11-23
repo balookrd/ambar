@@ -20,7 +20,6 @@ k3s. Репликацию выполняет модуль ядра DRBD 9; др�
 | Запуск на боевом кластере | ambar развернут на боевом кластере из 3 узлов NanoPi R5C в namespace `ambar-system`, работает параллельно с существующими боевыми сервисами |
 | Замеры на целевом железе (NanoPi R5C) | выполнены, ссылка на протокол [`docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md`](docs/superpowers/specs/2026-11-19-ambar-phase4-r5c-results.md) |
 | Прямой блочный LVM бэкенд (фаза 5) | реализован и проверен на кластере NanoPi R5C; задержка 4K `fsync` снижена до 12.65 мс (r3) / 10.03 мс (r2) без loopback и двойного журналирования ext4 ([спека](docs/superpowers/specs/2026-11-19-ambar-phase5-lvm-backend.md)) |
-| Отказоустойчивый Control Plane (kube-vip) | проверен на 3-нодовом кластере NanoPi R5C: виртуальный IP `198.51.100.30:6443` с автоматическим ARP failover |
 
 ## Что делает драйвер
 

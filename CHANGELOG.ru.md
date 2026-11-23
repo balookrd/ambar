@@ -34,9 +34,5 @@ Conventional Commits по всему репозиторию с помощью [`
   и цикле обработки отказов, атомарные JSON Patch-обновления в Kubernetes API с
   проверкой `resourceVersion`, сверка PVC-к-PV при выселении подов, защита от
   path traversal и ограничение параллелизма HTTP-сервера метрик.
-- **Эксплуатация кластера NanoPi R5C (`ops/`, `stand/`):** скрипты подготовки
-  узлов и онлайн-миграции на LVM, настройка отказоустойчивого Control Plane на
-  `kube-vip`, манифесты сервисов, правила алертов VictoriaMetrics и дашборды
-  Grafana.
 
 *English version: [CHANGELOG.md](CHANGELOG.md)*
