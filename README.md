@@ -248,4 +248,4 @@ and publishes the GitHub Release as `latest`. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Apache License 2.0, see [LICENSE](LICENSE).
+GNU General Public License v3.0, see [LICENSE](LICENSE).

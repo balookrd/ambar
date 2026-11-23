@@ -249,4 +249,4 @@ cargo test
 
 ## Лицензия
 
-Apache License 2.0, текст в файле [LICENSE](LICENSE).
+GNU General Public License v3.0, текст в файле [LICENSE](LICENSE).

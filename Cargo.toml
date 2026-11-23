@@ -3,6 +3,7 @@ name = "ambar"
 version = "26.11.0"
 edition = "2024"
 rust-version = "1.100"
+license = "GPL-3.0-or-later"
 
 [features]
 default = ["jemalloc"]
