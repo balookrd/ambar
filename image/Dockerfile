@@ -50,7 +50,9 @@ RUN apt-get update \
       kmod util-linux e2fsprogs libkeyutils1 lvm2 tini \
  && rm -rf /var/lib/apt/lists/* \
  && sed -i -e 's/^[[:space:]]*#[[:space:]]*udev_sync = 1/udev_sync = 0/' \
-           -e 's/^[[:space:]]*#[[:space:]]*udev_rules = 1/udev_rules = 0/' /etc/lvm/lvm.conf
+           -e 's/^[[:space:]]*#[[:space:]]*udev_rules = 1/udev_rules = 0/' /etc/lvm/lvm.conf \
+ && grep -q '^[[:space:]]*udev_sync = 0' /etc/lvm/lvm.conf \
+ && grep -q '^[[:space:]]*udev_rules = 0' /etc/lvm/lvm.conf
 COPY --from=module /out/ /opt/ambar/modules/
 COPY --from=utils /stage/usr/sbin/drbdadm /stage/usr/sbin/drbdsetup \
      /stage/usr/sbin/drbdmeta /usr/sbin/

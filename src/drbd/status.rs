@@ -51,31 +51,68 @@ pub enum ConnectionState {
     Other,
 }
 
-/// Writes the state as `drbdsetup status --json` spells it. The text comes from
-/// the serde name of the variant, so it cannot drift from the parsing side.
-/// The catch-all `Other` does not keep the original text and prints `Other`.
-fn write_serde_name(value: &impl Serialize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match serde_json::to_string(value) {
-        Ok(json) => f.write_str(json.trim_matches('"')),
-        Err(_) => Err(fmt::Error),
+impl Role {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Primary => "Primary",
+            Self::Secondary => "Secondary",
+            Self::Unknown => "Unknown",
+            Self::Other => "Other",
+        }
+    }
+}
+
+impl DiskState {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Diskless => "Diskless",
+            Self::Attaching => "Attaching",
+            Self::Detaching => "Detaching",
+            Self::Failed => "Failed",
+            Self::Negotiating => "Negotiating",
+            Self::Inconsistent => "Inconsistent",
+            Self::Outdated => "Outdated",
+            Self::DUnknown => "DUnknown",
+            Self::Consistent => "Consistent",
+            Self::UpToDate => "UpToDate",
+            Self::Other => "Other",
+        }
+    }
+}
+
+impl ConnectionState {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::StandAlone => "StandAlone",
+            Self::Disconnecting => "Disconnecting",
+            Self::Unconnected => "Unconnected",
+            Self::Timeout => "Timeout",
+            Self::BrokenPipe => "BrokenPipe",
+            Self::NetworkFailure => "NetworkFailure",
+            Self::ProtocolError => "ProtocolError",
+            Self::TearDown => "TearDown",
+            Self::Connecting => "Connecting",
+            Self::Connected => "Connected",
+            Self::Other => "Other",
+        }
     }
 }
 
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_serde_name(self, f)
+        f.write_str(self.as_str())
     }
 }
 
 impl fmt::Display for DiskState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_serde_name(self, f)
+        f.write_str(self.as_str())
     }
 }
 
 impl fmt::Display for ConnectionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_serde_name(self, f)
+        f.write_str(self.as_str())
     }
 }
 

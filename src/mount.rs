@@ -124,21 +124,25 @@ pub fn parse_mountinfo(text: &str) -> Vec<MountEntry> {
 fn parse_line(line: &str) -> Option<MountEntry> {
     let (left, right) = line.split_once(" - ")?;
     // id parent major:minor root mount-point options [optional fields...]
-    let left: Vec<&str> = left.split_whitespace().collect();
-    if left.len() < 6 {
-        return None;
-    }
+    let mut left_it = left.split_whitespace();
+    let _id = left_it.next()?;
+    let _parent = left_it.next()?;
+    let _major_minor = left_it.next()?;
+    let root = left_it.next()?;
+    let target = left_it.next()?;
+    let options = left_it.next()?;
+
     // fstype source super-options
-    let right: Vec<&str> = right.split_whitespace().collect();
-    if right.len() < 2 {
-        return None;
-    }
+    let mut right_it = right.split_whitespace();
+    let fstype = right_it.next()?;
+    let source = right_it.next()?;
+
     Some(MountEntry {
-        root: unescape(left[3]),
-        target: PathBuf::from(unescape(left[4])),
-        read_only: left[5].split(',').any(|option| option == "ro"),
-        fstype: right[0].to_string(),
-        source: unescape(right[1]),
+        root: unescape(root),
+        target: PathBuf::from(unescape(target)),
+        read_only: options.split(',').any(|option| option == "ro"),
+        fstype: fstype.to_string(),
+        source: unescape(source),
     })
 }
 
@@ -326,7 +330,7 @@ impl Mounter<'_> {
             .map(|_| ())
     }
 
-    fn entries(&self) -> Result<Vec<MountEntry>, MountError> {
+    pub fn entries(&self) -> Result<Vec<MountEntry>, MountError> {
         let text = std::fs::read_to_string(self.mountinfo).map_err(|source| MountError::Io {
             action: "read",
             path: self.mountinfo.display().to_string(),
@@ -363,7 +367,7 @@ fn busy(target: &Path, entry: &MountEntry) -> MountError {
 
 /// `fs::canonicalize` for a path that exists; a path that does not exist is
 /// returned as given. Any other error is an error: in doubt, not "unmounted".
-fn resolve(path: &Path) -> Result<PathBuf, MountError> {
+pub fn resolve(path: &Path) -> Result<PathBuf, MountError> {
     match std::fs::canonicalize(path) {
         Ok(resolved) => Ok(resolved),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(path.to_path_buf()),

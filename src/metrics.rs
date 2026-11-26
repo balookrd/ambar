@@ -108,7 +108,12 @@ pub fn render_metrics(data: &NodeMetricData<'_>) -> String {
                 let peers = status
                     .connections
                     .iter()
-                    .filter(|c| c.peer_devices.iter().any(|d| d.peer_disk_state == DiskState::UpToDate))
+                    .filter(|c| {
+                        c.connection_state == ConnectionState::Connected
+                            && c.peer_devices
+                                .iter()
+                                .any(|d| d.volume == 0 && d.peer_disk_state == DiskState::UpToDate)
+                    })
                     .count();
                 local + peers
             }

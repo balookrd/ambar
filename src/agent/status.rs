@@ -78,7 +78,7 @@ pub fn all_replicas_up_to_date(spec: &ReplicatedVolumeSpec, status: &ReplicatedV
             status
                 .nodes
                 .iter()
-                .any(|n| n.name == replica.name && n.disk == DiskState::UpToDate.to_string())
+                .any(|n| n.name == replica.name && n.disk == DiskState::UpToDate.as_str())
         })
 }
 

@@ -182,3 +182,37 @@ fn metrics_holder_shares_arc_and_recovers_from_poisoned_lock() {
     holder.update("updated\n".to_string());
     assert_eq!(&*holder.get(), "updated\n");
 }
+
+#[test]
+fn render_metrics_ignores_disconnected_peer_in_uptodate_count() {
+    let conns = vec![Connection {
+        peer_node_id: 2,
+        name: "k3s-2".to_string(),
+        connection_state: ConnectionState::Connecting,
+        peer_role: Role::Secondary,
+        peer_devices: vec![PeerDevice {
+            volume: 0,
+            replication_state: "Off".to_string(),
+            peer_disk_state: DiskState::UpToDate,
+            peer_client: false,
+            out_of_sync: 0,
+        }],
+    }];
+    let status = sample_status("vol-1", Role::Primary, true, true, DiskState::UpToDate, conns);
+    let data = NodeMetricData {
+        node: "k3s-1",
+        drbd_version: Some("9.3.4"),
+        is_tainted: false,
+        allocated_bytes: 0,
+        volumes: vec![VolumeMetricData {
+            name: "vol-1",
+            status: Some(&status),
+            manual_check_needed: false,
+        }],
+    };
+    let text = render_metrics(&data);
+    assert!(
+        text.contains("ambar_volume_uptodate_replicas{node=\"k3s-1\",volume=\"vol-1\"} 1\n"),
+        "disconnected peer must not count as uptodate: {text}"
+    );
+}

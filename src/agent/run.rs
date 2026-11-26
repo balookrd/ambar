@@ -1841,7 +1841,7 @@ impl Agent {
         let mut total_allocated: u64 = 0;
         for status in &statuses {
             let manual = standalone_tracker.is_manual_check_needed(&status.name);
-            let size = status.device().map_or(0, |d| d.size * 1024);
+            let size = status.device().filter(|d| !d.client).map_or(0, |d| d.size * 1024);
             total_allocated += size;
             volume_metrics.push(VolumeMetricData {
                 name: &status.name,
@@ -2001,10 +2001,11 @@ impl Queue {
     /// says when the next one is due (`None`: the queue is empty).
     fn pop_due(&self, now: Instant) -> Result<String, Option<Instant>> {
         let mut due = self.due.lock().unwrap_or_else(|e| e.into_inner());
-        let Some((name, at)) = due.iter().min_by_key(|(_, at)| **at).map(|(n, a)| (n.clone(), *a)) else {
+        let Some((name, &at)) = due.iter().min_by_key(|(_, at)| **at) else {
             return Err(None);
         };
         if at <= now {
+            let name = name.clone();
             due.remove(&name);
             Ok(name)
         } else {

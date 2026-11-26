@@ -168,7 +168,7 @@ use crate::crd::{NodeKind, ReplicatedVolume};
 use crate::exec::command_line;
 use crate::membership::{Join, Leave, MembershipError, join_as_client, leave_as_client};
 use crate::model::valid_volume_name;
-use crate::mount::{MountEntry, MountError, Mounter, Signature, mounted_at, parse_mountinfo};
+use crate::mount::{MountEntry, MountError, Mounter, Signature, mounted_at, parse_mountinfo, resolve};
 use crate::reconcile::{ReconcileError, Reconciler};
 
 pub const MAX_CONCURRENT_NODE_OPS: usize = 16;
@@ -1028,14 +1028,11 @@ impl NodeService {
         let device = self.device(&object).to_string_lossy().into_owned();
         let (staged, in_use) = self
             .mount_raw(move |m| {
-                let (_, entry) = entry_at(m.mountinfo, &staging)?;
-                let text = std::fs::read_to_string(m.mountinfo).map_err(|source| MountError::Io {
-                    action: "read",
-                    path: m.mountinfo.display().to_string(),
-                    source,
-                })?;
-                let in_use = parse_mountinfo(&text).iter().any(|entry| entry.source == device);
-                Ok((entry.is_some(), in_use))
+                let resolved = resolve(&staging)?;
+                let entries = m.entries()?;
+                let staged = mounted_at(&entries, &resolved).is_some();
+                let in_use = entries.iter().any(|entry| entry.source == device);
+                Ok((staged, in_use))
             })
             .await
             .map_err(mount_status)?;
