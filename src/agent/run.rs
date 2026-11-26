@@ -11,9 +11,9 @@
 //! | Path | Task | Checked before the lock | Guard, under the lock |
 //! |---|---|---|---|
 //! | `delete_replica`, peer checks | `DeleteReplica`, resource configured in the kernel, any file state | the DRBD status can be read; rules 1-3 below on the object read at the start of the pass | the DRBD status is read again; rules 1-3a below; 3b uses the same object |
-//! | `delete_replica`, no data | `DeleteReplica`, resource not configured, and `prove_no_data` shows the node holds no data (rows 3 and 5 of the table below) | the resource is not configured; `prove_no_data` | the DRBD status is read again and the resource is still not configured; `prove_no_data` again; then `Reconciler::remove_unconfigured` reads the status once more and refuses a resource that has appeared |
+//! | `delete_replica`, no data | `DeleteReplica`, resource not configured, and `prove_no_data` shows the node holds no data (rows 3 and 5 of the table below) | the resource is not configured | under the volume `flock`: the DRBD status is read again and the resource is still not configured, then `prove_no_data` runs; then `Reconciler::remove_unconfigured` reads the status once more and refuses a resource that has appeared |
 //! | `retire_replica`, R26 | `RetireReplica`, resource configured in the kernel, any file state | resource matches description (otherwise `apply` first); DRBD status read; R26 (2)–(4) below | DRBD status is read again; R26 (2)–(4) verified under lock |
-//! | `retire_replica`, no data | `RetireReplica`, resource not configured, and `prove_no_data` shows the node holds no data | the resource is not configured; `prove_no_data` | the DRBD status is read again and resource still not configured; `prove_no_data` again; `remove_unconfigured` |
+//! | `retire_replica`, no data | `RetireReplica`, resource not configured, and `prove_no_data` shows the node holds no data | the resource is not configured | under the volume `flock`: the DRBD status is read again and resource still not configured, then `prove_no_data` runs; `remove_unconfigured` |
 //! | `clean_diskless` | `CleanDiskless` | nothing | no backing file exists |
 //!
 //! `DeleteReplica` by what this node holds. The first matching row applies;
@@ -169,14 +169,14 @@ use crate::membership::{collisions, replica_finalizer};
 use crate::model::valid_volume_group_name;
 use crate::model::{InitialSync, valid_volume_name};
 use crate::paths::Paths;
-use crate::reconcile::{FileState, ReconcileError, Reconciler, status_matches_spec};
+use crate::reconcile::{FileState, ReconcileError, Reconciler, status_matches_spec, write_atomically};
 
 use crate::cli::AgentOptions;
 use crate::metrics::{MetricsHolder, NodeMetricData, VolumeMetricData, render_metrics};
 
 use super::cleanup::{self, CleanupTracker, DEFAULT_CLEANUP_INTERVAL};
 use super::decide::{Local, ObjectView, Refusal, Task, decide};
-use super::kube::{ApiError, Volumes, mounted_pod_uids_by_volume};
+use super::kube::{ApiError, EDIT_ATTEMPTS, Volumes, conflict_backoff, mounted_pod_uids_by_volume};
 use super::local::{file_state, local, local_volumes, loops_holding, synced_marker_present};
 use super::quorum::{QuorumTracker, VolumeQuorumCheck, check_volume_quorum};
 use super::standalone::StandaloneTracker;
@@ -463,6 +463,7 @@ fn prove_no_data(
     paths: &Paths,
     runner: &dyn Runner,
     volume: &str,
+    minor: u32,
     file: FileState,
     volume_group: Option<&str>,
 ) -> Result<(), String> {
@@ -503,7 +504,7 @@ fn prove_no_data(
             if volume_group.is_some() {
                 check_metadata_result(runner, volume)
             } else {
-                prove_pending_metadata(paths, runner, volume)
+                prove_pending_metadata(paths, runner, volume, minor)
             }
         }
     }
@@ -521,7 +522,7 @@ fn check_metadata_result(runner: &dyn Runner, volume: &str) -> Result<(), String
     }
 }
 
-fn prove_pending_metadata(paths: &Paths, runner: &dyn Runner, volume: &str) -> Result<(), String> {
+fn prove_pending_metadata(paths: &Paths, runner: &dyn Runner, volume: &str, minor: u32) -> Result<(), String> {
     if prove_device_link(paths, runner, volume).is_ok() {
         return check_metadata_result(runner, volume);
     }
@@ -566,13 +567,13 @@ fn prove_pending_metadata(paths: &Paths, runner: &dyn Runner, volume: &str) -> R
     let res_path = paths.res_file(volume);
     let res_created = if !res_path.exists() {
         let dummy = format!(
-            "resource {volume} {{\n  device /dev/drbd0;\n  disk {};\n  meta-disk internal;\n}}\n",
+            "resource {volume} {{\n  device /dev/drbd{minor};\n  disk {};\n  meta-disk internal;\n}}\n",
             link_path.display()
         );
         if let Some(parent) = res_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        fs::write(&res_path, dummy).is_ok()
+        write_atomically(&res_path, &dummy).is_ok()
     } else {
         false
     };
@@ -1070,17 +1071,7 @@ impl Agent {
         } else {
             match file {
                 FileState::Ready => return self.bring_up(volume, object).await,
-                FileState::Absent | FileState::Pending => {
-                    let name = volume.to_string();
-                    let vg = self.options.volume_group.clone();
-                    let proof = self
-                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file, vg.as_deref()))
-                        .await?;
-                    if let Err(why) = proof {
-                        return self.keep(volume, object, None, &why, false).await;
-                    }
-                    Check::NoData(file)
-                }
+                FileState::Absent | FileState::Pending => Check::NoData(file),
             }
         };
         if let Check::Peers(reported) = &check {
@@ -1095,6 +1086,7 @@ impl Agent {
         let name = volume.to_string();
         let node = self.node.clone();
         let spec = object.spec.clone();
+        let minor = object.spec.minor;
         let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
@@ -1121,7 +1113,7 @@ impl Agent {
                                     "the resource has been configured in the kernel since the decision".to_string()
                                 );
                             }
-                            prove_no_data(paths, runner, &name, *file, vg_guard.as_deref())
+                            prove_no_data(paths, runner, &name, minor, *file, vg_guard.as_deref())
                         }
                     }
                 };
@@ -1283,23 +1275,14 @@ impl Agent {
         } else {
             match file {
                 FileState::Ready => return self.bring_up(volume, object).await,
-                FileState::Absent | FileState::Pending => {
-                    let name = volume.to_string();
-                    let vg = self.options.volume_group.clone();
-                    let proof = self
-                        .blocking(move |paths, runner| prove_no_data(paths, runner, &name, file, vg.as_deref()))
-                        .await?;
-                    if let Err(why) = proof {
-                        return self.keep(volume, object, None, &why, false).await;
-                    }
-                    CheckRetire::NoData(file)
-                }
+                FileState::Absent | FileState::Pending => CheckRetire::NoData(file),
             }
         };
 
         let name = volume.to_string();
         let node = self.node.clone();
         let spec_crd = object.spec.clone();
+        let minor = object.spec.minor;
         let vg = self.options.volume_group.clone();
         let removed = self
             .blocking(move |paths, runner| {
@@ -1328,7 +1311,7 @@ impl Agent {
                                     "the resource has been configured in the kernel since the decision".to_string()
                                 );
                             }
-                            prove_no_data(paths, runner, &name, *file, vg_guard.as_deref())
+                            prove_no_data(paths, runner, &name, minor, *file, vg_guard.as_deref())
                         }
                     }
                 };
@@ -1384,26 +1367,36 @@ impl Agent {
         {
             self.drop_finalizer(volume, object).await?;
         }
-        let uid = uid_of(object)?;
-        let remaining: Vec<MemberNode> = object
-            .spec
-            .nodes
-            .iter()
-            .filter(|n| n.name != self.node)
-            .cloned()
-            .collect();
-        if remaining.len() != object.spec.nodes.len() {
-            let replaced = self
+        for attempt in 0..EDIT_ATTEMPTS {
+            let Some(current) = self.volumes.get(volume).await? else {
+                return Ok(Outcome::Progress);
+            };
+            let uid = uid_of(&current)?;
+            let remaining: Vec<MemberNode> = current
+                .spec
+                .nodes
+                .iter()
+                .filter(|n| n.name != self.node)
+                .cloned()
+                .collect();
+            if remaining.len() == current.spec.nodes.len() {
+                return Ok(Outcome::Progress);
+            }
+            if self
                 .volumes
-                .replace_members(volume, &uid, &object.spec.nodes, &remaining)
-                .await?;
-            if !replaced {
-                log_info(
-                    volume,
-                    "replace_members conflict while removing Retiring member, retrying",
-                );
+                .replace_members(volume, &uid, &current.spec.nodes, &remaining)
+                .await?
+            {
+                return Ok(Outcome::Progress);
+            }
+            if attempt + 1 < EDIT_ATTEMPTS {
+                tokio::time::sleep(conflict_backoff(attempt)).await;
             }
         }
+        log_info(
+            volume,
+            "replace_members conflict while removing Retiring member, retrying",
+        );
         Ok(Outcome::Progress)
     }
 

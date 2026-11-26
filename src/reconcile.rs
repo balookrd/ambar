@@ -714,6 +714,8 @@ impl<'a> Reconciler<'a> {
                 steps.push(step);
             }
         }
+        remove_if_present(&temp_path(&self.paths.ready_marker(volume)))?;
+        remove_if_present(&temp_path(&self.paths.synced_marker(volume)))?;
         sync_dir(&self.paths.volumes_dir)?;
         let rest = [
             (self.paths.device_link(volume), "remove-link"),
@@ -725,6 +727,9 @@ impl<'a> Reconciler<'a> {
                 steps.push(step);
             }
         }
+        remove_if_present(&temp_path(&self.paths.device_link(volume)))?;
+        remove_if_present(&temp_path(&self.paths.res_file(volume)))?;
+        remove_if_present(&temp_path(&self.paths.applied_res(volume)))?;
         if exists(&self.paths.res_dir)? {
             sync_dir(&self.paths.res_dir)?;
         }
@@ -817,7 +822,7 @@ fn still_linked(file: &File, path: &Path) -> io::Result<bool> {
 /// power loss. The directory of `path` must exist; it is never created here
 /// (`Action::WriteRes` creates the resource directory itself, the volumes
 /// directory is never created).
-fn write_atomically(path: &Path, text: &str) -> Result<(), ReconcileError> {
+pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), ReconcileError> {
     let io_err = |action, source| ReconcileError::Io {
         action,
         path: path.display().to_string(),

@@ -1235,17 +1235,16 @@ async fn a_ready_file_that_appears_before_the_lock_stops_the_removal() {
     let e = env(
         DV1,
         FakeRunner::new(move |program, args| match (program, args) {
-            // The proof that no loop device holds the file is the last thing
-            // the pass does before it takes the lock.
-            ("losetup", ["--list", ..]) => {
+            // `read_status` runs before the volume lock; simulate the file and
+            // ready marker appearing before the guard checks under the lock.
+            ("drbdsetup", _) => {
                 if counter.fetch_add(1, Ordering::SeqCst) == 0 {
                     let paths = cell.lock().unwrap().clone().unwrap();
                     fs::write(paths.image(VOLUME), "data").unwrap();
                     fs::write(paths.ready_marker(VOLUME), "").unwrap();
                 }
-                out(0, "", "")
+                out(0, EMPTY_KERNEL, "")
             }
-            ("drbdsetup", _) => out(0, EMPTY_KERNEL, ""),
             _ => out(0, "", ""),
         }),
     );
@@ -1326,7 +1325,8 @@ struct Script {
     dump_md: Arc<Mutex<Vec<Output>>>,
     dump_calls: Arc<AtomicUsize>,
     loop_calls: Arc<AtomicUsize>,
-    /// Runs after the n-th (from 0) call of `"dump-md"` or `"losetup"` has been answered.
+    status_calls: Arc<AtomicUsize>,
+    /// Runs after the n-th (from 0) call of `"dump-md"`, `"losetup"` or `"drbdsetup"` has been answered.
     after: Arc<Mutex<Option<Hook>>>,
 }
 
@@ -1339,6 +1339,7 @@ impl Script {
             dump_md: Arc::new(Mutex::new(vec![dump_md])),
             dump_calls: Arc::new(AtomicUsize::new(0)),
             loop_calls: Arc::new(AtomicUsize::new(0)),
+            status_calls: Arc::new(AtomicUsize::new(0)),
             after: Arc::new(Mutex::new(None)),
         }
     }
@@ -1411,7 +1412,12 @@ impl Script {
                     *script.kernel.lock().unwrap() = EMPTY_KERNEL.to_string();
                     out(0, "", "")
                 }
-                ("drbdsetup", _) => out(0, &script.kernel.lock().unwrap(), ""),
+                ("drbdsetup", _) => {
+                    let n = script.status_calls.fetch_add(1, Ordering::SeqCst);
+                    let reply = out(0, &script.kernel.lock().unwrap(), "");
+                    announce("drbdsetup", n);
+                    reply
+                }
                 _ => out(0, "", ""),
             }
         })
@@ -1680,9 +1686,9 @@ async fn a_synced_marker_that_appears_before_the_lock_stops_the_removal() {
     let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
     let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
     let marker = e.paths.synced_marker(VOLUME);
-    // The first `dump-md` is the last step of the proof before the lock.
+    // `drbdsetup` n == 0 is `read_status` before the volume lock is taken.
     script.after(move |command, n| {
-        if command == "dump-md" && n == 0 {
+        if command == "drbdsetup" && n == 0 {
             fs::write(&marker, "").unwrap();
         }
     });
@@ -1699,7 +1705,7 @@ async fn a_resource_that_is_configured_before_the_lock_stops_the_removal() {
     let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
     let (kernel, up) = (script.kernel.clone(), calm_kernel("Secondary"));
     script.after(move |command, n| {
-        if command == "dump-md" && n == 0 {
+        if command == "drbdsetup" && n == 0 {
             *kernel.lock().unwrap() = up.clone();
         }
     });
@@ -1711,14 +1717,14 @@ async fn a_resource_that_is_configured_before_the_lock_stops_the_removal() {
 
 #[tokio::test]
 async fn metadata_that_is_used_by_the_time_of_the_lock_stops_the_removal() {
-    let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
-    script.dump_md.lock().unwrap().push(out(0, USED_DUMP, ""));
+    // `prove_no_data` runs only once, under the volume lock.
+    let script = Script::new(EMPTY_KERNEL, out(0, USED_DUMP, ""));
     let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
 
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert_copy_kept(&e, "already holds DRBD metadata");
     assert!(e.paths.image(VOLUME).exists());
-    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1727,14 +1733,14 @@ async fn a_loop_device_that_holds_the_file_by_the_time_of_the_lock_stops_the_rem
     let e = deleting_with(Backing::Absent, &script, &[]).await;
     let (held, image) = (script.clone(), e.paths.image(VOLUME));
     script.after(move |command, n| {
-        if command == "losetup" && n == 0 {
+        if command == "drbdsetup" && n == 0 {
             held.hold_loop(&image);
         }
     });
 
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert_copy_kept(&e, "a loop device still holds it");
-    assert_eq!(script.loop_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(script.loop_calls.load(Ordering::SeqCst), 1);
 }
 
 // ---- round 4: `dump-md` reads this volume's file ----
@@ -1909,18 +1915,18 @@ async fn a_pending_file_whose_loop_devices_cannot_be_listed_is_kept() {
 
 #[tokio::test]
 async fn a_device_link_that_goes_away_before_the_lock_stops_the_removal() {
-    // The guard repeats the check of the link under the lock.
+    // The guard checks the link under the lock before `dump-md`.
     let (script, e) = fresh_pending_copy().await;
     let link = e.paths.device_link(VOLUME);
     script.after(move |command, n| {
-        if command == "dump-md" && n == 0 {
+        if command == "drbdsetup" && n == 0 {
             fs::remove_file(&link).unwrap();
         }
     });
 
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert_copy_kept(&e, "device link");
-    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 0);
 }
 
 // ---- round 4: an unparsable listing is "not proven" ----
@@ -1953,17 +1959,17 @@ async fn a_resource_that_appears_after_the_guard_stops_the_removal_of_a_missing_
     let script = Script::new(EMPTY_KERNEL, Script::no_metadata());
     let e = deleting_with(Backing::Absent, &script, &[]).await;
     let (kernel, up) = (script.kernel.clone(), calm_kernel("Secondary"));
-    // The second listing is the proof inside the guard, the last read before
-    // `remove_checked` looks at the status again.
+    // The listing is the proof inside the guard, the last read before
+    // `remove_unconfigured` looks at the status again.
     script.after(move |command, n| {
-        if command == "losetup" && n == 1 {
+        if command == "losetup" && n == 0 {
             *kernel.lock().unwrap() = up.clone();
         }
     });
 
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert_copy_kept(&e, "configured in the kernel");
-    assert_eq!(script.loop_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(script.loop_calls.load(Ordering::SeqCst), 1);
     assert!(e.paths.res_file(VOLUME).exists());
     assert!(fs::symlink_metadata(e.paths.device_link(VOLUME)).is_ok());
 }
@@ -1974,14 +1980,14 @@ async fn a_resource_that_appears_after_the_guard_stops_the_removal_of_a_pending_
     let e = deleting_with(Backing::Pending { synced: false }, &script, &[]).await;
     let (kernel, up) = (script.kernel.clone(), calm_kernel("Secondary"));
     script.after(move |command, n| {
-        if command == "dump-md" && n == 1 {
+        if command == "dump-md" && n == 0 {
             *kernel.lock().unwrap() = up.clone();
         }
     });
 
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
     assert_copy_kept(&e, "configured in the kernel");
-    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(script.dump_calls.load(Ordering::SeqCst), 1);
     assert!(e.paths.image(VOLUME).exists());
 }
 
@@ -3312,7 +3318,7 @@ async fn retire_replica_conflict_on_replace_members_yields_progress() {
     assert_eq!(e.agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
     assert!(!e.paths.image(VOLUME).exists());
     assert_eq!(volumes.finalizers(VOLUME), vec![replica_finalizer(DV2)]);
-    assert!(volumes.object(VOLUME).unwrap().spec.nodes.iter().any(|n| n.name == DV1));
+    assert!(!volumes.object(VOLUME).unwrap().spec.nodes.iter().any(|n| n.name == DV1));
 }
 
 #[tokio::test]
@@ -3786,6 +3792,7 @@ async fn tick_failures_cleans_up_stale_client() {
     let kernel = Arc::new(Mutex::new(EMPTY_KERNEL.to_string()));
     let runner = node_with_status(kernel.clone(), false);
     let e = env(DV3, runner);
+    e.agent.ready.store(true, Ordering::SeqCst);
 
     let mut vol = spike_with_third("Client", &[DV1, DV2]);
     vol.status = Some(crate::crd::ReplicatedVolumeStatus {
@@ -4269,4 +4276,204 @@ async fn settled_volume_calls_drbdsetup_status_only_once_per_pass() {
         .filter(|c| c.starts_with("drbdsetup status"))
         .count();
     assert_eq!(drbdsetup_calls, 1, "calls in settled pass: {:?}", &after[before..]);
+}
+
+#[tokio::test]
+async fn prove_pending_metadata_uses_real_minor_and_runs_under_flock() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    prepare_copy(&paths, true, false);
+    fs::remove_file(paths.ready_marker(VOLUME)).unwrap();
+    let _ = fs::remove_file(paths.device_link(VOLUME));
+    let _ = fs::remove_file(paths.res_file(VOLUME));
+
+    let observed_res = Arc::new(Mutex::new(None::<String>));
+    let observed_busy = Arc::new(Mutex::new(None::<bool>));
+    let runner = Arc::new(FakeRunner::new({
+        let paths = paths.clone();
+        let observed_res = observed_res.clone();
+        let observed_busy = observed_busy.clone();
+        move |program, args| match (program, args) {
+            ("drbdsetup", _) => out(0, EMPTY_KERNEL, ""),
+            ("losetup", ["--list", ..]) => out(0, "", ""),
+            ("losetup", ["--find", ..]) => out(0, "/dev/loop3\n", ""),
+            ("losetup", ["-d", _]) => out(0, "", ""),
+            ("drbdadm", ["dump-md", _]) => {
+                *observed_res.lock().unwrap() = Some(fs::read_to_string(paths.res_file(VOLUME)).unwrap());
+                let no_op = FakeRunner::new(|_, _| out(0, "", ""));
+                let busy = matches!(
+                    Reconciler::new(&paths, &no_op).lock_volume(VOLUME),
+                    Err(ReconcileError::Busy { .. })
+                );
+                *observed_busy.lock().unwrap() = Some(busy);
+                out(0, USED_DUMP, "")
+            }
+            _ => out(0, "", ""),
+        }
+    }));
+
+    let volumes = Arc::new(FakeVolumes::default());
+    let mut vol = spike("Done");
+    vol.spec.minor = 1000;
+    volumes.put(vol);
+    volumes.delete(VOLUME).await.unwrap();
+
+    let agent = Arc::new(Agent {
+        node: DV1.to_string(),
+        paths: paths.clone(),
+        runner,
+        volumes,
+        locks: VolumeLocks::default(),
+        ready: Arc::new(AtomicBool::new(false)),
+        options: Default::default(),
+        metrics: Default::default(),
+        is_tainted: Arc::new(AtomicBool::new(false)),
+        staging: Default::default(),
+    });
+
+    assert_eq!(agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Kept);
+    let res_text = observed_res.lock().unwrap().clone().expect("dump-md must be called");
+    assert!(
+        res_text.contains("device /dev/drbd1000;"),
+        "dummy .res must use spec.minor 1000, got:\n{res_text}"
+    );
+    assert_eq!(
+        *observed_busy.lock().unwrap(),
+        Some(true),
+        "prove_pending_metadata must run under volume flock"
+    );
+    assert!(!paths.res_file(VOLUME).exists(), "temporary .res must be cleaned up");
+    assert!(
+        !paths.res_file(VOLUME).with_file_name(".spike.res.tmp").exists(),
+        "temporary .res.tmp must not remain"
+    );
+}
+
+#[tokio::test]
+async fn finish_retire_retries_replace_members_on_conflict() {
+    struct ConflictOnceVolumes {
+        inner: Arc<FakeVolumes>,
+        replace_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Volumes for ConflictOnceVolumes {
+        async fn get(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError> {
+            self.inner.get(name).await
+        }
+        async fn list(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
+            self.inner.list().await
+        }
+        async fn list_fresh(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {
+            self.inner.list_fresh().await
+        }
+        async fn create(&self, volume: &ReplicatedVolume) -> Result<crate::agent::kube::Created, ApiError> {
+            self.inner.create(volume).await
+        }
+        async fn delete(&self, name: &str) -> Result<(), ApiError> {
+            self.inner.delete(name).await
+        }
+        async fn delete_exact(&self, name: &str, uid: &str) -> Result<(), ApiError> {
+            self.inner.delete_exact(name, uid).await
+        }
+        async fn remove_finalizer(&self, name: &str, uid: &str, finalizer: &str) -> Result<bool, ApiError> {
+            self.inner.remove_finalizer(name, uid, finalizer).await
+        }
+        async fn mark_initial_sync_done(&self, name: &str, uid: &str) -> Result<bool, ApiError> {
+            self.inner.mark_initial_sync_done(name, uid).await
+        }
+        async fn mark_formatted(&self, name: &str, uid: &str) -> Result<bool, ApiError> {
+            self.inner.mark_formatted(name, uid).await
+        }
+        async fn replace_members(
+            &self,
+            name: &str,
+            uid: &str,
+            expected: &[MemberNode],
+            members: &[MemberNode],
+        ) -> Result<bool, ApiError> {
+            let call = self.replace_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                // Имитируем параллельное обновление spec.nodes другим узлом до патча.
+                let mut obj = self.inner.object(name).unwrap();
+                obj.spec.nodes[0].node_id = 77;
+                self.inner.put(obj);
+            }
+            self.inner.replace_members(name, uid, expected, members).await
+        }
+        async fn edit_members(
+            &self,
+            name: &str,
+            uid: &str,
+            expected: &[MemberNode],
+            edit: &crate::replicas::Edit,
+        ) -> Result<bool, ApiError> {
+            self.inner.edit_members(name, uid, expected, edit).await
+        }
+        async fn apply_node_status(&self, name: &str, node: &str, entry: Option<&NodeStatus>) -> Result<(), ApiError> {
+            self.inner.apply_node_status(name, node, entry).await
+        }
+        async fn remove_node_entry(&self, name: &str, uid: &str, node: &str) -> Result<bool, ApiError> {
+            self.inner.remove_node_entry(name, uid, node).await
+        }
+        async fn ensure_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+            self.inner.ensure_node_taint(node, key, effect).await
+        }
+        async fn remove_node_taint(&self, node: &str, key: &str, effect: &str) -> Result<bool, ApiError> {
+            self.inner.remove_node_taint(node, key, effect).await
+        }
+        async fn delete_node_pods_for_volume(
+            &self,
+            node: &str,
+            volume: &str,
+            mounted_uids: &[String],
+        ) -> Result<Vec<String>, ApiError> {
+            self.inner.delete_node_pods_for_volume(node, volume, mounted_uids).await
+        }
+        async fn has_node_pods_for_volume(
+            &self,
+            node: &str,
+            volume: &str,
+            mounted_uids: &[String],
+        ) -> Result<bool, ApiError> {
+            self.inner.has_node_pods_for_volume(node, volume, mounted_uids).await
+        }
+        fn watch(&self) -> futures_util::stream::BoxStream<'static, Result<String, ApiError>> {
+            self.inner.watch()
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    fs::create_dir_all(&paths.volumes_dir).unwrap();
+    let inner = Arc::new(FakeVolumes::default());
+    let mut vol = spike_retiring(DV1);
+    vol.status = Some(crate::crd::ReplicatedVolumeStatus {
+        nodes: vec![reported(DV1), reported(DV2)],
+    });
+    inner.put(vol);
+
+    let volumes = Arc::new(ConflictOnceVolumes {
+        inner: inner.clone(),
+        replace_calls: AtomicUsize::new(0),
+    });
+
+    let agent = Arc::new(Agent {
+        node: DV1.to_string(),
+        paths,
+        runner: Arc::new(fake_node()),
+        volumes: volumes.clone(),
+        locks: VolumeLocks::default(),
+        ready: Arc::new(AtomicBool::new(false)),
+        options: Default::default(),
+        metrics: Default::default(),
+        is_tainted: Arc::new(AtomicBool::new(false)),
+        staging: Default::default(),
+    });
+
+    assert_eq!(agent.reconcile_one(VOLUME).await.unwrap(), Outcome::Progress);
+    assert_eq!(volumes.replace_calls.load(Ordering::SeqCst), 2);
+    let current_nodes = inner.object(VOLUME).unwrap().spec.nodes;
+    assert!(!current_nodes.iter().any(|n| n.name == DV1));
 }

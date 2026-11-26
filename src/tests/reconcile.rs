@@ -2346,3 +2346,31 @@ fn observe_with_volume_group_uses_device_stat_fast_path_when_present() {
         runner.calls()
     );
 }
+
+#[test]
+fn remove_cleans_up_leftover_atomic_temp_files() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    let runner = FakeRunner::new(|prog, _| match prog {
+        "drbdsetup" => out(0, "[]\n", ""),
+        "losetup" => out(0, "", ""),
+        other => panic!("unexpected: {other}"),
+    });
+    let rec = Reconciler::new(&paths, &runner);
+    let temp_files = [
+        temp_path(&paths.res_file("spike")),
+        temp_path(&paths.applied_res("spike")),
+        temp_path(&paths.ready_marker("spike")),
+        temp_path(&paths.synced_marker("spike")),
+        temp_path(&paths.device_link("spike")),
+    ];
+    for path in &temp_files {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "partial").unwrap();
+    }
+
+    rec.remove_unconfigured("spike", &|| Ok(())).unwrap();
+    for path in &temp_files {
+        assert!(!path.exists(), "leftover temp file was not removed: {}", path.display());
+    }
+}
