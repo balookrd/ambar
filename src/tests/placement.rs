@@ -459,14 +459,26 @@ fn lvm_allocated_bytes_rounds_up_to_pe_size_with_drbd_metadata() {
 #[test]
 fn free_budgets_aligned_deducts_pe_aligned_sizes() {
     let nodes = cluster(&[10 * GIB, 10 * GIB]);
-    // 1 volume of 1 GiB on n1
-    let existing = [volume(1000, 7000, &["n1"], GIB)];
+    let size_31 = 128 * 1024 * 1024 - 64 * 1024;
+    assert_ne!(lvm_allocated_bytes(size_31, 31), lvm_allocated_bytes(size_31, 1));
+    // 1 volume of 1 GiB (max_peers = 7) on n1, and 1 volume with max_peers = 31 on n2
+    let existing = [
+        volume(1000, 7000, &["n1"], GIB),
+        Existing {
+            minor: 1001,
+            port: 7001,
+            replica_nodes: vec!["n2".to_string()],
+            size_bytes: size_31,
+            max_peers: 31,
+        },
+    ];
 
     let normal_free = free_budgets(&nodes, &existing);
     assert_eq!(normal_free["n1"], 9 * GIB);
+    assert_eq!(normal_free["n2"], 10 * GIB - size_31);
 
-    let aligned_free = free_budgets_aligned(&nodes, &existing, 7);
+    let aligned_free = free_budgets_aligned(&nodes, &existing);
     // n1 free budget is reduced by 1077936128 instead of 1073741824 (difference: ~4 MiB)
     assert_eq!(aligned_free["n1"], 10 * GIB - 1077936128);
-    assert_eq!(aligned_free["n2"], 10 * GIB);
+    assert_eq!(aligned_free["n2"], 10 * GIB - lvm_allocated_bytes(size_31, 31));
 }

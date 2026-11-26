@@ -208,3 +208,34 @@ fn standalone_resets_when_standalone_peer_reconnects_even_if_third_peer_is_conne
     t += Duration::from_secs(5);
     assert_eq!(tracker.check(&res_sa, t), StandaloneAction::RunAdjust { attempt: 1 });
 }
+
+#[test]
+fn standalone_resets_when_standalone_peer_is_removed_from_connections() {
+    let mut tracker = StandaloneTracker::new(2, Duration::from_secs(5));
+    let mut t = Instant::now();
+
+    // peer2 и peer3: peer2 (имя "peer2") в StandAlone, peer3 в Connecting
+    let res_sa = resource(
+        "v1",
+        Role::Secondary,
+        &[ConnectionState::StandAlone, ConnectionState::Connecting],
+    );
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::RunAdjust { attempt: 1 });
+    t += Duration::from_secs(5);
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::RunAdjust { attempt: 2 });
+    t += Duration::from_secs(5);
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::ManualCheckNeeded);
+    assert!(tracker.is_manual_check_needed("v1"));
+
+    // Реплика peer2 удалена и исчезла из res.connections; остался только peer3 в Connecting
+    let mut res_removed = resource("v1", Role::Secondary, &[ConnectionState::Connecting]);
+    res_removed.connections[0].name = "peer3".to_string();
+    res_removed.connections[0].peer_node_id = 3;
+
+    assert_eq!(tracker.check(&res_removed, t), StandaloneAction::None);
+    assert!(!tracker.is_manual_check_needed("v1"));
+
+    // Если peer2 снова появится и уйдёт в StandAlone, счётчик начинается с 1
+    t += Duration::from_secs(5);
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::RunAdjust { attempt: 1 });
+}

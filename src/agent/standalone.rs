@@ -3,8 +3,8 @@
 //! When a volume has connections in `StandAlone` and the local role is `Secondary`,
 //! the agent automatically attempts `drbdadm adjust` up to `--adjust-attempts` times
 //! with an interval of `--adjust-interval`. If the attempts are exhausted, the split-brain
-//! flag `manual_check_needed` is set. The flag automatically resets when all connections
-//! become `Connected`.
+//! flag `manual_check_needed` is set. The flag automatically resets when all affected
+//! peers become `Connected` (or leave `res.connections`), or when all connections become `Connected`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -62,7 +62,8 @@ impl StandaloneTracker {
                     && state.standalone_peers.iter().all(|peer| {
                         res.connections
                             .iter()
-                            .any(|c| c.name == *peer && c.connection_state == ConnectionState::Connected)
+                            .find(|c| c.name == *peer)
+                            .is_none_or(|c| c.connection_state == ConnectionState::Connected)
                     });
                 let all_connected = !res.connections.is_empty()
                     && res

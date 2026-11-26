@@ -177,11 +177,7 @@ fn budgets_by<'a>(
 }
 
 /// Free budget of every node taking into account LVM PE alignment and DRBD metadata overhead.
-pub fn free_budgets_aligned<'a>(
-    nodes: &'a ClusterNodes,
-    existing: &[Existing],
-    _default_max_peers: u32,
-) -> HashMap<&'a str, u64> {
+pub fn free_budgets_aligned<'a>(nodes: &'a ClusterNodes, existing: &[Existing]) -> HashMap<&'a str, u64> {
     budgets_by(nodes, existing, |v| lvm_allocated_bytes(v.size_bytes, v.max_peers))
 }
 
