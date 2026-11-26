@@ -4081,3 +4081,106 @@ async fn tick_failures_forgets_vanished_volumes_and_stays_fail_closed_on_drbd_er
         crate::agent::standalone::StandaloneAction::RunAdjust { attempt: 1 }
     );
 }
+
+#[tokio::test]
+async fn first_pass_lists_volumes_once() {
+    let e = env("lima-dv-4", fake_node());
+    for (idx, (minor, port)) in [(1001, 7001), (1002, 7002), (1003, 7003), (1004, 7004)]
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("vol-{}", idx + 1);
+        e.volumes.put(object(&name, "Done", minor, port, &[DV1, DV2]));
+    }
+
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn({
+        let agent = e.agent.clone();
+        let shutdown = shutdown.clone();
+        async move { agent.run(shutdown).await }
+    });
+    wait_for("ready", || e.agent.ready.load(Ordering::SeqCst)).await;
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("run returns after the shutdown")
+        .unwrap()
+        .unwrap();
+
+    let calls = e.volumes.lists.load(Ordering::SeqCst);
+    assert!(
+        (1..=2).contains(&calls),
+        "expected 1 list call from serve (+ at most 1 from failure loop), got {calls}"
+    );
+}
+
+#[tokio::test]
+async fn serve_first_pass_lists_volumes_once() {
+    let e = env("lima-dv-4", fake_node());
+    for (idx, (minor, port)) in [(1001, 7001), (1002, 7002), (1003, 7003), (1004, 7004)]
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("vol-{}", idx + 1);
+        e.volumes.put(object(&name, "Done", minor, port, &[DV1, DV2]));
+    }
+
+    let queue = Arc::new(Queue::default());
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn({
+        let agent = e.agent.clone();
+        let queue = queue.clone();
+        let shutdown = shutdown.clone();
+        async move { agent.serve(&queue, &shutdown).await }
+    });
+    wait_for("ready", || e.agent.ready.load(Ordering::SeqCst)).await;
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("serve returns after the shutdown")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(e.volumes.lists.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn watch_event_invalidates_full_pass_peers_snapshot() {
+    let e = env("lima-dv-4", fake_node());
+    for (idx, (minor, port)) in [(1001, 7001), (1002, 7002), (1003, 7003), (1004, 7004)]
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("vol-{}", idx + 1);
+        e.volumes.put(object(&name, "Done", minor, port, &[DV1, DV2]));
+    }
+
+    let events = e.volumes.events();
+    let queue = Arc::new(Queue::default());
+    let stop_watch = CancellationToken::new();
+    let watch = tokio::spawn(feed(e.volumes.watch(), queue.clone(), stop_watch.clone()));
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn({
+        let agent = e.agent.clone();
+        let queue = queue.clone();
+        let shutdown = shutdown.clone();
+        async move { agent.serve(&queue, &shutdown).await }
+    });
+    wait_for("ready", || e.agent.ready.load(Ordering::SeqCst)).await;
+    assert_eq!(e.volumes.lists.load(Ordering::SeqCst), 1);
+
+    // Watch event invalidates the snapshot and triggers a fresh list() in reconcile_one_with_peers.
+    events.send("vol-1".to_string()).unwrap();
+    wait_for("watch-triggered list", || e.volumes.lists.load(Ordering::SeqCst) >= 2).await;
+
+    shutdown.cancel();
+    stop_watch.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("serve returns after the shutdown")
+        .unwrap()
+        .unwrap();
+    let _ = watch.await;
+}

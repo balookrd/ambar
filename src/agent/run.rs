@@ -788,6 +788,14 @@ impl Agent {
     /// One pass for one volume name: read the object and the local state,
     /// decide, act, report status.
     pub async fn reconcile_one(&self, volume: &str) -> Result<Outcome, AgentError> {
+        self.reconcile_one_with_peers(volume, None).await
+    }
+
+    async fn reconcile_one_with_peers(
+        &self,
+        volume: &str,
+        peers_snapshot: Option<&[(String, u32, u16)]>,
+    ) -> Result<Outcome, AgentError> {
         if !valid_volume_name(volume) {
             // The name would become part of file paths: nothing is read or touched.
             let refusal = Refusal::InvalidSpec(format!("{volume:?} is not a valid volume name"));
@@ -800,14 +808,21 @@ impl Agent {
         let task = match &object {
             None => decide(&self.node, volume, None, local),
             Some(object) => {
-                let all: Vec<(String, u32, u16)> = self
-                    .volumes
-                    .list()
-                    .await?
-                    .into_iter()
-                    .filter_map(|v| Some((v.metadata.name?, v.spec.minor, v.spec.port)))
-                    .collect();
-                let collides_with = collisions(volume, object.spec.minor, object.spec.port, &all);
+                let fetched;
+                let all: &[(String, u32, u16)] = match peers_snapshot {
+                    Some(peers) => peers,
+                    None => {
+                        fetched = self
+                            .volumes
+                            .list()
+                            .await?
+                            .into_iter()
+                            .filter_map(|v| Some((v.metadata.name?, v.spec.minor, v.spec.port)))
+                            .collect::<Vec<_>>();
+                        &fetched
+                    }
+                };
+                let collides_with = collisions(volume, object.spec.minor, object.spec.port, all);
                 let finalizers = object.metadata.finalizers.clone().unwrap_or_default();
                 let view = ObjectView {
                     spec: &object.spec,
@@ -1516,17 +1531,22 @@ impl Agent {
         }
     }
 
-    /// Names of every object and every local leftover.
-    async fn all_names(&self) -> Result<BTreeSet<String>, AgentError> {
+    /// Names of every object and every local leftover, together with
+    /// `(name, minor, port)` tuples from the same volume listing.
+    async fn all_names(&self) -> Result<PeerSnapshot, AgentError> {
         let vg = self.options.volume_group.clone();
         let mut names = self
             .blocking(move |paths, _| local_volumes(paths, vg.as_deref()))
             .await?
             .map_err(|e| Self::reconcile_error("*", e))?;
+        let mut peers = Vec::new();
         for object in self.volumes.list().await? {
-            names.extend(object.metadata.name);
+            if let Some(name) = object.metadata.name {
+                peers.push((name.clone(), object.spec.minor, object.spec.port));
+                names.insert(name);
+            }
         }
-        Ok(names)
+        Ok((names, peers))
     }
 
     /// Watches the objects and runs `reconcile_one` for the names that
@@ -1558,14 +1578,17 @@ impl Agent {
         // The first listing is taken at once and, while it fails, again every
         // `ERROR_DELAY`; the queue is served meanwhile (the watch feeds it).
         let mut next_full = Instant::now();
+        let mut full_pass_peers: Option<PeerSnapshot> = None;
         while !shutdown.is_cancelled() {
             let now = Instant::now();
             if now >= next_full {
+                queue.watch_dirty.store(false, Ordering::SeqCst);
                 match self.all_names().await {
-                    Ok(names) => {
+                    Ok((names, peers)) => {
                         next_full = now + FULL_PASS_EVERY;
                         startup.begin(&names);
                         names.iter().for_each(|name| queue.schedule(name, now));
+                        full_pass_peers = Some((names, peers));
                     }
                     Err(e) => {
                         log_error("*", format!("cannot list the volumes of this node: {e}"));
@@ -1574,11 +1597,23 @@ impl Agent {
                 }
                 self.publish_readiness(&startup);
             }
+            if queue.watch_dirty.swap(false, Ordering::SeqCst) {
+                full_pass_peers = None;
+            }
             match queue.pop_due(now) {
                 Ok(name) => {
-                    let result = self.reconcile_one(&name).await;
+                    let peers_snapshot = full_pass_peers
+                        .as_ref()
+                        .and_then(|(names, peers)| names.contains(&name).then_some(peers.as_slice()));
+                    let result = self.reconcile_one_with_peers(&name, peers_snapshot).await;
                     if let Some(delay) = settle(&name, &result) {
                         queue.schedule(&name, Instant::now() + delay);
+                    }
+                    if let Some((names, _)) = &mut full_pass_peers {
+                        names.remove(&name);
+                        if names.is_empty() {
+                            full_pass_peers = None;
+                        }
                     }
                     startup.record(&name, &result);
                     self.publish_readiness(&startup);
@@ -1881,10 +1916,13 @@ fn settle(name: &str, result: &Result<Outcome, AgentError>) -> Option<Duration> 
 
 /// Names with the time of their next pass. A name is queued once; queuing it
 /// again keeps the earlier time.
+type PeerSnapshot = (BTreeSet<String>, Vec<(String, u32, u16)>);
+
 #[derive(Default)]
 struct Queue {
     due: Mutex<BTreeMap<String, Instant>>,
     wake: Notify,
+    watch_dirty: AtomicBool,
 }
 
 impl Queue {
@@ -1925,7 +1963,10 @@ async fn feed(
             item = events.next() => item,
         };
         match item {
-            Some(Ok(name)) => queue.schedule(&name, Instant::now()),
+            Some(Ok(name)) => {
+                queue.watch_dirty.store(true, Ordering::SeqCst);
+                queue.schedule(&name, Instant::now());
+            }
             Some(Err(e)) => log_error("*", e),
             None => {
                 log_error("*", "the watch ended; changes are picked up by the periodic pass only");
