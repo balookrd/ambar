@@ -4214,3 +4214,42 @@ async fn watch_event_invalidates_full_pass_peers_snapshot() {
         .unwrap();
     let _ = watch.await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn serve_skips_locked_volume_and_reconciles_others_without_marking_ready_early() {
+    let e = env(DV1, fake_node());
+    e.volumes.put(object("vol-a", "Skip", 1001, 7001, &[DV1, DV2]));
+    e.volumes.put(object("vol-b", "Skip", 1002, 7002, &[DV1, DV2]));
+
+    // Имитируем долгий mkfs/операцию CSI на vol-a.
+    let guard = e.agent.locks.lock("vol-a").await;
+
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn({
+        let agent = e.agent.clone();
+        let shutdown = shutdown.clone();
+        async move { agent.run(shutdown).await }
+    });
+
+    // 1. vol-b должен пройти реконсиляцию, не дожидаясь освобождения vol-a.
+    wait_for_virtual("vol-b reconciled", || e.volumes.entry_of("vol-b", DV1).is_some()).await;
+
+    // 2. ready остаётся false, пока guard удерживается (даже спустя > BUSY_VOLUME_RETRY_DELAY).
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !e.agent.ready.load(Ordering::SeqCst),
+        "ready must stay false while vol-a is still locked and skipped"
+    );
+    assert!(e.volumes.entry_of("vol-a", DV1).is_none());
+
+    // 3. Отпускаем lock — после BUSY_VOLUME_RETRY_DELAY vol-a проходит реконсиляцию и ready становится true.
+    drop(guard);
+    wait_for_virtual("vol-a reconciled", || e.volumes.entry_of("vol-a", DV1).is_some()).await;
+    wait_for_virtual("readiness", || e.agent.ready.load(Ordering::SeqCst)).await;
+
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+}

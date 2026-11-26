@@ -200,6 +200,8 @@ const KEPT_DRBD_DELAY: Duration = Duration::from_secs(5);
 const REFUSED_DELAY: Duration = Duration::from_secs(60);
 /// Next pass after an error.
 const ERROR_DELAY: Duration = Duration::from_secs(5);
+/// Next pass after skipping a volume whose lock is currently held elsewhere (e.g. CSI mkfs).
+const BUSY_VOLUME_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// API errors of one name in the first pass after which `ready` stops waiting for it.
 const FIRST_PASS_ATTEMPTS: u32 = 3;
 /// Period of the pass over every known name.
@@ -249,14 +251,19 @@ pub struct VolumeLocks {
 }
 
 impl VolumeLocks {
+    fn entry(&self, volume: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+        // A lock that only the map holds has no holder and no waiter.
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        locks.entry(volume.to_string()).or_default().clone()
+    }
+
     pub async fn lock(&self, volume: &str) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
-            // A lock that only the map holds has no holder and no waiter.
-            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-            locks.entry(volume.to_string()).or_default().clone()
-        };
-        lock.lock_owned().await
+        self.entry(volume).lock_owned().await
+    }
+
+    pub fn try_lock(&self, volume: &str) -> Option<OwnedMutexGuard<()>> {
+        self.entry(volume).try_lock_owned().ok()
     }
 }
 
@@ -785,24 +792,44 @@ impl Agent {
             .await?)
     }
 
+    fn invalid_volume_outcome(volume: &str) -> Outcome {
+        // The name would become part of file paths: nothing is read or touched.
+        let refusal = Refusal::InvalidSpec(format!("{volume:?} is not a valid volume name"));
+        log_error(volume, &refusal);
+        Outcome::Refused(refusal)
+    }
+
     /// One pass for one volume name: read the object and the local state,
     /// decide, act, report status.
     pub async fn reconcile_one(&self, volume: &str) -> Result<Outcome, AgentError> {
-        self.reconcile_one_with_peers(volume, None).await
+        if !valid_volume_name(volume) {
+            return Ok(Self::invalid_volume_outcome(volume));
+        }
+        let _guard = self.locks.lock(volume).await;
+        self.reconcile_one_locked(volume, None).await
     }
 
-    async fn reconcile_one_with_peers(
+    /// Non-blocking variant for `serve`: returns `Ok(None)` when the volume lock
+    /// is currently held elsewhere (e.g. a long CSI operation).
+    async fn try_reconcile_one(
+        &self,
+        volume: &str,
+        peers_snapshot: Option<&[(String, u32, u16)]>,
+    ) -> Result<Option<Outcome>, AgentError> {
+        if !valid_volume_name(volume) {
+            return Ok(Some(Self::invalid_volume_outcome(volume)));
+        }
+        let Some(_guard) = self.locks.try_lock(volume) else {
+            return Ok(None);
+        };
+        self.reconcile_one_locked(volume, peers_snapshot).await.map(Some)
+    }
+
+    async fn reconcile_one_locked(
         &self,
         volume: &str,
         peers_snapshot: Option<&[(String, u32, u16)]>,
     ) -> Result<Outcome, AgentError> {
-        if !valid_volume_name(volume) {
-            // The name would become part of file paths: nothing is read or touched.
-            let refusal = Refusal::InvalidSpec(format!("{volume:?} is not a valid volume name"));
-            log_error(volume, &refusal);
-            return Ok(Outcome::Refused(refusal));
-        }
-        let _guard = self.locks.lock(volume).await;
         let object = self.volumes.get(volume).await?;
         let local = self.read_local(volume).await?;
         let task = match &object {
@@ -1606,7 +1633,14 @@ impl Agent {
                     let peers_snapshot = full_pass_peers
                         .as_ref()
                         .and_then(|(names, peers)| names.contains(&name).then_some(peers.as_slice()));
-                    let result = self.reconcile_one_with_peers(&name, peers_snapshot).await;
+                    let result = match self.try_reconcile_one(&name, peers_snapshot).await {
+                        Ok(None) => {
+                            queue.schedule(&name, Instant::now() + BUSY_VOLUME_RETRY_DELAY);
+                            continue;
+                        }
+                        Ok(Some(outcome)) => Ok(outcome),
+                        Err(err) => Err(err),
+                    };
                     if let Some(delay) = settle(&name, &result) {
                         queue.schedule(&name, Instant::now() + delay);
                     }
