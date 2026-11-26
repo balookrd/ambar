@@ -111,6 +111,7 @@ fn env_sharing(node: &str, runner: FakeRunner, volumes_dir_exists: bool, volumes
         options: Default::default(),
         metrics: Default::default(),
         is_tainted: Arc::new(AtomicBool::new(false)),
+        staging: Default::default(),
     });
     Env {
         paths,

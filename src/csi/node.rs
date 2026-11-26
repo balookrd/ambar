@@ -683,6 +683,7 @@ impl NodeService {
     async fn wait_usable(&self, volume: &str) -> Result<(), Status> {
         let deadline = Instant::now() + self.stage_wait;
         let mut outcome = self.pass(volume).await?;
+        let mut last_pass_err: Option<String> = None;
         loop {
             let last = match self.agent.read_status(volume).await {
                 Ok(status) if usable(status.as_ref()) => return Ok(()),
@@ -691,17 +692,27 @@ impl NodeService {
             };
             let now = Instant::now();
             if now >= deadline {
-                return Err(Status::unavailable(format!(
+                let mut msg = format!(
                     "volume {volume:?} is not usable on this node after {:?}: {last}",
                     self.stage_wait
-                )));
+                );
+                if let Some(err) = last_pass_err {
+                    msg.push_str(&format!("; last pass error: {err}"));
+                }
+                return Err(Status::unavailable(msg));
             }
             sleep(self.poll.min(deadline - now)).await;
             if outcome == Outcome::Progress {
                 outcome = match self.pass(volume).await {
-                    Ok(outcome) => outcome,
+                    Ok(outcome) => {
+                        last_pass_err = None;
+                        outcome
+                    }
                     // An error of the API or of the pass may pass: try again until the deadline.
-                    Err(status) if status.code() == Code::Unavailable => Outcome::Progress,
+                    Err(status) if status.code() == Code::Unavailable => {
+                        last_pass_err = Some(status.message().to_string());
+                        Outcome::Progress
+                    }
                     Err(status) => return Err(status),
                 };
             }
@@ -1134,6 +1145,7 @@ impl Node for NodeService {
             }
             Some(_) => {}
         }
+        let _stage_guard = self.agent.begin_stage(&volume);
         self.join(&volume).await?;
         let result = self.stage_after_join(volume.clone(), staging.clone(), options).await;
         if let Err(status) = &result

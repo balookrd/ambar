@@ -183,6 +183,7 @@ async fn snapshot_busy_or_mounted_skips_status_and_pod_list() {
         options: Default::default(),
         metrics: Default::default(),
         is_tainted: Arc::new(AtomicBool::new(false)),
+        staging: Default::default(),
     };
 
     let spec = spec_with_nodes(vec![
@@ -207,4 +208,70 @@ async fn snapshot_busy_or_mounted_skips_status_and_pod_list() {
         .unwrap();
     assert!(res2.is_none());
     assert!(runner.calls().is_empty());
+}
+
+fn test_agent(node: &str) -> (Agent, Arc<FakeVolumes>, tempfile::TempDir) {
+    use std::sync::atomic::AtomicBool;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::tests::temp_paths(&tmp);
+    let runner = Arc::new(crate::tests::FakeRunner::new(|_, _| crate::tests::out(0, "[]\n", "")));
+    let volumes = Arc::new(FakeVolumes::default());
+    let agent = Agent {
+        node: node.to_string(),
+        paths,
+        runner,
+        volumes: volumes.clone(),
+        locks: crate::agent::run::VolumeLocks::default(),
+        ready: Arc::new(AtomicBool::new(true)),
+        options: Default::default(),
+        metrics: Default::default(),
+        is_tainted: Arc::new(AtomicBool::new(false)),
+        staging: Default::default(),
+    };
+    (agent, volumes, tmp)
+}
+
+#[tokio::test]
+async fn cleanup_skips_volume_while_stage_is_in_progress() {
+    let (agent, volumes, _tmp) = test_agent("n2");
+    let spec = spec_with_nodes(vec![
+        member("dv-1", 0, NodeKind::Replica),
+        member("dv-2", 1, NodeKind::Replica),
+        member(&agent.node, 2, NodeKind::Client),
+    ]);
+    let obj = ReplicatedVolume::new("spike", spec);
+    volumes.put(obj.clone());
+
+    let _stage_guard = agent.begin_stage("spike");
+    let res = check_and_cleanup_client_with_snapshot(&agent, "spike", &obj, None, &[])
+        .await
+        .unwrap();
+    assert!(res.is_none());
+    let current = volumes.get("spike").await.unwrap().unwrap();
+    assert!(current.spec.nodes.iter().any(|n| n.name == agent.node));
+}
+
+#[tokio::test]
+async fn cleanup_skips_volume_when_volume_lock_is_held() {
+    let (agent, volumes, _tmp) = test_agent("n2");
+    let spec = spec_with_nodes(vec![
+        member("dv-1", 0, NodeKind::Replica),
+        member("dv-2", 1, NodeKind::Replica),
+        member(&agent.node, 2, NodeKind::Client),
+    ]);
+    let obj = ReplicatedVolume::new("spike", spec);
+    volumes.put(obj.clone());
+
+    let _held = agent.locks.lock("spike").await;
+    // Должен мгновенно вернуть Ok(None), не блокируясь на локе
+    let res = tokio::time::timeout(
+        Duration::from_millis(50),
+        check_and_cleanup_client_with_snapshot(&agent, "spike", &obj, None, &[]),
+    )
+    .await
+    .expect("cleanup must not block on held volume lock")
+    .unwrap();
+    assert!(res.is_none());
 }

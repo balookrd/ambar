@@ -283,6 +283,26 @@ pub struct Agent {
     pub options: AgentOptions,
     pub metrics: MetricsHolder,
     pub is_tainted: Arc<AtomicBool>,
+    pub staging: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+/// RAII-гарда активного `NodeStageVolume` для тома. Пока хотя бы одна гарда
+/// жива, фоновая очистка `Client` не трогает этот том.
+pub struct StageGuard {
+    staging: Arc<Mutex<HashMap<String, usize>>>,
+    volume: String,
+}
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        let mut map = self.staging.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = map.get_mut(&self.volume) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(&self.volume);
+            }
+        }
+    }
 }
 
 fn log_info(volume: &str, text: impl Display) {
@@ -645,6 +665,22 @@ pub(crate) fn has_entry(object: &ReplicatedVolume, node: &str) -> bool {
 }
 
 impl Agent {
+    /// Marks `volume` as actively staging until the returned `StageGuard` is dropped.
+    pub fn begin_stage(&self, volume: &str) -> StageGuard {
+        let mut map = self.staging.lock().unwrap_or_else(|e| e.into_inner());
+        *map.entry(volume.to_string()).or_insert(0) += 1;
+        StageGuard {
+            staging: self.staging.clone(),
+            volume: volume.to_string(),
+        }
+    }
+
+    /// Returns `true` if at least one `NodeStageVolume` call is active for `volume`.
+    pub fn is_staging(&self, volume: &str) -> bool {
+        let map = self.staging.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(volume).copied().unwrap_or(0) > 0
+    }
+
     /// Runs blocking node-level work off the async threads.
     pub(crate) async fn blocking<T, F>(&self, work: F) -> Result<T, AgentError>
     where
@@ -1729,7 +1765,9 @@ impl Agent {
             {
                 let name = status.name.clone();
                 let vg = self.options.volume_group.clone();
-                let _lock = self.locks.lock(&name).await;
+                let Some(_lock) = self.locks.try_lock(&name) else {
+                    continue;
+                };
                 let adjusted = self
                     .blocking(move |paths, runner| {
                         let reconciler = Reconciler {
@@ -1775,7 +1813,8 @@ impl Agent {
         standalone_tracker.retain_volumes(&active_volumes);
 
         // 4. Stale Client cleanup without pods (R36), debounced via CleanupTracker
-        if cleanup_tracker.should_run(now)
+        if self.ready.load(Ordering::Acquire)
+            && cleanup_tracker.should_run(now)
             && let Ok(objects) = self.volumes.list().await
         {
             let status_by_name: HashMap<&str, &ResourceStatus> =
@@ -1835,8 +1874,10 @@ impl Agent {
         let mut standalone_tracker =
             StandaloneTracker::new(self.options.adjust_attempts as usize, self.options.adjust_interval);
         let mut taint_tracker = TaintTracker::new(DEFAULT_TAINT_RESYNC_INTERVAL);
-        let mut cleanup_tracker = CleanupTracker::new(DEFAULT_CLEANUP_INTERVAL);
+        let mut cleanup_tracker =
+            CleanupTracker::with_initial_delay(DEFAULT_CLEANUP_INTERVAL, std::time::Instant::now());
         let mut interval = tokio::time::interval(Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,

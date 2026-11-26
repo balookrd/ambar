@@ -42,6 +42,7 @@ fn services(ready: bool) -> Services {
         options: Default::default(),
         metrics: Default::default(),
         is_tainted: Arc::new(AtomicBool::new(false)),
+        staging: Default::default(),
     });
     Services {
         identity: IdentityService {

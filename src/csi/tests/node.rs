@@ -374,6 +374,7 @@ fn env_for(node: &str) -> Env {
         options: Default::default(),
         metrics: Default::default(),
         is_tainted: Arc::new(AtomicBool::new(false)),
+        staging: Default::default(),
     });
     let mut svc = NodeService::new(agent, Arc::new(FakeNodes(Ok(cluster(&[100 * GIB; 4])))));
     svc.mountinfo = mountinfo;

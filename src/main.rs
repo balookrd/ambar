@@ -207,6 +207,7 @@ fn run_agent(
             options: options.clone(),
             metrics: Default::default(),
             is_tainted: Arc::new(AtomicBool::new(false)),
+            staging: Default::default(),
         });
         let shutdown = CancellationToken::new();
         tokio::spawn(cancel_on_signal(shutdown.clone()));

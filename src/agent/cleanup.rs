@@ -31,6 +31,14 @@ impl CleanupTracker {
         }
     }
 
+    /// Creates a tracker whose first cleanup pass is delayed by `interval` from `now`.
+    pub fn with_initial_delay(interval: Duration, now: Instant) -> Self {
+        Self {
+            interval,
+            last_run: Some(now),
+        }
+    }
+
     /// Returns `true` when at least `interval` has elapsed since the previous run (or on the first call).
     pub fn should_run(&mut self, now: Instant) -> bool {
         let due = self
@@ -101,7 +109,7 @@ pub async fn check_and_cleanup_client_with_snapshot(
     snapshot: Option<&ResourceStatus>,
     mounted_uids: &[String],
 ) -> Result<Option<Outcome>, AgentError> {
-    if !crate::model::valid_volume_name(volume) {
+    if !crate::model::valid_volume_name(volume) || agent.is_staging(volume) {
         return Ok(None);
     }
     let is_client = object.metadata.deletion_timestamp.is_none()
@@ -117,7 +125,12 @@ pub async fn check_and_cleanup_client_with_snapshot(
     if snapshot_busy || !mounted_uids.is_empty() {
         return Ok(None);
     }
-    let _lock = agent.locks.lock(volume).await;
+    let Some(_lock) = agent.locks.try_lock(volume) else {
+        return Ok(None);
+    };
+    if agent.is_staging(volume) {
+        return Ok(None);
+    }
     let status = match agent.read_status(volume).await {
         Ok(s) => s,
         Err(e) => {
