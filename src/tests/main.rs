@@ -63,3 +63,17 @@ fn jemalloc_background_thread_survives_fork_exec() {
         }
     });
 }
+
+#[test]
+fn container_runs_under_tini_as_pid1_subreaper() {
+    let dockerfile = include_str!("../../image/Dockerfile");
+    assert!(
+        dockerfile.contains("tini"),
+        "image/Dockerfile must install tini to reap orphaned drbd grandchildren"
+    );
+    let daemonset = include_str!("../../deploy/daemonset.yaml");
+    assert!(
+        daemonset.contains("[\"/usr/bin/tini\", \"--\", \"ambar\", \"agent\"]"),
+        "deploy/daemonset.yaml must launch ambar agent under /usr/bin/tini"
+    );
+}

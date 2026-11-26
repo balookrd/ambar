@@ -47,7 +47,10 @@ spec:
         - name: ambar
           image: AMBAR_IMAGE
           imagePullPolicy: AMBAR_IMAGE_PULL_POLICY
-          command: ["ambar", "agent"]
+          # tini runs as PID 1 to reap orphaned drbdmeta/drbdsetup grandchildren
+          # left behind if a command group times out, while forwarding SIGTERM
+          # cleanly to `ambar agent` without touching its waitid(WNOWAIT) children.
+          command: ["/usr/bin/tini", "--", "ambar", "agent"]
           # The same path as in the probe below and in the two sidecars:
           # /csi/csi.sock in their containers is this file (hostPath
           # socket-dir). It is also the default of `ambar agent`.

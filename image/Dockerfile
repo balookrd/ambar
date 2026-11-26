@@ -47,7 +47,7 @@ FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      kmod util-linux e2fsprogs libkeyutils1 lvm2 \
+      kmod util-linux e2fsprogs libkeyutils1 lvm2 tini \
  && rm -rf /var/lib/apt/lists/* \
  && sed -i -e 's/^[[:space:]]*#[[:space:]]*udev_sync = 1/udev_sync = 0/' \
            -e 's/^[[:space:]]*#[[:space:]]*udev_rules = 1/udev_rules = 0/' /etc/lvm/lvm.conf
