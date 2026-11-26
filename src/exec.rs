@@ -320,6 +320,11 @@ enum Stream {
     Stderr,
 }
 
+/// Maximum bytes kept in memory per stream (`stdout` / `stderr`). Any further
+/// output is drained to `io::sink()` so the child never hits `SIGPIPE`.
+pub const MAX_OUTPUT_CAPTURE: usize = 1024 * 1024;
+const TRUNCATED_SUFFIX: &[u8] = b"\n... [output truncated]";
+
 /// Reads `pipe` to the end on its own thread and sends the bytes over `sender`.
 fn drain<R: Read + Send + 'static>(
     stream: Stream,
@@ -327,14 +332,25 @@ fn drain<R: Read + Send + 'static>(
     sender: mpsc::Sender<(Stream, io::Result<Vec<u8>>)>,
 ) {
     thread::spawn(move || {
-        let mut bytes = Vec::new();
         let result = match pipe {
-            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
-            None => Ok(bytes),
+            Some(mut pipe) => read_capped(&mut pipe),
+            None => Ok(Vec::new()),
         };
         // The receiver is gone when the caller gave up; nothing to report.
         let _ = sender.send((stream, result));
     });
+}
+
+fn read_capped<R: Read>(pipe: &mut R) -> io::Result<Vec<u8>> {
+    let limit = MAX_OUTPUT_CAPTURE as u64;
+    let mut bytes = Vec::new();
+    pipe.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_OUTPUT_CAPTURE {
+        bytes.truncate(MAX_OUTPUT_CAPTURE);
+        bytes.extend_from_slice(TRUNCATED_SUFFIX);
+        io::copy(pipe, &mut io::sink())?;
+    }
+    Ok(bytes)
 }
 
 /// SIGKILL to every process of the group `pgid` (the pid of the group leader

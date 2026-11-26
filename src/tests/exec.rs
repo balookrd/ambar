@@ -448,3 +448,14 @@ fn a_leader_reaped_elsewhere_gives_an_error_and_no_signal_to_its_group() {
         "the group was signalled although the leader was not ours any more"
     );
 }
+
+#[test]
+fn drain_caps_captured_stdout_without_sigpipe() {
+    let runner = SystemRunner::default();
+    // Writes 2 MiB to stdout and exits 0 only if write succeeded without SIGPIPE.
+    let script = "dd if=/dev/zero bs=65536 count=32 2>/dev/null | tr '\\0' 'a'";
+    let out = runner.run("/bin/sh", &["-c", script]).expect("command must finish");
+    assert_eq!(out.code, 0, "writer must not die with SIGPIPE");
+    assert!(out.stdout.len() <= MAX_OUTPUT_CAPTURE + 64);
+    assert!(out.stdout.ends_with("\n... [output truncated]"));
+}

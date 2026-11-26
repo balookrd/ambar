@@ -4,9 +4,13 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::time::Duration;
 
-use crate::exec::{Runner, command_line};
+use crate::exec::{Output, Runner, command_line};
 use crate::model::{valid_volume_group_name, valid_volume_name};
+
+/// Time limit for best-effort `blkdiscard` so a slow controller does not stall LV operations for 120 s.
+pub const BLKDISCARD_TIMEOUT: Duration = Duration::from_secs(15);
 
 const SECTOR: u64 = 512;
 /// One bitmap extent covers 2^18 sectors.
@@ -372,7 +376,7 @@ pub fn create_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str, bytes: u6
     let size_arg = format!("{bytes}B");
     checked(runner, "lvcreate", &["-y", "-L", &size_arg, "-n", lv_name, "--", vg])?;
     let dev = lvm_device_path(vg, lv_name);
-    if checked(runner, "blkdiscard", &["--", &dev]).is_err() {
+    if checked_with_timeout(runner, "blkdiscard", &["--", &dev], BLKDISCARD_TIMEOUT).is_err() {
         let _ = checked(runner, "wipefs", &["-a", "-f", "--", &dev]);
     }
     Ok(())
@@ -388,7 +392,7 @@ pub fn remove_lvm_volume(runner: &dyn Runner, vg: &str, lv_name: &str) -> Result
         return Err(BackingError::InvalidVolumeName(lv_name.to_string()));
     }
     let dev = lvm_device_path(vg, lv_name);
-    let _ = checked(runner, "blkdiscard", &["--", &dev]);
+    let _ = checked_with_timeout(runner, "blkdiscard", &["--", &dev], BLKDISCARD_TIMEOUT);
     checked(runner, "lvremove", &["-y", "--", &dev])?;
     Ok(())
 }
@@ -406,8 +410,21 @@ fn device_name(program: &str, args: &[&str], device: &str, line: &str) -> Result
 }
 
 fn checked(runner: &dyn Runner, program: &str, args: &[&str]) -> Result<String, BackingError> {
+    checked_output(program, args, runner.run(program, args))
+}
+
+fn checked_with_timeout(
+    runner: &dyn Runner,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, BackingError> {
+    checked_output(program, args, runner.run_with_timeout(program, args, timeout))
+}
+
+fn checked_output(program: &str, args: &[&str], result: io::Result<Output>) -> Result<String, BackingError> {
     let command = command_line(program, args);
-    let out = runner.run(program, args).map_err(|e| BackingError::Spawn {
+    let out = result.map_err(|e| BackingError::Spawn {
         command: command.clone(),
         message: e.to_string(),
     })?;

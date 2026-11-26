@@ -575,3 +575,64 @@ fn test_lvm_validation_errors() {
         Err(BackingError::InvalidVolumeGroup(_))
     ));
 }
+
+#[test]
+fn lvm_blkdiscard_uses_dedicated_15s_timeout() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use crate::exec::{Output, Runner, command_line};
+
+    struct TimeoutRecordingRunner {
+        calls: Mutex<Vec<(String, Option<Duration>)>>,
+    }
+
+    impl TimeoutRecordingRunner {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, Option<Duration>)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Runner for TimeoutRecordingRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<Output> {
+            self.calls.lock().unwrap().push((command_line(program, args), None));
+            Ok(out(0, "", ""))
+        }
+
+        fn run_with_timeout(&self, program: &str, args: &[&str], timeout: Duration) -> io::Result<Output> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((command_line(program, args), Some(timeout)));
+            Ok(out(0, "", ""))
+        }
+    }
+
+    assert_eq!(BLKDISCARD_TIMEOUT, Duration::from_secs(15));
+
+    let runner = TimeoutRecordingRunner::new();
+    crate::backing::create_lvm_volume(&runner, "k3s-vg", "pvc-test", 1073741824).unwrap();
+    crate::backing::remove_lvm_volume(&runner, "k3s-vg", "pvc-test").unwrap();
+
+    assert_eq!(
+        runner.calls(),
+        [
+            ("lvcreate -y -L 1073741824B -n pvc-test -- k3s-vg".to_string(), None),
+            (
+                "blkdiscard -- /dev/k3s-vg/pvc-test".to_string(),
+                Some(BLKDISCARD_TIMEOUT)
+            ),
+            (
+                "blkdiscard -- /dev/k3s-vg/pvc-test".to_string(),
+                Some(BLKDISCARD_TIMEOUT)
+            ),
+            ("lvremove -y -- /dev/k3s-vg/pvc-test".to_string(), None),
+        ]
+    );
+}
