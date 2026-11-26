@@ -130,7 +130,8 @@
 //!
 //! Lock order. `Agent::locks` (in-process, per volume) is taken first, for
 //! steps 8 to 10 of the stage and for the whole unstage; inside it
-//! `Reconciler::remove_checked` takes the flock file of the volume. The wait
+//! `format_under_flock` (before `mkfs.ext4`) and `Reconciler::remove_checked`
+//! take the flock file of the volume. The wait
 //! of the stage (steps 6, 7) runs without the in-process lock, because
 //! `Agent::reconcile_one` takes it itself: it must never be called while this
 //! code holds it.
@@ -758,6 +759,57 @@ impl NodeService {
         }
     }
 
+    /// Takes the cross-process volume file lock, re-checks the device
+    /// signature under that lock, and runs `mkfs.ext4` only when the device is
+    /// still empty.
+    async fn format_under_flock(&self, volume: &str, device: &Path) -> Result<(), Status> {
+        enum FormatLockError {
+            Reconcile(ReconcileError),
+            ForeignFs(String),
+            Mount(MountError),
+        }
+
+        impl From<ReconcileError> for FormatLockError {
+            fn from(error: ReconcileError) -> Self {
+                Self::Reconcile(error)
+            }
+        }
+
+        let name = volume.to_string();
+        let target = device.to_path_buf();
+        let mountinfo = self.mountinfo.clone();
+        let allow_regular_files = self.allow_regular_files;
+        let outcome = self
+            .agent
+            .blocking(move |paths, runner| {
+                let _flock = Reconciler::new(paths, runner).lock_volume(&name)?;
+                let mount = Mounter {
+                    runner,
+                    mountinfo: &mountinfo,
+                    allow_regular_files,
+                };
+                match mount.signature(&target) {
+                    Ok(Signature::Empty) => mount.mkfs_ext4(&target).map_err(FormatLockError::Mount),
+                    Ok(Signature::Ext4) => Ok(()),
+                    Ok(Signature::Other(fs)) => Err(FormatLockError::ForeignFs(fs)),
+                    Err(e) => Err(FormatLockError::Mount(e)),
+                }
+            })
+            .await
+            .map_err(|e| agent_status("cannot format the volume under lock", e))?;
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(FormatLockError::Reconcile(e @ ReconcileError::Busy { .. })) => Err(Status::unavailable(e.to_string())),
+            Err(FormatLockError::Reconcile(e)) => {
+                Err(Status::unavailable(format!("cannot acquire volume file lock: {e}")))
+            }
+            Err(FormatLockError::ForeignFs(fs)) => Err(Status::failed_precondition(format!(
+                "volume {volume:?} acquired filesystem {fs:?} concurrently; refusing to overwrite it"
+            ))),
+            Err(FormatLockError::Mount(e)) => Err(mount_status(e)),
+        }
+    }
+
     /// Steps 8 to 10, under the volume lock (module doc).
     async fn stage_locked(&self, volume: String, staging: PathBuf, options: Option<String>) -> Result<(), Status> {
         let _guard = self.agent.locks.lock(&volume).await;
@@ -797,10 +849,7 @@ impl NodeService {
             Format::MarkThenMount => self.mark_formatted(&object, &volume).await?,
             Format::FormatThenMark => {
                 self.still_unformatted(&object, &volume).await?;
-                let target = device.clone();
-                self.mount_raw(move |m| m.mkfs_ext4(&target))
-                    .await
-                    .map_err(mount_status)?;
+                self.format_under_flock(&volume, &device).await?;
                 self.mark_formatted(&object, &volume).await?;
             }
         }

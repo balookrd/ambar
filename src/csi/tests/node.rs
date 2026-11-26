@@ -2495,3 +2495,53 @@ async fn node_ops_respect_concurrency_semaphore() {
     drop(g2);
     assert_eq!(code(h2.await.unwrap()), Code::FailedPrecondition);
 }
+
+#[tokio::test(start_paused = true)]
+async fn stage_refuses_mkfs_with_unavailable_when_volume_flock_is_held() {
+    let e = env();
+    e.client_up().await;
+    e.set_device(Dev::Empty);
+
+    let lock_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(e.paths.lock_file(VOLUME))
+        .unwrap();
+    lock_file.try_lock().unwrap();
+
+    assert_eq!(code(e.stage().await), Code::Unavailable);
+    assert!(
+        !e.device_commands().iter().any(|c| c.starts_with("mkfs.ext4")),
+        "mkfs.ext4 must not run while volume flock is held: {:?}",
+        e.device_commands()
+    );
+    assert!(!e.annotated());
+}
+
+#[tokio::test(start_paused = true)]
+async fn stage_skips_mkfs_when_peer_formatted_volume_before_flock_acquired() {
+    let e = env();
+    e.client_up().await;
+    e.set_device(Dev::Empty);
+
+    let sim = e.sim.clone();
+    let fired = AtomicBool::new(false);
+    *e.sim.on_blkid.lock().unwrap() = Some(Box::new(move |_| {
+        if !fired.swap(true, SeqCst) {
+            let file = fs::OpenOptions::new().write(true).open(&sim.device).unwrap();
+            file.write_all_at(&[0x53, 0xef], 1080).unwrap();
+            *sim.blkid.lock().unwrap() = out(0, "ext4\n", "");
+        }
+    }));
+
+    e.stage().await.unwrap();
+    assert!(
+        !e.device_commands().iter().any(|c| c.starts_with("mkfs.ext4")),
+        "mkfs.ext4 must be skipped when peer formatted volume before flock acquired: {:?}",
+        e.device_commands()
+    );
+    assert!(e.annotated());
+    assert_eq!(e.sim.mounted_at(&e.staging).len(), 1);
+}
