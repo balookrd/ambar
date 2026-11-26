@@ -158,7 +158,7 @@ use super::proto::{
     NodeStageVolumeResponse, NodeUnpublishVolumeRequest, NodeUnpublishVolumeResponse, NodeUnstageVolumeRequest,
     NodeUnstageVolumeResponse, Topology, VolumeCapability,
 };
-use crate::agent::kube::{ApiError, EDIT_ATTEMPTS, FORMATTED_ANNOTATION};
+use crate::agent::kube::{ApiError, EDIT_ATTEMPTS, FORMATTED_ANNOTATION, conflict_backoff};
 use crate::agent::local::local;
 use crate::agent::nodes::NodeMap;
 use crate::agent::run::{Agent, AgentError, Outcome, has_entry, uid_of};
@@ -597,7 +597,7 @@ impl NodeService {
     /// member. `Join::Added` only when this call made the edit.
     async fn join(&self, volume: &str) -> Result<Join, Status> {
         let node = &self.agent.node;
-        for _ in 0..EDIT_ATTEMPTS {
+        for attempt in 0..EDIT_ATTEMPTS {
             let object = self.live_object(volume).await?;
             if let Some(member) = object.spec.nodes.iter().find(|n| n.name == *node) {
                 if member.kind == NodeKind::Retiring {
@@ -625,6 +625,9 @@ impl NodeService {
                 .map_err(|e| api_status("cannot add this node to the volume", e))?;
             if edited {
                 return Ok(Join::Added);
+            }
+            if attempt + 1 < EDIT_ATTEMPTS {
+                sleep(conflict_backoff(attempt)).await;
             }
         }
         Err(Status::unavailable(format!(
@@ -821,7 +824,7 @@ impl NodeService {
     /// Step 5 of the unstage: removes this node's `Client` entry from `spec.nodes`.
     async fn leave(&self, volume: &str) -> Result<(), Status> {
         let node = &self.agent.node;
-        for _ in 0..EDIT_ATTEMPTS {
+        for attempt in 0..EDIT_ATTEMPTS {
             let Some(object) = self
                 .agent
                 .volumes
@@ -844,6 +847,9 @@ impl NodeService {
                 .map_err(|e| api_status("cannot remove this node from the volume", e))?;
             if edited {
                 return Ok(());
+            }
+            if attempt + 1 < EDIT_ATTEMPTS {
+                sleep(conflict_backoff(attempt)).await;
             }
         }
         Err(Status::unavailable(format!(

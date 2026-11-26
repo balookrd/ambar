@@ -5,7 +5,7 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use super::*;
-use crate::tests::volumes::{hanging_client, typed};
+use crate::tests::volumes::{FakeVolumes, hanging_client, typed};
 
 const EXPIRED: &str = "the API server did not answer within 30 s";
 
@@ -399,4 +399,65 @@ fn mounted_pod_uids_scans_kubelet_directory() {
 
     let invalid = mounted_pod_uids_for_volume(tmp.path(), "../invalid");
     assert!(invalid.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn patch_retrying_backs_off_on_conflict() {
+    use std::time::Duration;
+
+    let volumes = FakeVolumes::default();
+    let mut obj = object();
+    obj.metadata.uid = Some("uid-1".to_string());
+    obj.spec.initial_sync = InitialSync::Skip;
+    volumes.put(obj);
+
+    // Успех с первой попытки — задержка 0ms.
+    let start = Instant::now();
+    let patched = patch_retrying(&volumes, "v", "uid-1", &initial_sync_done_ops)
+        .await
+        .unwrap();
+    assert!(patched);
+    assert_eq!(start.elapsed(), Duration::ZERO);
+
+    // Серия из 3 конфликтов перед успехом: 20ms + 40ms + 80ms = 140ms.
+    let mut obj2 = object();
+    obj2.metadata.name = Some("v2".to_string());
+    obj2.metadata.uid = Some("uid-2".to_string());
+    obj2.spec.initial_sync = InitialSync::Skip;
+    volumes.put(obj2);
+    *volumes.conflicts.lock().unwrap() = 3;
+
+    let start = Instant::now();
+    let patched = patch_retrying(&volumes, "v2", "uid-2", &initial_sync_done_ops)
+        .await
+        .unwrap();
+    assert!(patched);
+    assert_eq!(start.elapsed(), Duration::from_millis(20 + 40 + 80));
+
+    // Исчерпание всех EDIT_ATTEMPTS попыток: sleep только между попытками (20 + 40 + 80 + 160 = 300ms).
+    let mut obj3 = object();
+    obj3.metadata.name = Some("v3".to_string());
+    obj3.metadata.uid = Some("uid-3".to_string());
+    obj3.spec.initial_sync = InitialSync::Skip;
+    volumes.put(obj3);
+    *volumes.conflicts.lock().unwrap() = EDIT_ATTEMPTS as u32;
+
+    let start = Instant::now();
+    let err = patch_retrying(&volumes, "v3", "uid-3", &initial_sync_done_ops)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApiError::Conflict(_)));
+    assert_eq!(start.elapsed(), Duration::from_millis(20 + 40 + 80 + 160));
+}
+
+#[test]
+fn conflict_backoff_doubles_and_caps() {
+    use std::time::Duration;
+    assert_eq!(conflict_backoff(0), Duration::from_millis(20));
+    assert_eq!(conflict_backoff(1), Duration::from_millis(40));
+    assert_eq!(conflict_backoff(2), Duration::from_millis(80));
+    assert_eq!(conflict_backoff(3), Duration::from_millis(160));
+    assert_eq!(conflict_backoff(4), Duration::from_millis(320));
+    assert_eq!(conflict_backoff(5), Duration::from_millis(320));
+    assert_eq!(conflict_backoff(100), Duration::from_millis(320));
 }

@@ -72,6 +72,11 @@ pub const FORMATTED_ANNOTATION: &str = "ambar.balookrd.github.io/formatted";
 /// API server refused the patch, before it gives up.
 pub const EDIT_ATTEMPTS: usize = 5;
 
+/// Exponential backoff between conflict retries (20 ms, 40 ms, 80 ms, 160 ms, capped at 320 ms).
+pub(crate) fn conflict_backoff(attempt: usize) -> Duration {
+    Duration::from_millis(20 * (1u64 << attempt.min(4)))
+}
+
 /// The longest a call to the API server (the watch stream excepted) may take.
 /// `kube::Client` has no timeout of its own: without this limit a request
 /// that an API server never answers would keep its caller, and the lock the
@@ -232,7 +237,7 @@ async fn edit_retrying(
     target: Target,
 ) -> Result<bool, ApiError> {
     let mut last = ApiError::Conflict("no attempt was made".to_string());
-    for _ in 0..EDIT_ATTEMPTS {
+    for attempt in 0..EDIT_ATTEMPTS {
         let Some(current) = objects.read(name).await? else {
             return Ok(false);
         };
@@ -250,7 +255,12 @@ async fn edit_retrying(
         };
         match result {
             Ok(patched) => return Ok(patched),
-            Err(refused @ (ApiError::Conflict(_) | ApiError::Rejected(_))) => last = refused,
+            Err(refused @ (ApiError::Conflict(_) | ApiError::Rejected(_))) => {
+                last = refused;
+                if attempt + 1 < EDIT_ATTEMPTS {
+                    tokio::time::sleep(conflict_backoff(attempt)).await;
+                }
+            }
             Err(other) => return Err(other),
         }
     }
@@ -720,6 +730,7 @@ impl Volumes for KubeVolumes {
             {
                 Ok(_) => return Ok(true),
                 Err(e) if attempt + 1 < EDIT_ATTEMPTS && (code_of(&e) == Some(409) || code_of(&e) == Some(422)) => {
+                    tokio::time::sleep(conflict_backoff(attempt)).await;
                     continue;
                 }
                 Err(e) => return Err(api_error(e)),
@@ -747,6 +758,7 @@ impl Volumes for KubeVolumes {
             {
                 Ok(_) => return Ok(true),
                 Err(e) if attempt + 1 < EDIT_ATTEMPTS && (code_of(&e) == Some(409) || code_of(&e) == Some(422)) => {
+                    tokio::time::sleep(conflict_backoff(attempt)).await;
                     continue;
                 }
                 Err(e) => return Err(api_error(e)),

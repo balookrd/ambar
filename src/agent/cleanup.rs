@@ -5,7 +5,7 @@
 //! the agent safely tears down the DRBD resource (`drbdadm down`), removes its
 //! entry from `status.nodes`, and removes itself from `spec.nodes` via a JSON patch.
 
-use crate::agent::kube::{ApiError, EDIT_ATTEMPTS, Volumes, mounted_pod_uids_for_volume};
+use crate::agent::kube::{ApiError, EDIT_ATTEMPTS, Volumes, conflict_backoff, mounted_pod_uids_for_volume};
 use crate::agent::run::{Agent, AgentError, Outcome, uid_of};
 use crate::crd::{NodeKind, ReplicatedVolume, ReplicatedVolumeSpec};
 use crate::drbd::status::{ResourceStatus, Role};
@@ -98,7 +98,7 @@ pub async fn check_and_cleanup_client(
 /// Removes `node` from `spec.nodes` of `volume` if it is a `Client`.
 /// Retries on conflict up to `EDIT_ATTEMPTS` times.
 pub async fn leave_client(volumes: &dyn Volumes, node: &str, volume: &str) -> Result<bool, ApiError> {
-    for _ in 0..EDIT_ATTEMPTS {
+    for attempt in 0..EDIT_ATTEMPTS {
         let Some(object) = volumes.get(volume).await? else {
             return Ok(true);
         };
@@ -115,6 +115,9 @@ pub async fn leave_client(volumes: &dyn Volumes, node: &str, volume: &str) -> Re
             .await?;
         if edited {
             return Ok(true);
+        }
+        if attempt + 1 < EDIT_ATTEMPTS {
+            tokio::time::sleep(conflict_backoff(attempt)).await;
         }
     }
     Err(ApiError::Conflict(format!(
