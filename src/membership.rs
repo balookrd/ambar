@@ -89,7 +89,7 @@ pub fn join_as_client(
 
 /// A member address is free text in the CRD; compare it as an IP address when
 /// it parses, as text otherwise.
-fn same_address(member: &str, address: IpAddr) -> bool {
+pub(crate) fn same_address(member: &str, address: IpAddr) -> bool {
     match member.parse::<IpAddr>() {
         Ok(parsed) => parsed == address,
         Err(_) => member == address.to_string(),

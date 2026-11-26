@@ -40,6 +40,7 @@ fn volume(minor: u32, port: u16, nodes: &[&str], size_bytes: u64) -> Existing {
         port,
         replica_nodes: nodes.iter().map(|n| n.to_string()).collect(),
         size_bytes,
+        max_peers: DEFAULT_MAX_PEERS,
     }
 }
 
@@ -349,6 +350,7 @@ fn every_successful_placement_passes_the_crd_validation() {
                     port: 7000 + (rng.next() % 6) as u16,
                     replica_nodes: members,
                     size_bytes: (rng.next() % 32) * GIB,
+                    max_peers: DEFAULT_MAX_PEERS,
                 }
             })
             .collect();

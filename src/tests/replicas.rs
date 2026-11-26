@@ -528,6 +528,7 @@ fn add_checks_budget_capacity() {
         port: 7001,
         replica_nodes: vec!["n3".to_string()],
         size_bytes: 10 * GIB,
+        max_peers: 7,
     }];
     assert_eq!(
         next_add(&view, "n3", &cluster, &existing),
@@ -1352,6 +1353,107 @@ fn move_in_three_node_cluster_assigns_source_as_witness_when_finished() {
                 member("n3", 2, "192.168.104.3", NodeKind::Replica),
             ],
             add_finalizer: None,
+        })
+    );
+}
+
+#[test]
+fn move_retires_source_even_if_source_is_unhealthy_when_target_is_uptodate() {
+    let cluster = test_cluster();
+    let spec = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("n2", 1, "192.168.104.2", NodeKind::Replica),
+        member("n3", 2, "192.168.104.3", NodeKind::Replica),
+    ]);
+    let mut status = healthy_status(&spec);
+    // Источник n2 (from) нездоров: диск Inconsistent, соединения с ним Connecting
+    let n2_st = status.nodes.iter_mut().find(|n| n.name == "n2").unwrap();
+    n2_st.disk = "Inconsistent".to_string();
+    for c in &mut n2_st.connections {
+        c.state = "Connecting".to_string();
+    }
+    for st in &mut status.nodes {
+        if st.name != "n2"
+            && let Some(c) = st.connections.iter_mut().find(|c| c.peer == "n2")
+        {
+            c.state = "Connecting".to_string();
+            c.peer_disk = "Inconsistent".to_string();
+        }
+    }
+
+    let finalizers = vec![
+        replica_finalizer("n1"),
+        replica_finalizer("n2"),
+        replica_finalizer("n3"),
+    ];
+    let view = View {
+        spec: &spec,
+        status: Some(&status),
+        deleting: false,
+        finalizers: &finalizers,
+    };
+
+    // Цель n3 уже UpToDate, поэтому n2 должен быть переведён в Retiring,
+    // даже несмотря на нездоровое состояние n2.
+    let next = next_move(&view, "n2", "n3", &cluster, &[]).unwrap();
+    assert_eq!(
+        next,
+        Next::Edit(Edit {
+            nodes: vec![
+                member("n1", 0, "192.168.104.1", NodeKind::Replica),
+                member("n2", 1, "192.168.104.2", NodeKind::Retiring),
+                member("n3", 2, "192.168.104.3", NodeKind::Replica),
+            ],
+            add_finalizer: None,
+        })
+    );
+}
+
+#[test]
+fn add_refuses_on_node_id_or_address_collision() {
+    let cluster = test_cluster();
+
+    // Коллизия по node_id: узел old-n3 занимает node_id 2 (который у n3 в cluster)
+    let spec_id = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("old-n3", 2, "192.168.104.99", NodeKind::Replica),
+    ]);
+    let status_id = healthy_status(&spec_id);
+    let finalizers_id = vec![replica_finalizer("n1"), replica_finalizer("old-n3")];
+    let view_id = View {
+        spec: &spec_id,
+        status: Some(&status_id),
+        deleting: false,
+        finalizers: &finalizers_id,
+    };
+    assert_eq!(
+        next_add(&view_id, "n3", &cluster, &[]),
+        Err(ChangeError::NodeIdTaken {
+            node: "n3".to_string(),
+            node_id: 2,
+            holder: "old-n3".to_string(),
+        })
+    );
+
+    // Коллизия по address: узел old-n3 занимает адрес 192.168.104.3 (который у n3 в cluster)
+    let spec_addr = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("old-n3", 99, "192.168.104.3", NodeKind::Replica),
+    ]);
+    let status_addr = healthy_status(&spec_addr);
+    let finalizers_addr = vec![replica_finalizer("n1"), replica_finalizer("old-n3")];
+    let view_addr = View {
+        spec: &spec_addr,
+        status: Some(&status_addr),
+        deleting: false,
+        finalizers: &finalizers_addr,
+    };
+    assert_eq!(
+        next_add(&view_addr, "n3", &cluster, &[]),
+        Err(ChangeError::AddressTaken {
+            node: "n3".to_string(),
+            address: "192.168.104.3".to_string(),
+            holder: "old-n3".to_string(),
         })
     );
 }

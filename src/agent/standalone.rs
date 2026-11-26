@@ -6,7 +6,7 @@
 //! flag `manual_check_needed` is set. The flag automatically resets when all connections
 //! become `Connected`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::drbd::adm::Drbd;
@@ -29,6 +29,7 @@ struct VolumeState {
     attempts_made: usize,
     last_attempt_at: Option<Instant>,
     manual_check_needed: bool,
+    standalone_peers: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -55,13 +56,22 @@ impl StandaloneTracker {
             .any(|c| c.connection_state == ConnectionState::StandAlone);
 
         if !has_standalone {
-            // Auto-reset when all connections become Connected (R35)
-            if !res.connections.is_empty()
-                && res
-                    .connections
-                    .iter()
-                    .all(|c| c.connection_state == ConnectionState::Connected)
-            {
+            // Auto-reset when all affected peers become Connected (or all connections are Connected) (R35)
+            let should_reset = self.states.get(&res.name).is_some_and(|state| {
+                let affected_connected = !state.standalone_peers.is_empty()
+                    && state.standalone_peers.iter().all(|peer| {
+                        res.connections
+                            .iter()
+                            .any(|c| c.name == *peer && c.connection_state == ConnectionState::Connected)
+                    });
+                let all_connected = !res.connections.is_empty()
+                    && res
+                        .connections
+                        .iter()
+                        .all(|c| c.connection_state == ConnectionState::Connected);
+                affected_connected || all_connected
+            });
+            if should_reset {
                 self.states.remove(&res.name);
             }
             return StandaloneAction::None;
@@ -73,6 +83,11 @@ impl StandaloneTracker {
         }
 
         let state = self.states.entry(res.name.clone()).or_default();
+        for conn in &res.connections {
+            if conn.connection_state == ConnectionState::StandAlone {
+                state.standalone_peers.insert(conn.name.clone());
+            }
+        }
         if state.manual_check_needed {
             return StandaloneAction::ManualCheckNeeded;
         }

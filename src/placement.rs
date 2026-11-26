@@ -37,6 +37,7 @@ pub struct Existing {
     pub port: u16,
     pub replica_nodes: Vec<String>,
     pub size_bytes: u64,
+    pub max_peers: u32,
 }
 
 pub fn existing_of(object: &ReplicatedVolume) -> Existing {
@@ -51,6 +52,7 @@ pub fn existing_of(object: &ReplicatedVolume) -> Existing {
             .map(|n| n.name.clone())
             .collect(),
         size_bytes: object.spec.size_bytes,
+        max_peers: object.spec.max_peers,
     }
 }
 
@@ -178,11 +180,9 @@ fn budgets_by<'a>(
 pub fn free_budgets_aligned<'a>(
     nodes: &'a ClusterNodes,
     existing: &[Existing],
-    default_max_peers: u32,
+    _default_max_peers: u32,
 ) -> HashMap<&'a str, u64> {
-    budgets_by(nodes, existing, |v| {
-        lvm_allocated_bytes(v.size_bytes, default_max_peers)
-    })
+    budgets_by(nodes, existing, |v| lvm_allocated_bytes(v.size_bytes, v.max_peers))
 }
 
 /// Free budget of every node: capacity minus the sizes of the volumes that

@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use crate::config::ClusterNodes;
+use crate::config::{ClusterNode, ClusterNodes};
 use crate::crd::{MemberNode, NodeKind, ReplicatedVolumeSpec, ReplicatedVolumeStatus};
 use crate::membership::replica_finalizer;
 use crate::model::InitialSync;
@@ -85,6 +85,14 @@ pub enum ChangeError {
     NoCapacity { node: String, needed: u64, free: u64 },
     #[error("source and destination nodes must be different")]
     SameNode,
+    #[error("nodeId {node_id} for {node:?} is already used by member {holder:?}")]
+    NodeIdTaken { node: String, node_id: u32, holder: String },
+    #[error("address {address:?} for {node:?} is already used by member {holder:?}")]
+    AddressTaken {
+        node: String,
+        address: String,
+        holder: String,
+    },
 }
 
 /// N in witness rules is the count of Replica nodes, excluding Retiring (R31).
@@ -217,6 +225,27 @@ fn check_capacity(node: &str, view: &View, cluster: &ClusterNodes, existing: &[E
     Ok(())
 }
 
+fn check_member_collision(nodes: &[MemberNode], name: &str, cnode: &ClusterNode) -> Result<(), ChangeError> {
+    if let Some(other) = nodes.iter().find(|n| n.name != name && n.node_id == cnode.node_id) {
+        return Err(ChangeError::NodeIdTaken {
+            node: name.to_string(),
+            node_id: cnode.node_id,
+            holder: other.name.clone(),
+        });
+    }
+    if let Some(other) = nodes
+        .iter()
+        .find(|n| n.name != name && crate::membership::same_address(&n.address, cnode.address))
+    {
+        return Err(ChangeError::AddressTaken {
+            node: name.to_string(),
+            address: cnode.address.to_string(),
+            holder: other.name.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// R27: Remove witness. If the witness is Primary in status, convert it to Client.
 fn remove_witness(nodes: &mut Vec<MemberNode>, status: Option<&ReplicatedVolumeStatus>) {
     let Some(pos) = nodes.iter().position(|n| n.kind == NodeKind::Witness) else {
@@ -254,6 +283,14 @@ fn assign_witness(
     for extra in extra_exclude {
         if !exclude.iter().any(|e| e == extra) {
             exclude.push(extra.to_string());
+        }
+    }
+    for cnode in cluster.iter() {
+        if !nodes.iter().any(|n| n.name == cnode.name)
+            && check_member_collision(nodes, &cnode.name, cnode).is_err()
+            && !exclude.iter().any(|e| e == &cnode.name)
+        {
+            exclude.push(cnode.name.clone());
         }
     }
     let clients_ref: Vec<&str> = clients.iter().map(|s| s.as_str()).collect();
@@ -332,13 +369,17 @@ pub fn next_add(view: &View, node: &str, cluster: &ClusterNodes, existing: &[Exi
         return Err(ChangeError::NoRoom);
     }
 
+    let cnode = cluster.get(node).unwrap();
+    if existing_member.is_none() {
+        check_member_collision(&view.spec.nodes, node, cnode)?;
+    }
+
     let mut new_nodes = view.spec.nodes.clone();
     let was_witness = existing_member.is_some_and(|m| m.kind == NodeKind::Witness);
 
     if let Some(m) = new_nodes.iter_mut().find(|n| n.name == node) {
         m.kind = NodeKind::Replica;
     } else {
-        let cnode = cluster.get(node).unwrap();
         new_nodes.push(MemberNode {
             name: node.to_string(),
             node_id: cnode.node_id,
@@ -579,13 +620,17 @@ pub fn next_move(
             return Err(ChangeError::NoRoom);
         }
 
+        let cnode = cluster.get(to).unwrap();
+        if to_member.is_none() {
+            check_member_collision(&view.spec.nodes, to, cnode)?;
+        }
+
         let mut new_nodes = view.spec.nodes.clone();
         let to_was_witness = to_member.is_some_and(|m| m.kind == NodeKind::Witness);
 
         if let Some(m) = new_nodes.iter_mut().find(|n| n.name == to) {
             m.kind = NodeKind::Replica;
         } else {
-            let cnode = cluster.get(to).unwrap();
             new_nodes.push(MemberNode {
                 name: to.to_string(),
                 node_id: cnode.node_id,
@@ -627,7 +672,7 @@ pub fn next_move(
     // `to` is UpToDate! Now retire `from`
     if let Some(m) = from_in_nodes {
         if m.kind == NodeKind::Replica {
-            check_r25(view, cluster, None)?;
+            check_r25(view, cluster, Some(from))?;
             if let Some(st) = view.status.and_then(|s| s.nodes.iter().find(|n| n.name == from))
                 && st.role == "Primary"
             {

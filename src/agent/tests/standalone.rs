@@ -176,3 +176,35 @@ fn retain_volumes_drops_vanished_entries() {
         StandaloneAction::RunAdjust { attempt: 1 }
     );
 }
+
+#[test]
+fn standalone_resets_when_standalone_peer_reconnects_even_if_third_peer_is_connecting() {
+    let mut tracker = StandaloneTracker::new(2, Duration::from_secs(5));
+    let mut t = Instant::now();
+
+    // peer2 в StandAlone, peer3 в Connecting
+    let res_sa = resource(
+        "v1",
+        Role::Secondary,
+        &[ConnectionState::StandAlone, ConnectionState::Connecting],
+    );
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::RunAdjust { attempt: 1 });
+    t += Duration::from_secs(5);
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::RunAdjust { attempt: 2 });
+    t += Duration::from_secs(5);
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::ManualCheckNeeded);
+    assert!(tracker.is_manual_check_needed("v1"));
+
+    // peer2 восстановился (Connected), а peer3 всё ещё Connecting (третий узел выключен)
+    let res_reconnected = resource(
+        "v1",
+        Role::Secondary,
+        &[ConnectionState::Connected, ConnectionState::Connecting],
+    );
+    assert_eq!(tracker.check(&res_reconnected, t), StandaloneAction::None);
+    assert!(!tracker.is_manual_check_needed("v1"));
+
+    // Если peer2 снова уйдёт в StandAlone, счётчик начинается с 1
+    t += Duration::from_secs(5);
+    assert_eq!(tracker.check(&res_sa, t), StandaloneAction::RunAdjust { attempt: 1 });
+}
