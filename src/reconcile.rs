@@ -372,11 +372,27 @@ impl<'a> Reconciler<'a> {
     /// Validates the description, locks the volume, observes the node,
     /// executes the plan and returns what was done.
     pub fn apply(&self, spec: &VolumeSpec, node_name: &str) -> Result<Vec<Action>, ReconcileError> {
+        self.apply_with_status(spec, node_name).map(|(actions, _)| actions)
+    }
+
+    /// Validates the description, locks the volume, observes the node,
+    /// executes the plan and returns the applied actions together with the
+    /// latest observed DRBD status (re-reading it only when actions were executed
+    /// on the last round).
+    pub fn apply_with_status(
+        &self,
+        spec: &VolumeSpec,
+        node_name: &str,
+    ) -> Result<(Vec<Action>, Option<ResourceStatus>), ReconcileError> {
         spec.validate()?;
         let _lock = self.lock_volume(&spec.name)?;
         let mut done = Vec::new();
+        let mut last_status = None;
+        let mut status_dirty = true;
         for _ in 0..MAX_ROUNDS {
             let obs = self.observe(spec, node_name)?;
+            last_status = obs.status.clone();
+            status_dirty = false;
             let actions = plan(spec, node_name, &obs)?;
             if actions.is_empty() {
                 break;
@@ -385,13 +401,25 @@ impl<'a> Reconciler<'a> {
             for action in &actions {
                 self.execute(spec, node_name, action, &mut loop_device)?;
             }
+            status_dirty = true;
             let skipped = actions.contains(&Action::SkipInitialSync);
             done.extend(actions);
             if skipped {
                 break;
             }
         }
-        Ok(done)
+        if status_dirty {
+            last_status = Drbd { runner: self.runner }.status(&spec.name)?;
+        }
+        Ok((done, last_status))
+    }
+
+    /// Checks LVM backing existence via device node stat first, falling back to `lvs` only when absent.
+    fn lvm_backing_exists(&self, vg: &str, volume: &str, dev_path: &Path) -> Result<bool, ReconcileError> {
+        if exists(dev_path)? {
+            return Ok(true);
+        }
+        Ok(backing::find_lvm_volume(self.runner, vg, volume)?)
     }
 
     pub fn observe(&self, spec: &VolumeSpec, node_name: &str) -> Result<Observed, ReconcileError> {
@@ -399,7 +427,10 @@ impl<'a> Reconciler<'a> {
         let diskful = spec.node(node_name).is_some_and(|n| n.diskful);
         let image = self.paths.image(volume);
         let backing_exists = match &self.volume_group {
-            Some(vg) => backing::find_lvm_volume(self.runner, vg, volume)?,
+            Some(vg) => {
+                let dev_path = backing::lvm_device_path(vg, volume);
+                self.lvm_backing_exists(vg, volume, Path::new(&dev_path))?
+            }
             None => exists(&image)?,
         };
         let ready = exists(&self.paths.ready_marker(volume))?;

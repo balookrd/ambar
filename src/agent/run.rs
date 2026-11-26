@@ -934,11 +934,11 @@ impl Agent {
                     runner,
                     volume_group: vg,
                 }
-                .apply(&spec, &node)
+                .apply_with_status(&spec, &node)
             })
             .await?;
-        let actions = match applied {
-            Ok(actions) => actions,
+        let (actions, status) = match applied {
+            Ok(res) => res,
             // Another ambar process (the CLI) holds the volume: try again soon.
             Err(ReconcileError::Busy { .. }) => return Ok(Outcome::Progress),
             Err(error) => {
@@ -949,13 +949,6 @@ impl Agent {
                 {
                     log_error(volume, &error);
                 }
-                return Err(Self::reconcile_error(volume, error));
-            }
-        };
-        let status = match self.read_status(volume).await {
-            Ok(status) => status,
-            Err(error) => {
-                self.report_message(volume, object, &error.to_string()).await.ok();
                 return Err(Self::reconcile_error(volume, error));
             }
         };

@@ -4253,3 +4253,19 @@ async fn serve_skips_locked_volume_and_reconciles_others_without_marking_ready_e
     shutdown.cancel();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn settled_volume_calls_drbdsetup_status_only_once_per_pass() {
+    let (e, _) = configured_env(DV1, kernel_json(DV1, |_| {}), true);
+    e.volumes.put(spike("Done"));
+    e.agent.reconcile_one(VOLUME).await.unwrap();
+    let before = e.runner.calls().len();
+    let outcome = e.agent.reconcile_one(VOLUME).await.unwrap();
+    assert_eq!(outcome, Outcome::Settled);
+    let after = e.runner.calls();
+    let drbdsetup_calls = after[before..]
+        .iter()
+        .filter(|c| c.starts_with("drbdsetup status"))
+        .count();
+    assert_eq!(drbdsetup_calls, 1, "calls in settled pass: {:?}", &after[before..]);
+}

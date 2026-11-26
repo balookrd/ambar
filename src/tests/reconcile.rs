@@ -2315,3 +2315,34 @@ fn lvm_apply_creates_lv_and_remove_deletes_it() {
     assert!(!paths.ready_marker("spike").exists());
     assert!(!paths.res_file("spike").exists());
 }
+
+#[test]
+fn observe_with_volume_group_uses_device_stat_fast_path_when_present() {
+    let tmp = TempDir::new().unwrap();
+    let paths = temp_paths(&tmp);
+    let vg_dir = tmp.path().join("dev/k3s-vg");
+    fs::create_dir_all(&vg_dir).unwrap();
+    let fake_dev = vg_dir.join("spike");
+    fs::write(&fake_dev, "").unwrap();
+    let spec = spec();
+    // Когда файл устройства уже существует на диске, fast-path возвращает true без вызова `lvs`
+    let no_lvs_runner = FakeRunner::new(|prog, _| panic!("unexpected call: {prog}"));
+    let fast_rec = Reconciler::with_volume_group(&paths, &no_lvs_runner, Some("k3s-vg".into()));
+    assert!(fast_rec.lvm_backing_exists("k3s-vg", "spike", &fake_dev).unwrap());
+    assert!(no_lvs_runner.calls().is_empty());
+
+    // Когда LV не существует на диске (/dev/k3s-vg/spike отсутствует), вызывается fallback `lvs`
+    let runner = FakeRunner::new(|prog, _| match prog {
+        "lvs" => out(5, "", "  Failed to find logical volume \"k3s-vg/spike\"\n"),
+        "drbdsetup" => out(0, "[]\n", ""),
+        other => panic!("unexpected call: {other}"),
+    });
+    let rec = Reconciler::with_volume_group(&paths, &runner, Some("k3s-vg".into()));
+    let obs = rec.observe(&spec, "lima-dv-1").unwrap();
+    assert_eq!(obs.file, FileState::Absent);
+    assert!(
+        runner.calls().iter().any(|c| c.starts_with("lvs ")),
+        "expected lvs fallback when device node is absent, got: {:?}",
+        runner.calls()
+    );
+}
