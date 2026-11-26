@@ -141,7 +141,8 @@ pub fn round_up_size(required_bytes: i64) -> Result<u64, ParamError> {
     Ok(rounded)
 }
 
-/// Standard LVM Physical Extent (PE) size: 4 MiB.
+/// Standard LVM Physical Extent (PE) size: 4 MiB (`vgcreate -s 4m`, LVM2 default).
+/// Node capacity accounting assumes the backing Volume Group uses 4 MiB extents.
 pub const LVM_PE_SIZE: u64 = 4 * 1024 * 1024;
 
 /// Calculates the actual storage capacity occupied by a replicated volume copy
@@ -151,18 +152,17 @@ pub fn lvm_allocated_bytes(size_bytes: u64, max_peers: u32) -> u64 {
     raw.div_ceil(LVM_PE_SIZE) * LVM_PE_SIZE
 }
 
-/// Free budget of every node taking into account LVM PE alignment and DRBD metadata overhead.
-pub fn free_budgets_aligned<'a>(
+fn budgets_by<'a>(
     nodes: &'a ClusterNodes,
     existing: &[Existing],
-    default_max_peers: u32,
+    size_of: impl Fn(&Existing) -> u64,
 ) -> HashMap<&'a str, u64> {
     let mut used: HashMap<&str, u64> = HashMap::new();
     for volume in existing {
-        let allocated = lvm_allocated_bytes(volume.size_bytes, default_max_peers);
+        let bytes = size_of(volume);
         for name in &volume.replica_nodes {
             let slot = used.entry(name.as_str()).or_insert(0);
-            *slot = slot.saturating_add(allocated);
+            *slot = slot.saturating_add(bytes);
         }
     }
     nodes
@@ -174,23 +174,21 @@ pub fn free_budgets_aligned<'a>(
         .collect()
 }
 
+/// Free budget of every node taking into account LVM PE alignment and DRBD metadata overhead.
+pub fn free_budgets_aligned<'a>(
+    nodes: &'a ClusterNodes,
+    existing: &[Existing],
+    default_max_peers: u32,
+) -> HashMap<&'a str, u64> {
+    budgets_by(nodes, existing, |v| {
+        lvm_allocated_bytes(v.size_bytes, default_max_peers)
+    })
+}
+
 /// Free budget of every node: capacity minus the sizes of the volumes that
 /// keep a copy on it, saturating at zero.
 pub fn free_budgets<'a>(nodes: &'a ClusterNodes, existing: &[Existing]) -> HashMap<&'a str, u64> {
-    let mut used: HashMap<&str, u64> = HashMap::new();
-    for volume in existing {
-        for name in &volume.replica_nodes {
-            let slot = used.entry(name.as_str()).or_insert(0);
-            *slot = slot.saturating_add(volume.size_bytes);
-        }
-    }
-    nodes
-        .iter()
-        .map(|n| {
-            let taken = used.get(n.name.as_str()).copied().unwrap_or(0);
-            (n.name.as_str(), n.capacity_bytes.saturating_sub(taken))
-        })
-        .collect()
+    budgets_by(nodes, existing, |v| v.size_bytes)
 }
 
 /// Smallest `i` such that neither minor `FIRST_MINOR + i` nor port

@@ -177,6 +177,8 @@ fn run_agent(
     paths: Paths,
     options: cli::AgentOptions,
 ) -> Result<()> {
+    #[cfg(all(unix, feature = "jemalloc"))]
+    log_allocator_page_size();
     let hostname = read_trimmed(Path::new("/proc/sys/kernel/hostname"))?;
     preflight(node, &hostname, &paths, options.volume_group.as_deref())?;
     let runner = Arc::new(SystemRunner::default());
@@ -216,8 +218,6 @@ fn run_agent(
             node: NodeService::new(agent.clone(), nodes),
         };
         eprintln!("ambar-agent: node {node} started");
-        #[cfg(all(unix, feature = "jemalloc"))]
-        log_allocator_page_size();
         // Either side ending (an error, or the signal) stops the other one.
         let metrics_addr = options.metrics_addr.clone();
         let (agent_result, csi_result, metrics_result) = tokio::join!(

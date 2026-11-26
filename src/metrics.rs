@@ -34,26 +34,36 @@ fn escape_label(val: &str) -> String {
 }
 
 /// Thread-safe storage for the latest rendered metrics exposition text.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct MetricsHolder {
-    rendered: std::sync::Arc<std::sync::RwLock<String>>,
+    rendered: std::sync::Arc<std::sync::RwLock<std::sync::Arc<str>>>,
+}
+
+impl Default for MetricsHolder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MetricsHolder {
     pub fn new() -> Self {
         Self {
-            rendered: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
+            rendered: std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::from(""))),
         }
     }
 
     pub fn update(&self, text: String) {
-        if let Ok(mut lock) = self.rendered.write() {
-            *lock = text;
-        }
+        let mut lock = self.rendered.write().unwrap_or_else(|e| e.into_inner());
+        *lock = std::sync::Arc::from(text);
     }
 
-    pub fn get(&self) -> String {
-        self.rendered.read().map(|g| g.clone()).unwrap_or_default()
+    pub fn get(&self) -> std::sync::Arc<str> {
+        self.rendered.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_guard_for_test(&self) -> std::sync::RwLockWriteGuard<'_, std::sync::Arc<str>> {
+        self.rendered.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 

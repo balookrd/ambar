@@ -15,7 +15,7 @@ pub const MAX_CONCURRENT_METRICS_CONNECTIONS: usize = 32;
 /// Serves Prometheus metrics on the given address until `shutdown` is triggered.
 pub async fn run_metrics_server(
     addr: &str,
-    provider: Arc<dyn Fn() -> String + Send + Sync>,
+    provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -24,7 +24,7 @@ pub async fn run_metrics_server(
 
 pub(crate) async fn serve_listener(
     listener: TcpListener,
-    provider: Arc<dyn Fn() -> String + Send + Sync>,
+    provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
     serve_listener_with_limit(listener, provider, shutdown, MAX_CONCURRENT_METRICS_CONNECTIONS).await
@@ -32,7 +32,7 @@ pub(crate) async fn serve_listener(
 
 pub(crate) async fn serve_listener_with_limit(
     listener: TcpListener,
-    provider: Arc<dyn Fn() -> String + Send + Sync>,
+    provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
     shutdown: CancellationToken,
     concurrency_limit: usize,
 ) -> io::Result<()> {
@@ -73,7 +73,7 @@ pub(crate) async fn serve_listener_with_limit(
     Ok(())
 }
 
-async fn handle_connection(mut stream: TcpStream, provider: Arc<dyn Fn() -> String + Send + Sync>) -> io::Result<()> {
+async fn handle_connection(mut stream: TcpStream, provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>) -> io::Result<()> {
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf).await?;
     if n == 0 {

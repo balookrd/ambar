@@ -37,7 +37,7 @@ single Rust binary running as a DaemonSet.
   nodes that hold a copy.
 - One node mounts a volume at a time (`ReadWriteOnce`, `ReadWriteOncePod`).
 - Volume data can be backed by:
-  - **LVM Logical Volumes** (`--volume-group=k3s-vg`, recommended for bare-metal): DRBD communicates directly with block devices (`/dev/k3s-vg/pvc-<UUID>`), bypassing loopback devices and ext4/JBD2 double-journaling overhead.
+  - **LVM Logical Volumes** (`--volume-group=k3s-vg`, recommended for bare-metal): DRBD communicates directly with block devices (`/dev/k3s-vg/pvc-<UUID>`), bypassing loopback devices and ext4/JBD2 double-journaling overhead. Requires a standard 4 MiB LVM Physical Extent size (`PE = 4 MiB`, the `vgcreate` default) for capacity accounting.
   - **Sparse files** (`--volumes-dir=/var/lib/ambar/volumes`, legacy/dev stand): attached via loop devices with direct I/O, requiring no disk repartitioning.
 - The DRBD module is built ahead of time for an exact kernel version and
   shipped in the image; nodes need no compiler.

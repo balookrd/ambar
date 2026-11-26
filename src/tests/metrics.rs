@@ -1,5 +1,5 @@
 use crate::drbd::status::{Connection, ConnectionState, Device, DiskState, PeerDevice, ResourceStatus, Role};
-use crate::metrics::{NodeMetricData, VolumeMetricData, render_metrics};
+use crate::metrics::{MetricsHolder, NodeMetricData, VolumeMetricData, render_metrics};
 
 fn sample_device(open: bool, quorum: bool, disk_state: DiskState) -> Device {
     Device {
@@ -141,13 +141,13 @@ fn render_metrics_with_standalone_and_split_brain() {
 #[test]
 fn metrics_holder_stores_and_updates() {
     let holder = crate::metrics::MetricsHolder::new();
-    assert_eq!(holder.get(), "");
+    assert_eq!(&*holder.get(), "");
 
     holder.update("metric_1 10\n".to_string());
-    assert_eq!(holder.get(), "metric_1 10\n");
+    assert_eq!(&*holder.get(), "metric_1 10\n");
 
     holder.update("metric_1 20\n".to_string());
-    assert_eq!(holder.get(), "metric_1 20\n");
+    assert_eq!(&*holder.get(), "metric_1 20\n");
 }
 
 #[test]
@@ -163,4 +163,22 @@ fn render_metrics_escapes_special_characters() {
 
     assert!(output.contains("ambar_module_info{version=\"9.3\\\"test\"} 1"));
     assert!(output.contains("ambar_node_allocated_bytes{node=\"node\\\"with\\\\quotes\"} 0"));
+}
+
+#[test]
+fn metrics_holder_shares_arc_and_recovers_from_poisoned_lock() {
+    let holder = MetricsHolder::new();
+    holder.update("ambar_node_tainted{node=\"n1\"} 0\n".to_string());
+    let first = holder.get();
+    let second = holder.get();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+
+    let poisoned = holder.clone();
+    let _ = std::panic::catch_unwind(move || {
+        let _guard = poisoned.write_guard_for_test();
+        panic!("boom");
+    });
+    assert_eq!(&*holder.get(), "ambar_node_tainted{node=\"n1\"} 0\n");
+    holder.update("updated\n".to_string());
+    assert_eq!(&*holder.get(), "updated\n");
 }
