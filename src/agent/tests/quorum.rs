@@ -238,3 +238,25 @@ async fn check_volume_quorum_retries_eviction_after_api_failure() {
     let res2 = check_volume_quorum(&mut tracker, &fake, check2).await.unwrap();
     assert_eq!(res2, Some(vec!["test-pod".to_string()]));
 }
+
+#[test]
+fn retain_volumes_drops_vanished_entries() {
+    let mut tracker = QuorumTracker::new(Duration::from_secs(30));
+    let t0 = Instant::now();
+    tracker.update("v1", true, false, t0);
+    tracker.update("v2", true, false, t0);
+
+    let active: std::collections::HashSet<&str> = ["v1"].into_iter().collect();
+    tracker.retain_volumes(&active);
+
+    // v1 остаётся: через 30с срабатывает EvictPods
+    assert_eq!(
+        tracker.update("v1", true, false, t0 + Duration::from_secs(30)),
+        QuorumAction::EvictPods
+    );
+    // v2 удалён: отсчёт начинается заново с WithinGracePeriod(ZERO)
+    assert_eq!(
+        tracker.update("v2", true, false, t0 + Duration::from_secs(30)),
+        QuorumAction::WithinGracePeriod(Duration::ZERO)
+    );
+}

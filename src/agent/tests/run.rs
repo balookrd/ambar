@@ -3451,11 +3451,18 @@ async fn tick_failures_taints_and_untaints_node_based_on_mounted_volume_quorum()
     let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
     let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
     let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
     let now = std::time::Instant::now();
 
     // 1. Quorum lost on mounted volume -> node is tainted
     e.agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, now)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            now,
+        )
         .await
         .unwrap();
 
@@ -3488,7 +3495,13 @@ async fn tick_failures_taints_and_untaints_node_based_on_mounted_volume_quorum()
     });
 
     e.agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, now)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            now,
+        )
         .await
         .unwrap();
 
@@ -3528,11 +3541,18 @@ async fn tick_failures_fails_closed_when_read_all_statuses_fails() {
     let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
     let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
     let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
     let now = std::time::Instant::now();
 
     // 1. Quorum lost -> node is tainted
     e.agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, now)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            now,
+        )
         .await
         .unwrap();
     assert!(e.agent.is_tainted.load(Ordering::SeqCst));
@@ -3542,7 +3562,13 @@ async fn tick_failures_fails_closed_when_read_all_statuses_fails() {
 
     let res = e
         .agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, now)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            now,
+        )
         .await;
     // Must return Err (fail-closed)
     assert!(res.is_err());
@@ -3579,6 +3605,7 @@ async fn tick_failures_evicts_pods_after_grace_period() {
     let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
     let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
     let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
     let t0 = std::time::Instant::now();
 
     let pod = k8s_openapi::api::core::v1::Pod {
@@ -3602,7 +3629,13 @@ async fn tick_failures_evicts_pods_after_grace_period() {
 
     // Initial check (t0): grace period started, pod is not evicted yet
     e.agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, t0)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            t0,
+        )
         .await
         .unwrap();
     assert_eq!(e.volumes.pods.lock().unwrap().len(), 1);
@@ -3613,6 +3646,7 @@ async fn tick_failures_evicts_pods_after_grace_period() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(10),
         )
         .await
@@ -3625,6 +3659,7 @@ async fn tick_failures_evicts_pods_after_grace_period() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(31),
         )
         .await
@@ -3645,11 +3680,18 @@ async fn tick_failures_auto_adjusts_standalone_and_sets_split_brain_metric() {
     let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
     let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
     let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
     let t0 = std::time::Instant::now();
 
     // 1st attempt
     e.agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, t0)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            t0,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -3669,6 +3711,7 @@ async fn tick_failures_auto_adjusts_standalone_and_sets_split_brain_metric() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(5),
         )
         .await
@@ -3687,6 +3730,7 @@ async fn tick_failures_auto_adjusts_standalone_and_sets_split_brain_metric() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(10),
         )
         .await
@@ -3699,6 +3743,7 @@ async fn tick_failures_auto_adjusts_standalone_and_sets_split_brain_metric() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(15),
         )
         .await
@@ -3721,6 +3766,7 @@ async fn tick_failures_auto_adjusts_standalone_and_sets_split_brain_metric() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(20),
         )
         .await
@@ -3749,10 +3795,17 @@ async fn tick_failures_cleans_up_stale_client() {
     let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
     let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
     let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
     let now = std::time::Instant::now();
 
     e.agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, now)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            now,
+        )
         .await
         .unwrap();
 
@@ -3787,11 +3840,13 @@ async fn agent_serve_metrics_listener_serves_http() {
     let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
     let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
     let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
     e.agent
         .tick_failures(
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             std::time::Instant::now(),
         )
         .await
@@ -3835,11 +3890,18 @@ async fn tick_failures_throttles_node_taint_checks_and_retries_on_error() {
     let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
     let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
     let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
     let t0 = std::time::Instant::now();
 
     // 1. Initial tick reconciles once.
     e.agent
-        .tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, t0)
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            t0,
+        )
         .await
         .unwrap();
     assert_eq!(e.volumes.taint_checks.load(Ordering::SeqCst), 1);
@@ -3851,6 +3913,7 @@ async fn tick_failures_throttles_node_taint_checks_and_retries_on_error() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(30),
         )
         .await
@@ -3863,6 +3926,7 @@ async fn tick_failures_throttles_node_taint_checks_and_retries_on_error() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(60),
         )
         .await
@@ -3880,6 +3944,7 @@ async fn tick_failures_throttles_node_taint_checks_and_retries_on_error() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(61),
         )
         .await
@@ -3899,6 +3964,7 @@ async fn tick_failures_throttles_node_taint_checks_and_retries_on_error() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(62),
         )
         .await
@@ -3912,10 +3978,106 @@ async fn tick_failures_throttles_node_taint_checks_and_retries_on_error() {
             &mut quorum_tracker,
             &mut standalone_tracker,
             &mut taint_tracker,
+            &mut cleanup_tracker,
             t0 + Duration::from_secs(63),
         )
         .await
         .unwrap();
     assert_eq!(e.volumes.taint_checks.load(Ordering::SeqCst), 5);
     assert!(!e.agent.is_tainted.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn tick_failures_forgets_vanished_volumes_and_stays_fail_closed_on_drbd_error() {
+    let (e, status) = configured_env(
+        DV1,
+        kernel_json(DV1, |s| {
+            s["role"] = json!("Secondary");
+            s["devices"][0]["open"] = json!(true);
+            s["devices"][0]["quorum"] = json!(false);
+            s["connections"][0]["connection-state"] = json!("StandAlone");
+        }),
+        true,
+    );
+    let mut quorum_tracker = crate::agent::quorum::QuorumTracker::new(Duration::from_secs(30));
+    let mut standalone_tracker = crate::agent::standalone::StandaloneTracker::new(3, Duration::from_secs(5));
+    let mut taint_tracker = crate::agent::taint::TaintTracker::new(Duration::from_secs(60));
+    let mut cleanup_tracker = crate::agent::cleanup::CleanupTracker::new(Duration::from_secs(30));
+    let t0 = std::time::Instant::now();
+
+    // 1. Первый тик: том spike в StandAlone и без кворума (open=true) -> node tainted, attempt 1
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            t0,
+        )
+        .await
+        .unwrap();
+    assert!(e.agent.is_tainted.load(Ordering::SeqCst));
+    assert_eq!(
+        commands(&e.runner, &["drbdadm adjust spike"]),
+        vec!["drbdadm adjust spike"]
+    );
+
+    // 2. Ошибка drbdsetup -> tick_failures возвращает Err (fail-closed), трекеры и taint сохранены
+    let saved_json = status.lock().unwrap().clone();
+    *status.lock().unwrap() = "invalid json".to_string();
+    let err = e
+        .agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            t0 + Duration::from_secs(5),
+        )
+        .await;
+    assert!(err.is_err());
+    assert!(e.agent.is_tainted.load(Ordering::SeqCst));
+
+    // Восстанавливаем статус: том spike не был забыт во время ошибки drbdsetup, поэтому следующий adjust — attempt 2
+    *status.lock().unwrap() = saved_json;
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            t0 + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commands(&e.runner, &["drbdadm adjust spike"]).len(), 2);
+
+    // 3. Том spike исчезает из statuses -> трекеры очищаются
+    *status.lock().unwrap() = EMPTY_KERNEL.to_string();
+    e.agent
+        .tick_failures(
+            &mut quorum_tracker,
+            &mut standalone_tracker,
+            &mut taint_tracker,
+            &mut cleanup_tracker,
+            t0 + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert!(!e.agent.is_tainted.load(Ordering::SeqCst));
+
+    // Проверяем, что QuorumTracker и StandaloneTracker действительно забыли spike:
+    assert_eq!(
+        quorum_tracker.update(VOLUME, true, false, t0 + Duration::from_secs(35)),
+        crate::agent::quorum::QuorumAction::WithinGracePeriod(Duration::ZERO)
+    );
+    let parsed: Vec<crate::drbd::status::ResourceStatus> = serde_json::from_str(&kernel_json(DV1, |s| {
+        s["role"] = json!("Secondary");
+        s["connections"][0]["connection-state"] = json!("StandAlone");
+    }))
+    .unwrap();
+    assert_eq!(
+        standalone_tracker.check(&parsed[0], t0 + Duration::from_secs(15)),
+        crate::agent::standalone::StandaloneAction::RunAdjust { attempt: 1 }
+    );
 }

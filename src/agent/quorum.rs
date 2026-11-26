@@ -67,6 +67,11 @@ impl QuorumTracker {
         self.lost_at.remove(volume);
     }
 
+    /// Removes tracked volumes that are no longer present in `active`.
+    pub fn retain_volumes(&mut self, active: &std::collections::HashSet<&str>) {
+        self.lost_at.retain(|name, _| active.contains(name.as_str()));
+    }
+
     /// Resets the `triggered` state so eviction will be retried on the next check.
     pub fn retry_eviction(&mut self, volume: &str) {
         if let Some((_, triggered)) = self.lost_at.get_mut(volume) {

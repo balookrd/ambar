@@ -103,6 +103,11 @@ impl StandaloneTracker {
     pub fn forget(&mut self, volume: &str) {
         self.states.remove(volume);
     }
+
+    /// Removes tracked volumes that are no longer present in `active`.
+    pub fn retain_volumes(&mut self, active: &std::collections::HashSet<&str>) {
+        self.states.retain(|name, _| active.contains(name.as_str()));
+    }
 }
 
 /// Executes auto-adjust if indicated by the tracker. Returns `true` if an adjust was performed.

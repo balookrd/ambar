@@ -151,3 +151,28 @@ fn handle_standalone_rejects_invalid_volume_name() {
     assert!(!adjusted);
     assert!(runner.calls().is_empty());
 }
+
+#[test]
+fn retain_volumes_drops_vanished_entries() {
+    let mut tracker = StandaloneTracker::new(3, Duration::from_secs(5));
+    let r1 = resource("v1", Role::Secondary, &[ConnectionState::StandAlone]);
+    let r2 = resource("v2", Role::Secondary, &[ConnectionState::StandAlone]);
+    let t0 = Instant::now();
+
+    assert_eq!(tracker.check(&r1, t0), StandaloneAction::RunAdjust { attempt: 1 });
+    assert_eq!(tracker.check(&r2, t0), StandaloneAction::RunAdjust { attempt: 1 });
+
+    let active: std::collections::HashSet<&str> = ["v1"].into_iter().collect();
+    tracker.retain_volumes(&active);
+
+    // v1 сохраняет счётчик попыток
+    assert_eq!(
+        tracker.check(&r1, t0 + Duration::from_secs(5)),
+        StandaloneAction::RunAdjust { attempt: 2 }
+    );
+    // v2 удалён и начинает с attempt: 1
+    assert_eq!(
+        tracker.check(&r2, t0 + Duration::from_secs(5)),
+        StandaloneAction::RunAdjust { attempt: 1 }
+    );
+}

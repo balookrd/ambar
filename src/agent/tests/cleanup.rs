@@ -147,3 +147,64 @@ async fn leave_client_noops_when_not_client() {
     let updated = fake.get("vol1").await.unwrap().unwrap();
     assert_eq!(updated.spec.nodes.len(), 2);
 }
+
+#[test]
+fn cleanup_tracker_debounces_within_interval() {
+    use std::time::{Duration, Instant};
+
+    let mut tracker = CleanupTracker::new(DEFAULT_CLEANUP_INTERVAL);
+    let t0 = Instant::now();
+    assert!(tracker.should_run(t0));
+    assert!(!tracker.should_run(t0 + Duration::from_secs(5)));
+    assert!(tracker.should_run(t0 + Duration::from_secs(30)));
+}
+
+#[tokio::test]
+async fn snapshot_busy_or_mounted_skips_status_and_pod_list() {
+    use std::sync::atomic::AtomicBool;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::tests::temp_paths(&tmp);
+    let runner = Arc::new(crate::tests::FakeRunner::new(|_, _| {
+        crate::tests::out(1, "", "drbdsetup must not be called")
+    }));
+    let volumes = Arc::new(FakeVolumes::default());
+    // Любой вызов has_node_pods_for_volume вернёт ошибку, если до него дойдёт.
+    volumes.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let agent = Agent {
+        node: "n2".to_string(),
+        paths,
+        runner: runner.clone(),
+        volumes,
+        locks: crate::agent::run::VolumeLocks::default(),
+        ready: Arc::new(AtomicBool::new(false)),
+        options: Default::default(),
+        metrics: Default::default(),
+        is_tainted: Arc::new(AtomicBool::new(false)),
+    };
+
+    let spec = spec_with_nodes(vec![
+        member("n1", 1, NodeKind::Replica),
+        member("n2", 2, NodeKind::Client),
+    ]);
+    let rv = ReplicatedVolume::new("vol1", spec);
+
+    // 1. В snapshot устройство open: true -> пропускаем без drbdsetup и has_node_pods_for_volume.
+    let busy_snapshot = res_status(Role::Secondary, true);
+    let res1 = check_and_cleanup_client_with_snapshot(&agent, "vol1", &rv, Some(&busy_snapshot), &[])
+        .await
+        .unwrap();
+    assert!(res1.is_none());
+    assert!(runner.calls().is_empty());
+
+    // 2. В snapshot не занято, но mounted_uids непуст -> пропускаем без drbdsetup и has_node_pods_for_volume.
+    let idle_snapshot = res_status(Role::Secondary, false);
+    let mounted = vec!["pod-uid-1".to_string()];
+    let res2 = check_and_cleanup_client_with_snapshot(&agent, "vol1", &rv, Some(&idle_snapshot), &mounted)
+        .await
+        .unwrap();
+    assert!(res2.is_none());
+    assert!(runner.calls().is_empty());
+}

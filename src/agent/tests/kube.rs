@@ -461,3 +461,24 @@ fn conflict_backoff_doubles_and_caps() {
     assert_eq!(conflict_backoff(5), Duration::from_millis(320));
     assert_eq!(conflict_backoff(100), Duration::from_millis(320));
 }
+
+#[test]
+fn mounted_pod_uids_by_volume_indexes_multiple_volumes_in_one_scan() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("pod-1/volumes/kubernetes.io~csi/vol-a")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("pod-1/volumes/kubernetes.io~csi/vol-b")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("pod-2/volumes/kubernetes.io~csi/vol-a")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("pod-2/volumes/kubernetes.io~csi/INVALID_NAME")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("pod-2/volumes/kubernetes.io~csi/all")).unwrap();
+
+    let mut index = mounted_pod_uids_by_volume(tmp.path());
+    for uids in index.values_mut() {
+        uids.sort();
+    }
+
+    let expected = std::collections::HashMap::from([
+        ("vol-a".to_string(), vec!["pod-1".to_string(), "pod-2".to_string()]),
+        ("vol-b".to_string(), vec!["pod-1".to_string()]),
+    ]);
+    assert_eq!(index, expected);
+}

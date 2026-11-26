@@ -5,11 +5,43 @@
 //! the agent safely tears down the DRBD resource (`drbdadm down`), removes its
 //! entry from `status.nodes`, and removes itself from `spec.nodes` via a JSON patch.
 
+use std::time::{Duration, Instant};
+
 use crate::agent::kube::{ApiError, EDIT_ATTEMPTS, Volumes, conflict_backoff, mounted_pod_uids_for_volume};
 use crate::agent::run::{Agent, AgentError, Outcome, uid_of};
 use crate::crd::{NodeKind, ReplicatedVolume, ReplicatedVolumeSpec};
 use crate::drbd::status::{ResourceStatus, Role};
 use crate::membership::{Leave, leave_as_client};
+
+/// Default interval between stale `Client` cleanup scans.
+pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Debounces periodic stale `Client` cleanup passes.
+#[derive(Debug)]
+pub struct CleanupTracker {
+    interval: Duration,
+    last_run: Option<Instant>,
+}
+
+impl CleanupTracker {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_run: None,
+        }
+    }
+
+    /// Returns `true` when at least `interval` has elapsed since the previous run (or on the first call).
+    pub fn should_run(&mut self, now: Instant) -> bool {
+        let due = self
+            .last_run
+            .is_none_or(|prev| now.saturating_duration_since(prev) >= self.interval);
+        if due {
+            self.last_run = Some(now);
+        }
+        due
+    }
+}
 
 /// Determines whether this node's `Client` entry should be cleaned up.
 ///
@@ -54,6 +86,21 @@ pub async fn check_and_cleanup_client(
     volume: &str,
     object: &ReplicatedVolume,
 ) -> Result<Option<Outcome>, AgentError> {
+    let mounted_uids = mounted_pod_uids_for_volume(std::path::Path::new("/var/lib/kubelet/pods"), volume);
+    check_and_cleanup_client_with_snapshot(agent, volume, object, None, &mounted_uids).await
+}
+
+/// Snapshot-aware stale `Client` cleanup: skips locking, `drbdsetup status`, and pod listing
+/// when the DRBD snapshot already shows the resource is busy or `mounted_uids` is non-empty.
+/// When those fast checks pass, acquires `agent.locks.lock(volume)` and re-reads fresh status
+/// before invoking `cleanup_stale_client` to prevent TOCTOU races.
+pub async fn check_and_cleanup_client_with_snapshot(
+    agent: &Agent,
+    volume: &str,
+    object: &ReplicatedVolume,
+    snapshot: Option<&ResourceStatus>,
+    mounted_uids: &[String],
+) -> Result<Option<Outcome>, AgentError> {
     if !crate::model::valid_volume_name(volume) {
         return Ok(None);
     }
@@ -64,6 +111,10 @@ pub async fn check_and_cleanup_client(
             .iter()
             .any(|n| n.name == agent.node && n.kind == NodeKind::Client);
     if !is_client {
+        return Ok(None);
+    }
+    let snapshot_busy = snapshot.is_some_and(|s| s.role == Role::Primary || s.devices.iter().any(|d| d.open));
+    if snapshot_busy || !mounted_uids.is_empty() {
         return Ok(None);
     }
     let _lock = agent.locks.lock(volume).await;
@@ -83,10 +134,9 @@ pub async fn check_and_cleanup_client(
     if is_busy {
         return Ok(None);
     }
-    let mounted_uids = mounted_pod_uids_for_volume(std::path::Path::new("/var/lib/kubelet/pods"), volume);
     let has_pods = agent
         .volumes
-        .has_node_pods_for_volume(&agent.node, volume, &mounted_uids)
+        .has_node_pods_for_volume(&agent.node, volume, mounted_uids)
         .await?;
     if should_cleanup_client(&agent.node, &object.spec, status.as_ref(), has_pods) {
         let outcome = agent.cleanup_stale_client(volume, object).await?;

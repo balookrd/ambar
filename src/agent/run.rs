@@ -146,13 +146,13 @@
 //! failing delays nothing else.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -174,9 +174,9 @@ use crate::reconcile::{FileState, ReconcileError, Reconciler, status_matches_spe
 use crate::cli::AgentOptions;
 use crate::metrics::{MetricsHolder, NodeMetricData, VolumeMetricData, render_metrics};
 
-use super::cleanup;
+use super::cleanup::{self, CleanupTracker, DEFAULT_CLEANUP_INTERVAL};
 use super::decide::{Local, ObjectView, Refusal, Task, decide};
-use super::kube::{ApiError, Volumes, mounted_pod_uids_for_volume};
+use super::kube::{ApiError, Volumes, mounted_pod_uids_by_volume};
 use super::local::{file_state, local, local_volumes, loops_holding, synced_marker_present};
 use super::quorum::{QuorumTracker, VolumeQuorumCheck, check_volume_quorum};
 use super::standalone::StandaloneTracker;
@@ -1608,6 +1608,7 @@ impl Agent {
         quorum_tracker: &mut QuorumTracker,
         standalone_tracker: &mut StandaloneTracker,
         taint_tracker: &mut TaintTracker,
+        cleanup_tracker: &mut CleanupTracker,
         now: std::time::Instant,
     ) -> Result<(), AgentError> {
         let statuses = match self.read_all_statuses().await {
@@ -1617,6 +1618,11 @@ impl Agent {
                 return Err(Self::reconcile_error("*", e));
             }
         };
+
+        let mounted_by_volume =
+            tokio::task::spawn_blocking(|| mounted_pod_uids_by_volume(Path::new("/var/lib/kubelet/pods")))
+                .await
+                .unwrap_or_default();
 
         // 1. Taint management (R32)
         let should_taint = crate::agent::taint::should_taint_node(&statuses);
@@ -1633,13 +1639,13 @@ impl Agent {
         for status in &statuses {
             let is_mounted = status.role == Role::Primary || status.devices.iter().any(|d| d.open);
             let has_quorum = status.quorum();
-            let mounted_uids = mounted_pod_uids_for_volume(Path::new("/var/lib/kubelet/pods"), &status.name);
+            let mounted_uids = mounted_by_volume.get(&status.name).map(Vec::as_slice).unwrap_or(&[]);
             let check = VolumeQuorumCheck {
                 volume: &status.name,
                 is_mounted,
                 has_quorum,
                 node: &self.node,
-                mounted_uids: &mounted_uids,
+                mounted_uids,
                 now,
             };
             if let Err(e) = check_volume_quorum(quorum_tracker, &*self.volumes, check).await {
@@ -1700,19 +1706,42 @@ impl Agent {
             }
         }
 
-        // 4. Stale Client cleanup without pods (R36)
-        if let Ok(objects) = self.volumes.list().await {
+        // Prune vanished volumes from in-memory trackers after successful status read.
+        let active_volumes: HashSet<&str> = statuses.iter().map(|s| s.name.as_str()).collect();
+        quorum_tracker.retain_volumes(&active_volumes);
+        standalone_tracker.retain_volumes(&active_volumes);
+
+        // 4. Stale Client cleanup without pods (R36), debounced via CleanupTracker
+        if cleanup_tracker.should_run(now)
+            && let Ok(objects) = self.volumes.list().await
+        {
+            let status_by_name: HashMap<&str, &ResourceStatus> =
+                statuses.iter().map(|s| (s.name.as_str(), s)).collect();
             for obj in &objects {
                 if let Some(ref name) = obj.metadata.name {
-                    let _ = cleanup::check_and_cleanup_client(self, name, obj).await;
+                    let snapshot = status_by_name.get(name.as_str()).copied();
+                    let mounted_uids = mounted_by_volume.get(name).map(Vec::as_slice).unwrap_or(&[]);
+                    let _ =
+                        cleanup::check_and_cleanup_client_with_snapshot(self, name, obj, snapshot, mounted_uids).await;
                 }
             }
         }
 
         // 5. Prometheus metrics update (R38)
-        let drbd_ver = std::fs::read_to_string(Path::new("/sys/module/drbd/version"))
+        static DRBD_VERSION: OnceLock<Option<String>> = OnceLock::new();
+        let drbd_ver: Option<&str> = if let Some(cached) = DRBD_VERSION.get() {
+            cached.as_deref()
+        } else {
+            let loaded = tokio::task::spawn_blocking(|| {
+                std::fs::read_to_string(Path::new("/sys/module/drbd/version"))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            })
+            .await
             .ok()
-            .map(|s| s.trim().to_string());
+            .flatten();
+            DRBD_VERSION.get_or_init(|| loaded).as_deref()
+        };
         let mut volume_metrics = Vec::new();
         let mut total_allocated: u64 = 0;
         for status in &statuses {
@@ -1727,7 +1756,7 @@ impl Agent {
         }
         let metric_data = NodeMetricData {
             node: &self.node,
-            drbd_version: drbd_ver.as_deref(),
+            drbd_version: drbd_ver,
             is_tainted: self.is_tainted.load(Ordering::SeqCst),
             allocated_bytes: total_allocated,
             volumes: volume_metrics,
@@ -1743,13 +1772,22 @@ impl Agent {
         let mut standalone_tracker =
             StandaloneTracker::new(self.options.adjust_attempts as usize, self.options.adjust_interval);
         let mut taint_tracker = TaintTracker::new(DEFAULT_TAINT_RESYNC_INTERVAL);
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut cleanup_tracker = CleanupTracker::new(DEFAULT_CLEANUP_INTERVAL);
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
                     let now = std::time::Instant::now();
-                    let _ = self.tick_failures(&mut quorum_tracker, &mut standalone_tracker, &mut taint_tracker, now).await;
+                    let _ = self
+                        .tick_failures(
+                            &mut quorum_tracker,
+                            &mut standalone_tracker,
+                            &mut taint_tracker,
+                            &mut cleanup_tracker,
+                            now,
+                        )
+                        .await;
                 }
             }
         }

@@ -415,6 +415,30 @@ pub fn mounted_pod_uids_for_volume(kubelet_pods_dir: &std::path::Path, volume: &
     uids
 }
 
+/// Scans `kubelet_pods_dir` once and indexes mounted pod UIDs by volume name.
+pub fn mounted_pod_uids_by_volume(
+    kubelet_pods_dir: &std::path::Path,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let Ok(pods) = std::fs::read_dir(kubelet_pods_dir) else {
+        return index;
+    };
+    for pod_entry in pods.flatten() {
+        let pod_uid = pod_entry.file_name().to_string_lossy().into_owned();
+        let csi_dir = pod_entry.path().join("volumes/kubernetes.io~csi");
+        let Ok(vols) = std::fs::read_dir(csi_dir) else {
+            continue;
+        };
+        for vol_entry in vols.flatten() {
+            let volume = vol_entry.file_name().to_string_lossy().into_owned();
+            if crate::model::valid_volume_name(&volume) {
+                index.entry(volume).or_default().push(pod_uid.clone());
+            }
+        }
+    }
+    index
+}
+
 /// Operations that change `spec.initialSync` from `Skip` to `Done`.
 pub fn initial_sync_done_ops(object: &ReplicatedVolume) -> Option<Vec<Value>> {
     if object.spec.initial_sync != InitialSync::Skip {
