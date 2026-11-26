@@ -1,6 +1,6 @@
 # Производительность и надёжность агента ambar — План реализации (ревизия 2)
 
-> **Для агентов-исполнителей:** ОБЯЗАТЕЛЬНЫЙ SUB-SKILL: используйте `superpowers:subagent-driven-development` (рекомендуется) или `superpowers:executing-plans` для пошаговой реализации задачи за задачей. Прогресс отмечается чекбоксами (`- [ ]`).
+> **Для агентов-исполнителей:** ОБЯЗАТЕЛЬНЫЙ SUB-SKILL: используйте `superpowers:subagent-driven-development` (рекомендуется) или `superpowers:executing-plans` для пошаговой реализации задачи за задачей. Прогресс отмечается чекбоксами (`- [x]`).
 
 **Цель:** Убрать паразитную фоновую CPU/IO/API-нагрузку агента, закрыть кросс-процессную гонку `mkfs.ext4`, устранить head-of-line blocking в `serve` и зомби-сироты при PID 1, сохранив все инварианты безопасности данных и fail-closed поведение.
 
@@ -48,7 +48,7 @@
   - `metrics_server::serve_listener(listener: TcpListener, provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>, shutdown: CancellationToken) -> io::Result<()>`.
   - Внутренний хелпер `budgets_by<'a>(nodes: &'a ClusterNodes, existing: &[Existing], size_of: impl Fn(&Existing) -> u64) -> HashMap<&'a str, u64>` в `src/placement.rs`.
 
-- [ ] **Шаг 1: Написать падающий тест на `Arc<str>` и устойчивость `MetricsHolder` к poisoned lock в `src/tests/metrics.rs`**
+- [x] **Шаг 1: Написать падающий тест на `Arc<str>` и устойчивость `MetricsHolder` к poisoned lock в `src/tests/metrics.rs`**
 
 ```rust
 #[test]
@@ -70,12 +70,12 @@ fn metrics_holder_shares_arc_and_recovers_from_poisoned_lock() {
 }
 ```
 
-- [ ] **Шаг 2: Убедиться, что тест не компилируется / падает**
+- [x] **Шаг 2: Убедиться, что тест не компилируется / падает**
 
 Выполнить: `cargo test metrics_holder_shares_arc`  
 Ожидаемо: ошибка компиляции (`ptr_eq` на `String`, отсутствует `Arc<str>`).
 
-- [ ] **Шаг 3: Реализовать `Arc<str>` в `src/metrics.rs` и `src/agent/metrics_server.rs`, перенести `log_allocator_page_size` в `src/main.rs`, дедуплицировать `free_budgets` в `src/placement.rs`**
+- [x] **Шаг 3: Реализовать `Arc<str>` в `src/metrics.rs` и `src/agent/metrics_server.rs`, перенести `log_allocator_page_size` в `src/main.rs`, дедуплицировать `free_budgets` в `src/placement.rs`**
 
 В `src/metrics.rs`:
 ```rust
@@ -165,7 +165,7 @@ pub fn free_budgets<'a>(nodes: &'a ClusterNodes, existing: &[Existing]) -> HashM
 
 В `README.md` и `README.ru.md` в пункте про LVM (`--volume-group=k3s-vg`) явно указать требование стандартного размера экстента LVM (`PE = 4 MiB`, дефолт `vgcreate`).
 
-- [ ] **Шаг 4: Прогнать форматтер, линтер и тесты**
+- [x] **Шаг 4: Прогнать форматтер, линтер и тесты**
 
 Выполнить:
 ```bash
@@ -189,7 +189,7 @@ cargo test
   - `pub const MAX_OUTPUT_CAPTURE: usize = 1024 * 1024;` в `src/exec.rs`.
   - `pub const BLKDISCARD_TIMEOUT: Duration = Duration::from_secs(15);` в `src/backing.rs`.
 
-- [ ] **Шаг 1: Написать падающие тесты в `src/tests/exec.rs` и `src/tests/backing.rs`**
+- [x] **Шаг 1: Написать падающие тесты в `src/tests/exec.rs` и `src/tests/backing.rs`**
 
 В `src/tests/exec.rs`:
 ```rust
@@ -207,12 +207,12 @@ fn drain_caps_captured_stdout_without_sigpipe() {
 
 В `src/tests/backing.rs`: проверить через кастомный `Runner`, записывающий переданный `timeout` в `run_with_timeout`, что для `blkdiscard` в `create_lvm_volume` и `remove_lvm_volume` передаётся `BLKDISCARD_TIMEOUT` (`15s`), тогда как `lvcreate` и `lvremove` идут через штатный `run`.
 
-- [ ] **Шаг 2: Запустить тесты и убедиться в падении**
+- [x] **Шаг 2: Запустить тесты и убедиться в падении**
 
 Выполнить: `cargo test drain_caps_captured_stdout_without_sigpipe`  
 Ожидаемо: ошибка компиляции (`MAX_OUTPUT_CAPTURE` не определён).
 
-- [ ] **Шаг 3: Реализовать лимитированный `drain` и `checked_with_timeout` для `blkdiscard`**
+- [x] **Шаг 3: Реализовать лимитированный `drain` и `checked_with_timeout` для `blkdiscard`**
 
 В `src/exec.rs`:
 ```rust
@@ -255,7 +255,7 @@ pub const BLKDISCARD_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 ```
 Добавить `checked_with_timeout(runner, program, args, timeout)` через `runner.run_with_timeout(...)` и заменить оба вызова `checked(runner, "blkdiscard", ...)` в `create_lvm_volume` и `remove_lvm_volume` на `checked_with_timeout(..., BLKDISCARD_TIMEOUT)`.
 
-- [ ] **Шаг 4: Прогнать проверки**
+- [x] **Шаг 4: Прогнать проверки**
 
 Выполнить:
 ```bash
@@ -278,16 +278,16 @@ cargo test
 **Интерфейсы:**
 - Производит: `pub(crate) fn conflict_backoff(attempt: usize) -> Duration` в `src/agent/kube.rs` (`20ms * (1 << attempt.min(4))`).
 
-- [ ] **Шаг 1: Написать падающий тест в `src/agent/tests/kube.rs`**
+- [x] **Шаг 1: Написать падающий тест в `src/agent/tests/kube.rs`**
 
 Проверить с `tokio::time::pause()`, что при серии `ApiError::Conflict` в `patch_retrying` виртуальное время продвигается на сумму задержек `20ms + 40ms + ...`, а при успехе с первой попытки задержка равна `0ms`.
 
-- [ ] **Шаг 2: Запустить тест и убедиться в падении**
+- [x] **Шаг 2: Запустить тест и убедиться в падении**
 
 Выполнить: `cargo test patch_retrying_backs_off_on_conflict`  
 Ожидаемо: FAIL (время `elapsed` равно `0ms`).
 
-- [ ] **Шаг 3: Внедрить `conflict_backoff` между попытками**
+- [x] **Шаг 3: Внедрить `conflict_backoff` между попытками**
 
 В `src/agent/kube.rs`:
 ```rust
@@ -297,7 +297,7 @@ pub(crate) fn conflict_backoff(attempt: usize) -> Duration {
 ```
 В `edit_retrying` (`src/agent/kube.rs`), `ensure_node_taint` / `remove_node_taint` (`src/agent/kube.rs`), `leave_client` (`src/agent/cleanup.rs`), `join` и `leave` (`src/csi/node.rs`): при конфликте, если `attempt + 1 < EDIT_ATTEMPTS`, вызывать `tokio::time::sleep(conflict_backoff(attempt)).await`.
 
-- [ ] **Шаг 4: Прогнать проверки**
+- [x] **Шаг 4: Прогнать проверки**
 
 Выполнить:
 ```bash
@@ -327,7 +327,7 @@ cargo test
   - `CleanupTracker` (`pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);`, `CleanupTracker::new(interval: Duration)`, `CleanupTracker::should_run(&mut self, now: Instant) -> bool`) в `src/agent/cleanup.rs`.
   - `check_and_cleanup_client_with_snapshot(agent: &Agent, volume: &str, object: &ReplicatedVolume, snapshot: Option<&ResourceStatus>, mounted_uids: &[String]) -> Result<Option<Outcome>, AgentError>` в `src/agent/cleanup.rs` (существующий `check_and_cleanup_client` оставить тонкой обёрткой для обратной совместимости тестов).
 
-- [ ] **Шаг 1: Написать падающие тесты**
+- [x] **Шаг 1: Написать падающие тесты**
 
 1. В `src/agent/tests/kube.rs`: `mounted_pod_uids_by_volume_indexes_multiple_volumes_in_one_scan` — создаёт во временном каталоге два пода с разными CSI-томами (и невалидным именем каталога) и проверяет точный `HashMap<String, Vec<String>>`.
 2. В `src/agent/tests/quorum.rs` и `src/agent/tests/standalone.rs`: `retain_volumes_drops_vanished_entries` — проверяет удаление исчезнувших томов и сохранение активных.
@@ -337,12 +337,12 @@ cargo test
 4. В `src/agent/tests/run.rs`:
    - `tick_failures_forgets_vanished_volumes_and_stays_fail_closed_on_drbd_error` — проверяет, что при исчезновении тома из `statuses` трекер очищается, но при ошибке `drbdsetup` трекер и `is_tainted` сохраняют прежнее состояние (fail-closed).
 
-- [ ] **Шаг 2: Запустить новые тесты и убедиться в падении**
+- [x] **Шаг 2: Запустить новые тесты и убедиться в падении**
 
 Выполнить: `cargo test mounted_pod_uids_by_volume`  
 Ожидаемо: ошибка компиляции (новые функции ещё не созданы).
 
-- [ ] **Шаг 3: Реализовать индекс маунтов, `CleanupTracker`, `retain_volumes`, кэш версии DRBD и обновлённый `tick_failures`**
+- [x] **Шаг 3: Реализовать индекс маунтов, `CleanupTracker`, `retain_volumes`, кэш версии DRBD и обновлённый `tick_failures`**
 
 1. В `src/agent/kube.rs`:
 ```rust
@@ -383,7 +383,7 @@ pub fn retain_volumes(&mut self, active: &std::collections::HashSet<&str>) {
    - Запускать блок 4 (`Stale Client cleanup`) через `CleanupTracker` (раз в 30 с), передавая статус из карты `statuses` и `mounted_uids` из `mounted_by_volume` (в существующую сигнатуру `tick_failures` оставить обёртку или добавить `cleanup_tracker: &mut CleanupTracker`, обновив вызовы в `run_failure_loop` и `src/agent/tests/run.rs`).
    - В `run_failure_loop` установить интервал `Duration::from_secs(2)`.
 
-- [ ] **Шаг 4: Прогнать проверки и обновить AST-индекс**
+- [x] **Шаг 4: Прогнать проверки и обновить AST-индекс**
 
 Выполнить:
 ```bash
@@ -406,22 +406,22 @@ cargo test
 - Производит:
   - Внутренний метод `reconcile_one_with_peers(&self, volume: &str, peers_snapshot: Option<&[(String, u32, u16)]>) -> Result<Outcome, AgentError>` (публичный `reconcile_one(&self, volume: &str)` вызывает `self.reconcile_one_with_peers(volume, None).await`).
 
-- [ ] **Шаг 1: Написать падающий тест в `src/agent/tests/run.rs`**
+- [x] **Шаг 1: Написать падающий тест в `src/agent/tests/run.rs`**
 
 Создать фейковый `Volumes` со счётчиком вызовов `list_calls: AtomicUsize` и 4 объектами `ReplicatedVolume`. Запустить `agent.run(shutdown)` до выставления `agent.ready == true` и остановить `shutdown.cancel()`. Проверить `assert_eq!(volumes.list_calls(), 1)` (вместо `1 + 4 = 5` вызовов на старте).
 
-- [ ] **Шаг 2: Запустить тест и убедиться в падении**
+- [x] **Шаг 2: Запустить тест и убедиться в падении**
 
 Выполнить: `cargo test first_pass_lists_volumes_once`  
 Ожидаемо: FAIL (`assertion left == right failed: left: 5, right: 1`).
 
-- [ ] **Шаг 3: Реализовать передачу снимка `(name, minor, port)` в полном проходе**
+- [x] **Шаг 3: Реализовать передачу снимка `(name, minor, port)` в полном проходе**
 
 В `src/agent/run.rs`:
 - Изменить `all_names` так, чтобы возвращать `(BTreeSet<String>, Vec<(String, u32, u16)>)` из одного вызова `self.volumes.list().await?`.
 - В `serve` сохранять `full_pass_peers: Option<(BTreeSet<String>, Vec<(String, u32, u16)>)>` для имён текущего полного прохода; при поступлении события из `watch` (добавить `watch_dirty: AtomicBool` в `Queue`, выставляемый в `feed`) сбрасывать снимок `full_pass_peers = None`, чтобы изменения из `watch` всегда видели актуальный список коллизий.
 
-- [ ] **Шаг 4: Прогнать проверки**
+- [x] **Шаг 4: Прогнать проверки**
 
 Выполнить:
 ```bash
@@ -445,17 +445,17 @@ cargo test
   - `pub const MAX_CONCURRENT_NODE_OPS: usize = 16;` в `src/csi/node.rs`.
   - Конструктор `NodeService::with_concurrency_limit` (для быстрого тестирования с лимитом `2`).
 
-- [ ] **Шаг 1: Написать падающие тесты в `src/csi/tests/controller.rs` и `src/csi/tests/node.rs`**
+- [x] **Шаг 1: Написать падающие тесты в `src/csi/tests/controller.rs` и `src/csi/tests/node.rs`**
 
 1. В `src/csi/tests/controller.rs`: тест `create_volume_reads_node_map_outside_placing_lock` — захватывает `service.placing` вручную в тесте и проверяет через `tokio::time::timeout`, что параллельный вызов `find_or_create` успевает выполнить `nodes.load()` до ожидания `self.placing.lock()`.
 2. В `src/csi/tests/node.rs`: тест `node_ops_respect_concurrency_semaphore` — создаёт сервис с лимитом `2`, блокирует 2 вызова `node_publish_volume` на барьере и проверяет, что 3-й вызов ждёт освобождения слота семафора, не порождая фоновую задачу раньше времени.
 
-- [ ] **Шаг 2: Запустить тесты и убедиться в падении**
+- [x] **Шаг 2: Запустить тесты и убедиться в падении**
 
 Выполнить: `cargo test create_volume_reads_node_map_outside_placing_lock`  
 Ожидаемо: FAIL (таймаут — `nodes.load()` заблокирован под `placing`).
 
-- [ ] **Шаг 3: Реализовать сужение `placing`-лока, семафор `NodeService` и `spawn_blocking` для `create_dir_all`**
+- [x] **Шаг 3: Реализовать сужение `placing`-лока, семафор `NodeService` и `spawn_blocking` для `create_dir_all`**
 
 1. В `src/csi/controller.rs` (`find_or_create`):
    - До `let _placing = self.placing.lock().await;` вызывать быстрый `if let Some(object) = self.volumes.get(name).await? { ... }` и `let nodes = self.nodes.load().await?;`.
@@ -465,7 +465,7 @@ cargo test
    - В `detached` (или обёртке `self.run_detached(rpc, &volume, work)`) захватывать `let permit = self.concurrency.clone().acquire_owned().await.map_err(|_| Status::unavailable("shutting down"))?;` до `tokio::spawn` и перемещать `let _permit = permit;` внутрь spawned future.
    - В `stage_locked` обернуть `std::fs::create_dir_all(&staging)` в `tokio::task::spawn_blocking` аналогично `publish_locked`.
 
-- [ ] **Шаг 4: Прогнать проверки**
+- [x] **Шаг 4: Прогнать проверки**
 
 Выполнить:
 ```bash
@@ -488,7 +488,7 @@ cargo test
   - `pub fn try_lock(&self, volume: &str) -> Option<OwnedMutexGuard<()>>` в `VolumeLocks` (`src/agent/run.rs`).
   - `const BUSY_VOLUME_RETRY_DELAY: Duration = Duration::from_secs(1);` в `src/agent/run.rs`.
 
-- [ ] **Шаг 1: Написать падающий тест в `src/agent/tests/run.rs`**
+- [x] **Шаг 1: Написать падающий тест в `src/agent/tests/run.rs`**
 
 Тест `serve_skips_locked_volume_and_reconciles_others_without_marking_ready_early`:
 - Создаёт два тома `vol-a` и `vol-b`.
@@ -498,12 +498,12 @@ cargo test
   2. Проверяет, что `agent.ready` остаётся `false`, пока `guard` удерживается (`startup` не засчитывает пропущенный `vol-a`).
   3. Отпускает `drop(guard)` — после `BUSY_VOLUME_RETRY_DELAY` `vol-a` проходит реконсиляцию и `agent.ready` становится `true`.
 
-- [ ] **Шаг 2: Запустить тест и убедиться в падении**
+- [x] **Шаг 2: Запустить тест и убедиться в падении**
 
 Выполнить: `cargo test serve_skips_locked_volume`  
 Ожидаемо: FAIL (таймаут — `serve` завис на `vol-a` перед `vol-b`).
 
-- [ ] **Шаг 3: Реализовать `VolumeLocks::try_lock` и пропуск занятого тома в `serve`**
+- [x] **Шаг 3: Реализовать `VolumeLocks::try_lock` и пропуск занятого тома в `serve`**
 
 В `src/agent/run.rs`:
 ```rust
@@ -528,7 +528,7 @@ impl VolumeLocks {
 - если `self.locks.try_lock(volume)` вернул `None` — возвращать `Ok(None)`;
 - в `serve` при `Ok(None)` планировать `queue.schedule(&name, Instant::now() + BUSY_VOLUME_RETRY_DELAY)` и переходить к следующему элементу очереди **без** вызова `startup.record`.
 
-- [ ] **Шаг 4: Прогнать проверки**
+- [x] **Шаг 4: Прогнать проверки**
 
 Выполнить:
 ```bash
@@ -549,7 +549,7 @@ cargo test
 **Интерфейсы:**
 - Использует: `Reconciler::new(paths, runner).lock_volume(&volume)` (`src/reconcile.rs:706`) и `Mount::new(runner, &mountinfo)` (`src/mount.rs`).
 
-- [ ] **Шаг 1: Написать два падающих теста в `src/csi/tests/node.rs`**
+- [x] **Шаг 1: Написать два падающих теста в `src/csi/tests/node.rs`**
 
 1. `stage_refuses_mkfs_with_unavailable_when_volume_flock_is_held`:
    - Том не отформатирован (`blkid` возвращает код 2, аннотации `formatted` нет).
@@ -559,12 +559,12 @@ cargo test
    - Первая проверка `signature` вернула `Unformatted`, но ко второй проверке внутри `flock`-секции `blkid` уже возвращает `TYPE="ext4"` (первый процесс завершил `mkfs` прямо перед нами, но ещё не успел записать аннотацию).
    - Вызов `node_stage_volume` **не** запускает `mkfs.ext4`, проставляет `mark_formatted` и монтирует том.
 
-- [ ] **Шаг 2: Запустить тесты и убедиться в падении**
+- [x] **Шаг 2: Запустить тесты и убедиться в падении**
 
 Выполнить: `cargo test stage_refuses_mkfs_with_unavailable_when_volume_flock_is_held`  
 Ожидаемо: FAIL (`mkfs.ext4` вызывается поверх чужого `flock`).
 
-- [ ] **Шаг 3: Реализовать защищённый `format_under_flock` в `src/csi/node.rs`**
+- [x] **Шаг 3: Реализовать защищённый `format_under_flock` в `src/csi/node.rs`**
 
 В `src/csi/node.rs` в ветке `Format::FormatThenMark`:
 ```rust
@@ -610,7 +610,7 @@ cargo test
     }
 ```
 
-- [ ] **Шаг 4: Прогнать проверки**
+- [x] **Шаг 4: Прогнать проверки**
 
 Выполнить:
 ```bash
@@ -632,7 +632,7 @@ cargo test
 **Интерфейсы:**
 - Контейнер `ambar` запускается с `command: ["/usr/bin/tini", "--", "ambar", "agent"]`; в `image/Dockerfile` установлен пакет `tini`.
 
-- [ ] **Шаг 1: Написать падающий тест контракта манифеста и Dockerfile в `src/tests/main.rs`**
+- [x] **Шаг 1: Написать падающий тест контракта манифеста и Dockerfile в `src/tests/main.rs`**
 
 ```rust
 #[test]
@@ -650,12 +650,12 @@ fn container_runs_under_tini_as_pid1_subreaper() {
 }
 ```
 
-- [ ] **Шаг 2: Запустить тест и убедиться в падении**
+- [x] **Шаг 2: Запустить тест и убедиться в падении**
 
 Выполнить: `cargo test container_runs_under_tini_as_pid1_subreaper`  
 Ожидаемо: FAIL (`image/Dockerfile must install tini...`).
 
-- [ ] **Шаг 3: Обновить `image/Dockerfile` и `deploy/daemonset.yaml`**
+- [x] **Шаг 3: Обновить `image/Dockerfile` и `deploy/daemonset.yaml`**
 
 В `image/Dockerfile`:
 ```dockerfile
@@ -676,7 +676,7 @@ RUN apt-get update \
           command: ["/usr/bin/tini", "--", "ambar", "agent"]
 ```
 
-- [ ] **Шаг 4: Финальная сквозная верификация и обновление индекса**
+- [x] **Шаг 4: Финальная сквозная верификация и обновление индекса**
 
 Выполнить:
 ```bash
