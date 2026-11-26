@@ -1180,3 +1180,45 @@ async fn other_calls_are_unimplemented() {
         .unwrap_err();
     assert_eq!(err.code(), Code::Unimplemented);
 }
+
+#[tokio::test(start_paused = true)]
+async fn create_volume_reads_node_map_outside_placing_lock() {
+    struct NotifyingNodes {
+        loaded: Arc<tokio::sync::Notify>,
+        nodes: crate::config::ClusterNodes,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agent::nodes::NodeMap for NotifyingNodes {
+        async fn load(&self) -> Result<crate::config::ClusterNodes, ApiError> {
+            self.loaded.notify_one();
+            Ok(self.nodes.clone())
+        }
+    }
+
+    let volumes = Arc::new(FakeVolumes::default());
+    let loaded = Arc::new(tokio::sync::Notify::new());
+    let nodes = Arc::new(NotifyingNodes {
+        loaded: loaded.clone(),
+        nodes: cluster(&[100 * GIB; 3]),
+    });
+    let svc = Arc::new(ControllerService::new(volumes, nodes));
+
+    let guard = svc.placing.lock().await;
+    let svc_task = svc.clone();
+    let wanted = PlaceRequest {
+        size_bytes: GIB,
+        replicas: 2,
+        protocol: crate::model::Protocol::C,
+        max_peers: 3,
+        selected_node: None,
+    };
+    let task = tokio::spawn(async move { svc_task.find_or_create("vol-outside-lock", &wanted).await });
+
+    tokio::time::timeout(Duration::from_secs(1), loaded.notified())
+        .await
+        .expect("nodes.load() must run without waiting for self.placing");
+
+    drop(guard);
+    task.await.unwrap().unwrap();
+}

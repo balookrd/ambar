@@ -2437,3 +2437,61 @@ async fn a_stage_without_object_and_without_this_volumes_mount_is_not_found() {
     }
     assert!(e.runner_calls().is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn node_ops_respect_concurrency_semaphore() {
+    let mut e = env();
+    let mut svc = NodeService::with_concurrency_limit(e.svc.agent.clone(), e.svc.nodes.clone(), 2);
+    svc.mountinfo = e.svc.mountinfo.clone();
+    svc.dev_dir = e.svc.dev_dir.clone();
+    svc.allow_regular_files = true;
+    svc.log = e.svc.log.clone();
+    e.svc = svc;
+
+    let g1 = e.svc.agent.locks.lock("vol1").await;
+    let g2 = e.svc.agent.locks.lock("vol2").await;
+
+    let staging = e.staging.to_string_lossy().into_owned();
+    let target = e.target.to_string_lossy().into_owned();
+    let make_req = |vol: &str| {
+        Request::new(NodePublishVolumeRequest {
+            volume_id: vol.to_string(),
+            staging_target_path: staging.clone(),
+            target_path: target.clone(),
+            volume_capability: Some(VolumeCapability {
+                access_mode: Some(AccessMode {
+                    mode: Mode::SingleNodeWriter as i32,
+                }),
+                access_type: Some(crate::csi::proto::volume_capability::AccessType::Mount(
+                    Default::default(),
+                )),
+            }),
+            ..Default::default()
+        })
+    };
+
+    let svc1 = e.svc.clone();
+    let req1 = make_req("vol1");
+    let h1 = tokio::spawn(async move { svc1.node_publish_volume(req1).await });
+    let svc2 = e.svc.clone();
+    let req2 = make_req("vol2");
+    let h2 = tokio::spawn(async move { svc2.node_publish_volume(req2).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let svc3 = e.svc.clone();
+    let req3 = make_req("vol3");
+    let mut h3 = tokio::spawn(async move { svc3.node_publish_volume(req3).await });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut h3).await.is_err(),
+        "3rd node_publish_volume must wait for a concurrency permit"
+    );
+
+    drop(g1);
+    assert_eq!(code(h1.await.unwrap()), Code::FailedPrecondition);
+    assert_eq!(code(h3.await.unwrap()), Code::FailedPrecondition);
+
+    drop(g2);
+    assert_eq!(code(h2.await.unwrap()), Code::FailedPrecondition);
+}

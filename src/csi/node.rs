@@ -170,6 +170,8 @@ use crate::model::valid_volume_name;
 use crate::mount::{MountEntry, MountError, Mounter, Signature, mounted_at, parse_mountinfo};
 use crate::reconcile::{ReconcileError, Reconciler};
 
+pub const MAX_CONCURRENT_NODE_OPS: usize = 16;
+
 #[derive(Clone)]
 pub struct NodeService {
     pub agent: Arc<Agent>,
@@ -187,11 +189,17 @@ pub struct NodeService {
     pub poll: Duration,
     /// Where one-line diagnostics go (stderr in production).
     pub log: Arc<dyn Fn(&str) + Send + Sync>,
+    /// Bounds concurrent CSI node operations waiting on or holding volume locks/mounts.
+    concurrency: Arc<tokio::sync::Semaphore>,
 }
 
 impl NodeService {
     /// The production settings.
     pub fn new(agent: Arc<Agent>, nodes: Arc<dyn NodeMap>) -> Self {
+        Self::with_concurrency_limit(agent, nodes, MAX_CONCURRENT_NODE_OPS)
+    }
+
+    pub fn with_concurrency_limit(agent: Arc<Agent>, nodes: Arc<dyn NodeMap>, limit: usize) -> Self {
         Self {
             agent,
             nodes,
@@ -201,6 +209,7 @@ impl NodeService {
             stage_wait: Duration::from_secs(30),
             poll: Duration::from_millis(500),
             log: Arc::new(|line| eprintln!("{line}")),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(limit)),
         }
     }
 }
@@ -484,6 +493,7 @@ fn is_annotated(object: &ReplicatedVolume) -> bool {
 /// volume and the error.
 async fn detached<T: Send + 'static>(
     log: Arc<dyn Fn(&str) + Send + Sync>,
+    permit: tokio::sync::OwnedSemaphorePermit,
     rpc: &'static str,
     volume: &str,
     work: impl Future<Output = Result<T, Status>> + Send + 'static,
@@ -491,6 +501,7 @@ async fn detached<T: Send + 'static>(
     let (reply, receive) = oneshot::channel();
     let volume = volume.to_string();
     tokio::spawn(async move {
+        let _permit = permit;
         if let Err(Err(status)) = reply.send(work.await) {
             log(&detached_failure_line(rpc, &volume, &status));
         }
@@ -509,6 +520,21 @@ fn detached_failure_line(rpc: &str, volume: &str, status: &Status) -> String {
 // ---- the service ----
 
 impl NodeService {
+    async fn run_detached<T: Send + 'static>(
+        &self,
+        rpc: &'static str,
+        volume: &str,
+        work: impl Future<Output = Result<T, Status>> + Send + 'static,
+    ) -> Result<T, Status> {
+        let permit = self
+            .concurrency
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Status::unavailable("shutting down"))?;
+        detached(self.log.clone(), permit, rpc, volume, work).await
+    }
+
     fn device(&self, object: &ReplicatedVolume) -> PathBuf {
         self.dev_dir.join(format!("drbd{}", object.spec.minor))
     }
@@ -778,7 +804,10 @@ impl NodeService {
                 self.mark_formatted(&object, &volume).await?;
             }
         }
-        std::fs::create_dir_all(&staging)
+        let staging_clone = staging.clone();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&staging_clone))
+            .await
+            .map_err(|e| Status::internal(format!("spawn_blocking failed: {e}")))?
             .map_err(|e| Status::unavailable(format!("cannot create {}: {e}", staging.display())))?;
         self.mount_raw(move |m| match &options {
             None => m.mount_device(&device, &staging),
@@ -906,7 +935,7 @@ impl NodeService {
         self.wait_usable(&volume).await?;
         let this = self.clone();
         let name = volume.clone();
-        detached(self.log.clone(), "NodeStageVolume", &name, async move {
+        self.run_detached("NodeStageVolume", &name, async move {
             this.stage_locked(volume, staging, options).await
         })
         .await
@@ -1063,10 +1092,11 @@ impl Node for NodeService {
         {
             let this = self.clone();
             let name = volume.clone();
-            let undone = detached(self.log.clone(), "NodeStageVolume", &name, async move {
-                this.teardown_after_failed_stage(volume, staging).await
-            })
-            .await;
+            let undone = self
+                .run_detached("NodeStageVolume", &name, async move {
+                    this.teardown_after_failed_stage(volume, staging).await
+                })
+                .await;
             if let Err(failure) = undone {
                 (self.log)(&format!(
                     "ambar-node: NodeStageVolume: volume {name:?}: the membership of this node could not be removed \
@@ -1088,7 +1118,7 @@ impl Node for NodeService {
         let staging = absolute("staging_target_path", &request.staging_target_path)?;
         let this = self.clone();
         let name = volume.clone();
-        detached(self.log.clone(), "NodeUnstageVolume", &name, async move {
+        self.run_detached("NodeUnstageVolume", &name, async move {
             this.unstage_locked(volume, staging).await
         })
         .await?;
@@ -1108,7 +1138,7 @@ impl Node for NodeService {
 
         let this = self.clone();
         let name = volume.clone();
-        detached(self.log.clone(), "NodePublishVolume", &name, async move {
+        self.run_detached("NodePublishVolume", &name, async move {
             this.publish_locked(volume, staging, target, read_only).await
         })
         .await?;
@@ -1125,7 +1155,7 @@ impl Node for NodeService {
 
         let this = self.clone();
         let name = volume.clone();
-        detached(self.log.clone(), "NodeUnpublishVolume", &name, async move {
+        self.run_detached("NodeUnpublishVolume", &name, async move {
             this.unpublish_locked(volume, target).await
         })
         .await?;

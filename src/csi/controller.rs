@@ -202,7 +202,6 @@ impl ControllerService {
     /// Steps 5 to 7: the object `name` as it stands or as it is created now.
     async fn find_or_create(&self, name: &str, wanted: &PlaceRequest) -> Result<(), Status> {
         for _ in 0..CREATE_ATTEMPTS {
-            let _placing = self.placing.lock().await;
             if let Some(object) = self
                 .volumes
                 .get(name)
@@ -217,6 +216,16 @@ impl ControllerService {
                 .load()
                 .await
                 .map_err(|e| api_status("cannot read the node map", e))?;
+            let _placing = self.placing.lock().await;
+            if let Some(object) = self
+                .volumes
+                .get(name)
+                .await
+                .map_err(|e| api_status("cannot read the volume", e))?
+            {
+                same_volume(name, &object, wanted)?;
+                return self.refuse_collision(name, &object).await;
+            }
             // A live list, not the cache. Objects that are being deleted
             // count: their minor, port and budget are in use until they are gone.
             let existing: Vec<Existing> = self
