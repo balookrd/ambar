@@ -1591,6 +1591,7 @@ impl Agent {
                         full_pass_peers = Some((names, peers));
                     }
                     Err(e) => {
+                        full_pass_peers = None;
                         log_error("*", format!("cannot list the volumes of this node: {e}"));
                         next_full = now + if startup.listed() { FULL_PASS_EVERY } else { ERROR_DELAY };
                     }

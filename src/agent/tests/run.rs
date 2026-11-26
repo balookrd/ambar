@@ -4159,6 +4159,20 @@ async fn watch_event_invalidates_full_pass_peers_snapshot() {
 
     let events = e.volumes.events();
     let queue = Arc::new(Queue::default());
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    *e.volumes.on_get.lock().unwrap() = Some(Box::new({
+        let release = release.clone();
+        move |name| {
+            let name = name.to_string();
+            Box::pin(async move {
+                assert_eq!(name, "vol-1");
+                let _ = entered_tx.send(());
+                release.notified().await;
+            })
+        }
+    }));
+
     let stop_watch = CancellationToken::new();
     let watch = tokio::spawn(feed(e.volumes.watch(), queue.clone(), stop_watch.clone()));
     let shutdown = CancellationToken::new();
@@ -4168,12 +4182,28 @@ async fn watch_event_invalidates_full_pass_peers_snapshot() {
         let shutdown = shutdown.clone();
         async move { agent.serve(&queue, &shutdown).await }
     });
-    wait_for("ready", || e.agent.ready.load(Ordering::SeqCst)).await;
+
+    // Pause inside get("vol-1") while full_pass_peers is still active for vol-1..vol-4.
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("get(vol-1) reached")
+        .unwrap();
+    assert!(!e.agent.ready.load(Ordering::SeqCst));
     assert_eq!(e.volumes.lists.load(Ordering::SeqCst), 1);
 
-    // Watch event invalidates the snapshot and triggers a fresh list() in reconcile_one_with_peers.
+    // Send a watch event and wait for `feed` to set `watch_dirty` before resuming vol-1.
     events.send("vol-1".to_string()).unwrap();
-    wait_for("watch-triggered list", || e.volumes.lists.load(Ordering::SeqCst) >= 2).await;
+    wait_for("watch_dirty", || queue.watch_dirty.load(Ordering::SeqCst)).await;
+    release.notify_one();
+
+    // Once vol-1 finishes, `serve` consumes `watch_dirty` and drops `full_pass_peers`,
+    // so vol-2..vol-4 must call `list()` again during the same first pass.
+    wait_for("ready", || e.agent.ready.load(Ordering::SeqCst)).await;
+    let lists = e.volumes.lists.load(Ordering::SeqCst);
+    assert!(
+        lists >= 4,
+        "expected list() to be called again for vol-2..vol-4 after watch_dirty invalidated the active snapshot, got {lists}"
+    );
 
     shutdown.cancel();
     stop_watch.cancel();

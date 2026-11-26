@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use futures_util::future::BoxFuture;
 use futures_util::stream::{self, BoxStream};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -63,6 +64,8 @@ pub(crate) struct FakeVolumes {
     pub(crate) fail_status_patch: AtomicBool,
     /// Runs once at the start of the next `list`.
     pub(crate) on_list: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once during the next `get` with the requested volume name.
+    pub(crate) on_get: Mutex<Option<GetHook>>,
     pub(crate) events: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
     /// Names `delete` was called with, in order.
     pub(crate) deleted: Mutex<Vec<String>>,
@@ -103,6 +106,9 @@ pub(crate) struct FakeVolumes {
 
 /// A one-shot action of the fake on its own state.
 pub(crate) type Hook = Box<dyn FnOnce(&FakeVolumes) + Send>;
+
+/// A one-shot async hook executed during the next `get`.
+pub(crate) type GetHook = Box<dyn FnOnce(&str) -> BoxFuture<'static, ()> + Send>;
 
 /// `creationTimestamp` of an object created by the fake unless `created_at` says otherwise.
 pub(crate) const T0: &str = "2026-01-01T00:00:00Z";
@@ -314,6 +320,10 @@ impl FakeVolumes {
 impl Volumes for FakeVolumes {
     async fn get(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError> {
         self.turn().await;
+        let hook = self.on_get.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook(name).await;
+        }
         if self.fail.load(Ordering::SeqCst) || self.failing.lock().unwrap().contains(name) {
             self.log(format!("get {name} failed"));
             return Err(ApiError::Other("the API server is down".into()));
