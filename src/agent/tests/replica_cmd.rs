@@ -587,3 +587,38 @@ async fn repeated_move_after_completion_returns_0_without_patches() {
         .collect::<Vec<_>>();
     assert!(patches.is_empty(), "expected no patches, got: {patches:?}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn run_replica_does_not_call_get_separately_when_list_fresh_is_used() {
+    let fake_nodes = FakeNodes(Ok(cluster(&[10 * GIB, 10 * GIB, 10 * GIB, 10 * GIB])));
+    let volumes = Arc::new(FakeVolumes::default());
+    let members = vec![
+        member("n1", 0, "192.0.2.1", NodeKind::Replica),
+        member("n2", 1, "192.0.2.2", NodeKind::Replica),
+        member("n3", 2, "192.0.2.3", NodeKind::Replica),
+    ];
+    volumes.put(make_volume("v", members));
+
+    let mut out = Vec::new();
+    let action = ReplicaAction::Add {
+        volume: "v".into(),
+        node: "n3".into(),
+    };
+    let res = run_replica(
+        volumes.as_ref(),
+        &fake_nodes,
+        &action,
+        0,
+        &mut out,
+        CancellationToken::new(),
+    )
+    .await;
+    assert!(res.is_ok(), "unexpected error: {res:?}");
+
+    let get_calls = volumes.calls().into_iter().filter(|c| c.starts_with("get ")).count();
+    assert_eq!(get_calls, 0, "expected no separate get calls during run_replica");
+    assert!(
+        volumes.fresh_lists.load(Ordering::SeqCst) >= 1,
+        "expected list_fresh to be called"
+    );
+}

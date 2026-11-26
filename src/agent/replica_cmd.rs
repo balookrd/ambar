@@ -116,16 +116,14 @@ pub async fn run_replica<W: Write>(
             return Err(ReplicaError::TimedOut);
         }
 
-        let get_res = volumes.get(volume_name).await;
-        let fresh_res = volumes.list_fresh().await;
-        let nodes_res = nodes.load().await;
+        let (fresh_res, nodes_res) = tokio::join!(volumes.list_fresh(), nodes.load());
 
-        let (volume_opt, all_volumes, cluster_nodes) = match (get_res, fresh_res, nodes_res) {
-            (Ok(v), Ok(f), Ok(n)) => {
+        let (all_volumes, cluster_nodes) = match (fresh_res, nodes_res) {
+            (Ok(f), Ok(n)) => {
                 consecutive_api_errors = 0;
-                (v, f, n)
+                (f, n)
             }
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            (Err(e), _) | (_, Err(e)) => {
                 consecutive_api_errors += 1;
                 if consecutive_api_errors >= 3 {
                     return Err(ReplicaError::Api(e));
@@ -135,7 +133,11 @@ pub async fn run_replica<W: Write>(
             }
         };
 
-        let Some(volume) = volume_opt else {
+        let Some(volume) = all_volumes
+            .iter()
+            .find(|v| v.metadata.name.as_deref() == Some(volume_name))
+            .cloned()
+        else {
             return Err(ReplicaError::NotFound(volume_name.to_string()));
         };
 

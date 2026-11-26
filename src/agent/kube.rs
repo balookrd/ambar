@@ -366,6 +366,7 @@ async fn pod_uses_volume_resolve(
     pod: &k8s_openapi::api::core::v1::Pod,
     volume: &str,
     mounted_uids: &[String],
+    pvc_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
 ) -> Result<bool, ApiError> {
     if !crate::model::valid_volume_name(volume) {
         return Ok(false);
@@ -381,14 +382,22 @@ async fn pod_uses_volume_resolve(
     };
     for v in spec.volumes.as_deref().unwrap_or_default() {
         if let Some(pvc_ref) = &v.persistent_volume_claim {
+            let key = (ns.to_string(), pvc_ref.claim_name.clone());
+            if let Some(cached) = pvc_cache.get(&key) {
+                if cached.as_deref() == Some(volume) {
+                    return Ok(true);
+                }
+                continue;
+            }
             let pvcs: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
             match bounded(pvcs.get_opt(&pvc_ref.claim_name)).await? {
-                Ok(Some(pvc)) => {
-                    if pvc.spec.and_then(|s| s.volume_name).as_deref() == Some(volume) {
+                Ok(pvc_opt) => {
+                    let resolved = pvc_opt.and_then(|p| p.spec).and_then(|s| s.volume_name);
+                    pvc_cache.insert(key, resolved.clone());
+                    if resolved.as_deref() == Some(volume) {
                         return Ok(true);
                     }
                 }
-                Ok(None) => {}
                 Err(e) => return Err(api_error(e)),
             }
         }
@@ -802,6 +811,7 @@ impl Volumes for KubeVolumes {
         let params = ListParams::default().fields(&format!("spec.nodeName={node}"));
         let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(self.client.clone());
         let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
+        let mut pvc_cache = std::collections::HashMap::new();
         let mut deleted = Vec::new();
         for pod in list.items {
             if pod
@@ -823,7 +833,7 @@ impl Volumes for KubeVolumes {
             {
                 continue;
             }
-            if !pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await? {
+            if !pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids, &mut pvc_cache).await? {
                 continue;
             }
             let (Some(name), Some(ns), Some(uid)) = (
@@ -856,6 +866,7 @@ impl Volumes for KubeVolumes {
         let params = ListParams::default().fields(&format!("spec.nodeName={node}"));
         let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(self.client.clone());
         let list = bounded(pods.list(&params)).await?.map_err(api_error)?;
+        let mut pvc_cache = std::collections::HashMap::new();
         for pod in list.items {
             let is_mounted = pod
                 .metadata
@@ -875,7 +886,7 @@ impl Volumes for KubeVolumes {
                     continue;
                 }
             }
-            if pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids).await? {
+            if pod_uses_volume_resolve(&self.client, &pod, volume, mounted_uids, &mut pvc_cache).await? {
                 return Ok(true);
             }
         }

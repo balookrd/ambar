@@ -482,3 +482,105 @@ fn mounted_pod_uids_by_volume_indexes_multiple_volumes_in_one_scan() {
     ]);
     assert_eq!(index, expected);
 }
+
+#[tokio::test]
+async fn pod_uses_volume_resolve_caches_pvc_lookups() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use k8s_openapi::api::core::v1::{PersistentVolumeClaimVolumeSource, Pod, PodSpec, Volume};
+    use kube::client::Body;
+    use tonic::codegen::http::{Request, Response, StatusCode};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = calls.clone();
+    let service = tower::service_fn(move |req: Request<Body>| {
+        let calls_ref = calls_ref.clone();
+        async move {
+            calls_ref.fetch_add(1, Ordering::SeqCst);
+            let path = req.uri().path();
+            if path.ends_with("/persistentvolumeclaims/claim-match") {
+                let body = json!({
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolumeClaim",
+                    "metadata": { "name": "claim-match", "namespace": "default" },
+                    "spec": { "volumeName": "pvc-1111" }
+                })
+                .to_string();
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            } else {
+                let body = json!({
+                    "apiVersion": "v1",
+                    "kind": "Status",
+                    "status": "Failure",
+                    "reason": "NotFound",
+                    "code": 404
+                })
+                .to_string();
+                Ok(Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.into_bytes()))
+                    .unwrap())
+            }
+        }
+    });
+    let client = kube::Client::new(service, "default");
+
+    let pod_with_claim = |claim: &str| Pod {
+        metadata: kube::api::ObjectMeta {
+            namespace: Some("default".to_string()),
+            ..Default::default()
+        },
+        spec: Some(PodSpec {
+            volumes: Some(vec![Volume {
+                name: "data".to_string(),
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: claim.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let mut cache = std::collections::HashMap::new();
+
+    // Первый запрос по claim-match: идет в API, возвращает false (другой том), кэшируется.
+    assert!(
+        !pod_uses_volume_resolve(&client, &pod_with_claim("claim-match"), "pvc-other", &[], &mut cache)
+            .await
+            .unwrap()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Повторная проверка того же claim-match для целевого тома: берется из кэша без API-запроса.
+    assert!(
+        pod_uses_volume_resolve(&client, &pod_with_claim("claim-match"), "pvc-1111", &[], &mut cache)
+            .await
+            .unwrap()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Отсутствующий PVC (404 -> None): один запрос в API, затем кэшируется как None.
+    assert!(
+        !pod_uses_volume_resolve(&client, &pod_with_claim("claim-missing"), "pvc-1111", &[], &mut cache)
+            .await
+            .unwrap()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(
+        !pod_uses_volume_resolve(&client, &pod_with_claim("claim-missing"), "pvc-1111", &[], &mut cache)
+            .await
+            .unwrap()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
