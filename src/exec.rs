@@ -1,17 +1,22 @@
 //! Running external commands behind a trait, so the logic is testable.
 
 use std::io::{self, Read};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// How long `SystemRunner::default()` lets a command run.
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How often a running command is checked for completion.
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// Maximum `poll(2)` slice while waiting for a running command to exit.
+const POLL_SLICE: Duration = Duration::from_millis(5);
+
+/// PIDs of timed-out leaders that could not be reaped within `REAP_LIMIT`
+/// (e.g. stuck in kernel D-state) and are retried on subsequent runs.
+static UNREAPED_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
@@ -56,8 +61,7 @@ impl Default for SystemRunner {
     }
 }
 
-/// Extra time after the deadline for the reader threads to hand over what
-/// they read once the command has exited.
+/// Extra time after the deadline to drain pipes once the command has exited.
 const READER_GRACE: Duration = Duration::from_secs(1);
 
 impl Runner for SystemRunner {
@@ -70,34 +74,64 @@ impl Runner for SystemRunner {
     /// children, and killing only the parent would leave them running after
     /// the caller has gone on (and released its lock).
     fn run_with_timeout(&self, program: &str, args: &[&str], timeout: Duration) -> io::Result<Output> {
+        reap_lingering_zombies();
         let mut child = Command::new(program)
             .args(args)
+            .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()?;
-        // The pipes are drained while the process runs: a command that fills
-        // a pipe buffer would otherwise block on write and never exit.
-        let (sender, results) = mpsc::channel();
-        drain(Stream::Stdout, child.stdout.take(), sender.clone());
-        drain(Stream::Stderr, child.stderr.take(), sender);
-        supervise(&mut child, &results, Instant::now() + timeout, program, args, timeout)
+        supervise(&mut child, Instant::now() + timeout, program, args, timeout)
     }
 }
 
-/// Waits for the leader `child` (already started in its own group, its pipes
-/// drained into `results`) until `deadline`, then collects its output. Kills
-/// the group and reaps the leader on every failure path.
+/// Retries reaping any previously timed-out leader that remained unreaped
+/// (e.g. a process that was in uninterruptible D-state when `REAP_LIMIT` expired).
+fn reap_lingering_zombies() {
+    let Ok(mut pids) = UNREAPED_PIDS.lock() else {
+        return;
+    };
+    pids.retain(|&pid| {
+        let Ok(pid_i32) = i32::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: non-blocking `waitpid` on a child PID we previously spawned.
+        let rc = unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), libc::WNOHANG) };
+        if rc > 0 {
+            return false;
+        }
+        if rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            return false;
+        }
+        true
+    });
+}
+
+fn record_unreaped_pid(pid: u32) {
+    if let Ok(mut pids) = UNREAPED_PIDS.lock()
+        && !pids.contains(&pid)
+    {
+        pids.push(pid);
+    }
+}
+
+/// Waits for the leader `child` (already started in its own group) until
+/// `deadline` while draining its `stdout`/`stderr` via single-threaded `poll(2)`,
+/// then collects any remaining output. Kills the group and reaps the leader on
+/// every failure path.
 fn supervise(
     child: &mut Child,
-    results: &mpsc::Receiver<(Stream, io::Result<Vec<u8>>)>,
     deadline: Instant,
     program: &str,
     args: &[&str],
     timeout: Duration,
 ) -> io::Result<Output> {
     let group = child.id();
+    let mut stdout = PipeBuffer::new(child.stdout.take())?;
+    let mut stderr = PipeBuffer::new(child.stderr.take())?;
+
     // The direct child is only observed here, never reaped, until the
     // group has been dealt with: while the leader is an unreaped zombie
     // its pid cannot be reused, so `kill(-group)` can only reach our own
@@ -110,86 +144,207 @@ fn supervise(
             Err(e) => {
                 // ECHILD: the child was reaped by someone else, so its
                 // pid may belong to an unrelated process group by now.
-                if may_signal_group(&e) {
-                    kill_and_reap(child, group);
+                if may_signal_group(&e) && !kill_and_reap(child, group) {
+                    record_unreaped_pid(group);
                 }
                 return Err(e);
             }
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             let reaped = kill_and_reap(child, group);
-            return Err(timeout_error(
-                program,
-                args,
-                timeout,
-                stderr_after_kill(results, None),
-                reaped,
-            ));
+            if !reaped {
+                record_unreaped_pid(group);
+            }
+            let _ = stderr.drain_available();
+            return Err(timeout_error(program, args, timeout, Some(stderr.data), reaped));
         }
-        thread::sleep(POLL_INTERVAL);
+
+        let remaining = deadline.saturating_duration_since(now);
+        if stdout.is_open() || stderr.is_open() {
+            if let Err(e) = poll_pipes(stdout.fd(), stderr.fd(), remaining.min(POLL_SLICE)) {
+                if !kill_and_reap(child, group) {
+                    record_unreaped_pid(group);
+                }
+                return Err(e);
+            }
+            if let Err(e) = stdout.drain_available().and_then(|()| stderr.drain_available()) {
+                if !kill_and_reap(child, group) {
+                    record_unreaped_pid(group);
+                }
+                return Err(e);
+            }
+        } else {
+            thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
     }
+
     // The command has exited, but a background process it started can
-    // still hold the pipes open; the readers then never see the end of
-    // the stream. Wait for them no longer than the deadline plus a grace.
-    match collect_output(results, deadline) {
-        Collected::Done(stdout, stderr) => {
+    // still hold the pipes open; drain until EOF or `deadline + READER_GRACE`.
+    match drain_after_exit(&mut stdout, &mut stderr, deadline + READER_GRACE) {
+        Ok(true) => {
             let status = child.wait()?;
             Ok(Output {
                 code: status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                stdout: String::from_utf8_lossy(&stdout.data).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr.data).into_owned(),
             })
         }
-        Collected::TimedOut(stderr) => {
+        Ok(false) => {
             // The leader is still unreaped, so the group id is ours.
             let reaped = kill_and_reap(child, group);
-            Err(timeout_error(
-                program,
-                args,
-                timeout,
-                stderr_after_kill(results, stderr),
-                reaped,
-            ))
+            if !reaped {
+                record_unreaped_pid(group);
+            }
+            let _ = stderr.drain_available();
+            Err(timeout_error(program, args, timeout, Some(stderr.data), reaped))
         }
-        Collected::Failed(e) => {
+        Err(e) => {
             // The leader has exited but is not reaped yet: reap it so no
             // zombie is left, and stop the rest of the group.
-            kill_and_reap(child, group);
+            if !kill_and_reap(child, group) {
+                record_unreaped_pid(group);
+            }
             Err(e)
+        }
+    }
+}
+
+/// Drains remaining bytes from `stdout` and `stderr` after the leader has exited.
+/// Returns `Ok(true)` if both pipes reached EOF before `grace_deadline`, or
+/// `Ok(false)` if a background process kept a pipe open past `grace_deadline`.
+fn drain_after_exit<R1: Read + AsRawFd, R2: Read + AsRawFd>(
+    stdout: &mut PipeBuffer<R1>,
+    stderr: &mut PipeBuffer<R2>,
+    grace_deadline: Instant,
+) -> io::Result<bool> {
+    loop {
+        stdout.drain_available()?;
+        stderr.drain_available()?;
+        if !stdout.is_open() && !stderr.is_open() {
+            return Ok(true);
+        }
+        let now = Instant::now();
+        if now >= grace_deadline {
+            return Ok(false);
+        }
+        poll_pipes(stdout.fd(), stderr.fd(), grace_deadline.saturating_duration_since(now))?;
+    }
+}
+
+/// Waits on `stdout_fd` and `stderr_fd` until at least one is ready/closed or
+/// `timeout` elapses. `EINTR` is treated as a spurious wakeup (`Ok(())`).
+fn poll_pipes(stdout_fd: Option<RawFd>, stderr_fd: Option<RawFd>, timeout: Duration) -> io::Result<()> {
+    let mut fds = [
+        libc::pollfd {
+            fd: -1,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: -1,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let mut nfds = 0;
+    if let Some(fd) = stdout_fd {
+        fds[nfds].fd = fd;
+        nfds += 1;
+    }
+    if let Some(fd) = stderr_fd {
+        fds[nfds].fd = fd;
+        nfds += 1;
+    }
+    if nfds == 0 {
+        return Ok(());
+    }
+    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: `fds[..nfds]` contains valid open file descriptors.
+    let rc = unsafe { libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, timeout_ms) };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(());
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fcntl` with `F_GETFL`/`F_SETFL` on a valid pipe descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Non-blocking pipe reader that caps captured output at `MAX_OUTPUT_CAPTURE`
+/// and discards any further bytes so the child never hits `SIGPIPE`.
+struct PipeBuffer<R> {
+    pipe: Option<R>,
+    data: Vec<u8>,
+    truncated: bool,
+}
+
+impl<R: Read + AsRawFd> PipeBuffer<R> {
+    fn new(pipe: Option<R>) -> io::Result<Self> {
+        if let Some(ref p) = pipe {
+            set_nonblocking(p.as_raw_fd())?;
+        }
+        Ok(Self {
+            pipe,
+            data: Vec::new(),
+            truncated: false,
+        })
+    }
+
+    fn is_open(&self) -> bool {
+        self.pipe.is_some()
+    }
+
+    fn fd(&self) -> Option<RawFd> {
+        self.pipe.as_ref().map(AsRawFd::as_raw_fd)
+    }
+
+    fn drain_available(&mut self) -> io::Result<()> {
+        let Some(ref mut pipe) = self.pipe else {
+            return Ok(());
+        };
+        let mut buf = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => {
+                    self.pipe = None;
+                    return Ok(());
+                }
+                Ok(n) => {
+                    if !self.truncated {
+                        let remaining_cap = MAX_OUTPUT_CAPTURE.saturating_sub(self.data.len());
+                        if n <= remaining_cap {
+                            self.data.extend_from_slice(&buf[..n]);
+                        } else {
+                            self.data.extend_from_slice(&buf[..remaining_cap]);
+                            self.data.extend_from_slice(TRUNCATED_SUFFIX);
+                            self.truncated = true;
+                        }
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
         }
     }
 }
 
 /// How long to wait for a killed child to be reaped.
 const REAP_LIMIT: Duration = Duration::from_secs(5);
-
-/// Result of waiting for both readers once the leader has exited.
-#[derive(Debug)]
-enum Collected {
-    Done(Vec<u8>, Vec<u8>),
-    /// Not both readers delivered before the deadline plus the grace; carries
-    /// the stderr if that one did.
-    TimedOut(Option<Vec<u8>>),
-    /// A reader failed or its thread is gone.
-    Failed(io::Error),
-}
-
-fn collect_output(results: &mpsc::Receiver<(Stream, io::Result<Vec<u8>>)>, deadline: Instant) -> Collected {
-    let (mut stdout, mut stderr) = (None, None);
-    while stdout.is_none() || stderr.is_none() {
-        let wait = (deadline + READER_GRACE).saturating_duration_since(Instant::now());
-        match results.recv_timeout(wait) {
-            Ok((Stream::Stdout, Ok(bytes))) => stdout = Some(bytes),
-            Ok((Stream::Stderr, Ok(bytes))) => stderr = Some(bytes),
-            Ok((_, Err(e))) => return Collected::Failed(e),
-            Err(RecvTimeoutError::Timeout) => return Collected::TimedOut(stderr),
-            Err(RecvTimeoutError::Disconnected) => {
-                return Collected::Failed(io::Error::other("output reader thread panicked"));
-            }
-        }
-    }
-    Collected::Done(stdout.unwrap_or_default(), stderr.unwrap_or_default())
-}
 
 /// `false` for ECHILD from `waitid`: the child is not ours any more (reaped
 /// elsewhere), so its group id may have been reused and must not be signalled.
@@ -217,7 +372,7 @@ fn reap_within(child: &mut Child, limit: Duration) -> bool {
         if Instant::now() >= until {
             return false;
         }
-        thread::sleep(POLL_INTERVAL);
+        thread::sleep(POLL_SLICE);
     }
 }
 
@@ -266,26 +421,6 @@ fn truncate_utf8(text: &str, max: usize) -> String {
     format!("{}...", &text[..end])
 }
 
-/// After the group was killed the pipes close and the readers finish; waits
-/// up to `READER_GRACE` for the stderr reader. `None` when it did not
-/// deliver (a process that left the group still holds the pipe) or failed.
-fn stderr_after_kill(
-    results: &mpsc::Receiver<(Stream, io::Result<Vec<u8>>)>,
-    have: Option<Vec<u8>>,
-) -> Option<Vec<u8>> {
-    if have.is_some() {
-        return have;
-    }
-    let until = Instant::now() + READER_GRACE;
-    loop {
-        match results.recv_timeout(until.saturating_duration_since(Instant::now())) {
-            Ok((Stream::Stderr, bytes)) => return bytes.ok(),
-            Ok((Stream::Stdout, _)) => {}
-            Err(_) => return None,
-        }
-    }
-}
-
 /// Whether the child `pid` has exited, without reaping it (`WNOWAIT`): the
 /// zombie stays, so the pid and the group id stay reserved until the caller
 /// calls `Child::wait`.
@@ -314,44 +449,10 @@ fn exited_without_reaping(pid: u32) -> io::Result<bool> {
     Ok(reported != 0)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Stream {
-    Stdout,
-    Stderr,
-}
-
 /// Maximum bytes kept in memory per stream (`stdout` / `stderr`). Any further
 /// output is drained to `io::sink()` so the child never hits `SIGPIPE`.
 pub const MAX_OUTPUT_CAPTURE: usize = 1024 * 1024;
 const TRUNCATED_SUFFIX: &[u8] = b"\n... [output truncated]";
-
-/// Reads `pipe` to the end on its own thread and sends the bytes over `sender`.
-fn drain<R: Read + Send + 'static>(
-    stream: Stream,
-    pipe: Option<R>,
-    sender: mpsc::Sender<(Stream, io::Result<Vec<u8>>)>,
-) {
-    thread::spawn(move || {
-        let result = match pipe {
-            Some(mut pipe) => read_capped(&mut pipe),
-            None => Ok(Vec::new()),
-        };
-        // The receiver is gone when the caller gave up; nothing to report.
-        let _ = sender.send((stream, result));
-    });
-}
-
-fn read_capped<R: Read>(pipe: &mut R) -> io::Result<Vec<u8>> {
-    let limit = MAX_OUTPUT_CAPTURE as u64;
-    let mut bytes = Vec::new();
-    pipe.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_OUTPUT_CAPTURE {
-        bytes.truncate(MAX_OUTPUT_CAPTURE);
-        bytes.extend_from_slice(TRUNCATED_SUFFIX);
-        io::copy(pipe, &mut io::sink())?;
-    }
-    Ok(bytes)
-}
 
 /// SIGKILL to every process of the group `pgid` (the pid of the group leader
 /// that `process_group(0)` made). Best effort: the group may be gone already.

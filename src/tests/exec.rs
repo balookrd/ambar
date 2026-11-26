@@ -327,37 +327,19 @@ fn echild_from_waitid_means_there_is_nothing_to_signal() {
 }
 
 #[test]
-fn a_reader_error_after_the_leader_exited_is_reported_as_a_failure() {
-    let (sender, results) = mpsc::channel();
-    sender
-        .send((Stream::Stdout, Err(io::Error::other("read failed"))))
-        .unwrap();
-    sender.send((Stream::Stderr, Ok(b"e".to_vec()))).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    match collect_output(&results, deadline) {
-        Collected::Failed(e) => assert_eq!(e.to_string(), "read failed"),
-        other => panic!("{other:?}"),
-    }
-}
-
-#[test]
-fn collected_output_is_returned_when_both_readers_deliver() {
-    let (sender, results) = mpsc::channel();
-    sender.send((Stream::Stderr, Ok(b"err".to_vec()))).unwrap();
-    sender.send((Stream::Stdout, Ok(b"out".to_vec()))).unwrap();
-    match collect_output(&results, Instant::now() + Duration::from_secs(5)) {
-        Collected::Done(out, err) => assert_eq!((out.as_slice(), err.as_slice()), (&b"out"[..], &b"err"[..])),
-        other => panic!("{other:?}"),
-    }
-}
-
-#[test]
-fn waiting_for_the_readers_stops_after_the_deadline_plus_the_grace() {
-    let (_sender, results) = mpsc::channel::<(Stream, io::Result<Vec<u8>>)>();
+fn waiting_for_the_pipes_stops_after_the_deadline_plus_the_grace() {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0i32; 2];
+    // SAFETY: `fds` is a valid 2-element array for `pipe`.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // SAFETY: newly created pipe file descriptors.
+    let (read_end, _write_end) = unsafe { (fs::File::from_raw_fd(fds[0]), fs::File::from_raw_fd(fds[1])) };
+    let mut stdout = PipeBuffer::new(Some(read_end)).unwrap();
+    let mut stderr: PipeBuffer<fs::File> = PipeBuffer::new(None).unwrap();
     let started = Instant::now();
-    let collected = collect_output(&results, Instant::now());
+    let drained = drain_after_exit(&mut stdout, &mut stderr, Instant::now() + READER_GRACE).unwrap();
     let took = started.elapsed();
-    assert!(matches!(collected, Collected::TimedOut(None)));
+    assert!(!drained);
     assert!(
         took >= READER_GRACE - Duration::from_millis(100) && took < READER_GRACE + Duration::from_secs(3),
         "{took:?}"
@@ -375,21 +357,22 @@ fn a_timeout_error_says_when_the_process_could_not_be_reaped() {
 }
 
 #[test]
-fn a_reader_failure_after_the_leader_exited_reaps_it() {
-    let mut child = std::process::Command::new("true").process_group(0).spawn().unwrap();
+fn reap_lingering_zombies_reaps_exited_child_and_clears_echild() {
+    let child = std::process::Command::new("true").spawn().unwrap();
     let pid = child.id();
+    std::mem::forget(child);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !exited_without_reaping(pid).unwrap() {
         assert!(Instant::now() < deadline, "the child did not exit");
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(5));
     }
-    let (sender, results) = mpsc::channel();
-    sender
-        .send((Stream::Stdout, Err(io::Error::other("read failed"))))
-        .unwrap();
-    let err = supervise(&mut child, &results, deadline, "true", &[], Duration::from_secs(5)).unwrap_err();
-    assert_eq!(err.to_string(), "read failed");
-    assert!(pid_is_gone(pid), "the exited leader was left as a zombie");
+    record_unreaped_pid(pid);
+    record_unreaped_pid(u32::MAX / 2);
+    reap_lingering_zombies();
+    assert!(pid_is_gone(pid), "the exited child was left as a zombie");
+    let pids = UNREAPED_PIDS.lock().unwrap();
+    assert!(!pids.contains(&pid));
+    assert!(!pids.contains(&(u32::MAX / 2)));
 }
 
 /// Whether the process runs: it exists and is not a zombie. `/proc` where
@@ -427,10 +410,8 @@ fn a_leader_reaped_elsewhere_gives_an_error_and_no_signal_to_its_group() {
         libc::kill(pid, libc::SIGKILL);
         assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
     }
-    let (_sender, results) = mpsc::channel();
     let err = supervise(
         &mut child,
-        &results,
         Instant::now() + Duration::from_secs(5),
         "sh",
         &[],
@@ -458,4 +439,21 @@ fn drain_caps_captured_stdout_without_sigpipe() {
     assert_eq!(out.code, 0, "writer must not die with SIGPIPE");
     assert!(out.stdout.len() <= MAX_OUTPUT_CAPTURE + 64);
     assert!(out.stdout.ends_with("\n... [output truncated]"));
+}
+
+#[test]
+fn fast_command_finishes_without_poll_interval_sleep() {
+    let start = Instant::now();
+    let out = SystemRunner::default().run("true", &[]).unwrap();
+    assert!(out.success());
+    assert!(start.elapsed() < Duration::from_millis(18), "{:?}", start.elapsed());
+}
+
+#[test]
+fn command_runs_with_c_locale() {
+    let out = SystemRunner::default()
+        .run("sh", &["-c", "printf '%s' \"$LC_ALL\""])
+        .unwrap();
+    assert!(out.success());
+    assert_eq!(out.stdout, "C");
 }
