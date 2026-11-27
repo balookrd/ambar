@@ -306,7 +306,7 @@ echo "$rm_out"
 [[ -z "$(files_of "$REP_VM" "$VOL")" ]] || fail "$REP_VM still has volume files after remove"
 [[ -z "$(loops_of "$REP_VM" "$VOL")" ]] || fail "$REP_VM still has loop devices after remove"
 vm "$REP_VM" "test ! -e /dev/ambar/$VOL" || fail "/dev/ambar/$VOL symlink still exists on $REP_VM"
-drbd_status "$REP_VM" "$VOL" | grep -v "No response from the kernel module" | grep -v "not configured" \
+drbd_status "$REP_VM" "$VOL" | grep -v "No response from the kernel module" | grep -v "not configured" | grep -v "No such resource" | grep -v "No currently configured DRBD found" \
     | grep -qv "^\s*$" && fail "$VOL resource still configured on $REP_VM" || true
 
 rvjp "$VOL" '{.metadata.finalizers[*]}' | grep -qv "ambar.balookrd.github.io/replica-$REP_TO_REMOVE" \
