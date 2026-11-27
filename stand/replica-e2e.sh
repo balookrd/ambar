@@ -367,6 +367,10 @@ wit_after="$(rvjp "$VOL" '{.spec.nodes[?(@.kind=="Witness")].name}' | tr ' ' '\n
 edit_count=$(grep -c "^edit:" <<<"$move_out" || true)
 [[ "$edit_count" == 2 ]] || fail "expected exactly 2 edit: lines in move output, got $edit_count"
 
+# Wait for DRBD connections to settle (e.g. Witness transition) before next move
+wait_until 30 "peers of $VOL are not all Connected" \
+    '! rvjp "$VOL" "{range .status.nodes[*].connections[*]}{.state}{\"\n\"}{end}" | grep -qv "^Connected$"'
+
 # Move onto the witness node
 echo "moving replica from $MOVE_DST onto witness node $wit_after"
 move_wit_out="$(replica_cmd "$N1" move "$VOL" "$MOVE_DST" "$wit_after")"
