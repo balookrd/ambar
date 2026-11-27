@@ -316,10 +316,11 @@ rvjp "$VOL" '{.metadata.finalizers[*]}' | grep -qv "ambar.balookrd.github.io/rep
 
 step d "d. replica remove $VOL on dv-1 (pod is there) fails with Primary"
 before_spec="$(members "$VOL")"
-set +e
-d_out="$(replica_cmd "$N1" remove "$VOL" "$H1" 2>&1)"
-d_rc=$?
-set -e
+if d_out="$( (trap - ERR; replica_cmd "$N1" remove "$VOL" "$H1") 2>&1 )"; then
+    d_rc=0
+else
+    d_rc=$?
+fi
 echo "replica remove Primary exit code: $d_rc, output: $d_out"
 [[ "$d_rc" == 1 ]] || fail "replica remove on Primary node expected exit code 1, got $d_rc"
 grep -qi "Primary" <<<"$d_out" || fail "replica remove on Primary expected error mentioning Primary, got: $d_out"
@@ -403,10 +404,11 @@ done
 [[ -n "$F_SRC" && -n "$F_DST" ]] || fail "could not pick F_SRC ($F_SRC) or F_DST ($F_DST)"
 echo "moving $VOL2 from $F_SRC to $F_DST with timeout 20s"
 
-set +e
-f_to_out="$(replica_cmd "$N1" move "$VOL2" "$F_SRC" "$F_DST" --timeout 20 2>&1)"
-f_to_rc=$?
-set -e
+if f_to_out="$( (trap - ERR; replica_cmd "$N1" move "$VOL2" "$F_SRC" "$F_DST" --timeout 20) 2>&1 )"; then
+    f_to_rc=0
+else
+    f_to_rc=$?
+fi
 echo "move with timeout exit code: $f_to_rc"
 echo "$f_to_out"
 [[ "$f_to_rc" == 1 ]] || fail "move with timeout expected exit code 1, got $f_to_rc"
@@ -430,16 +432,12 @@ total_edits=$(( edits_to + edits_res ))
 
 step g "g. CRD validation rules via kubectl patch"
 # 1. Remove Replica directly
-set +e
-p1_err="$(kc patch rv "$VOL" --type=json -p '[{"op":"remove","path":"/spec/nodes/0"}]' 2>&1)"
-set -e
+p1_err="$( (trap - ERR; kc patch rv "$VOL" --type=json -p '[{"op":"remove","path":"/spec/nodes/0"}]') 2>&1 || true )"
 grep -q "a Replica node is removed only through Retiring" <<<"$p1_err" \
     || fail "rule 1 failed, got: $p1_err"
 
 # 2. Change Replica -> Client directly
-set +e
-p2_err="$(kc patch rv "$VOL" --type=json -p '[{"op":"replace","path":"/spec/nodes/0/kind","value":"Client"}]' 2>&1)"
-set -e
+p2_err="$( (trap - ERR; kc patch rv "$VOL" --type=json -p '[{"op":"replace","path":"/spec/nodes/0/kind","value":"Client"}]') 2>&1 || true )"
 grep -q "this change of a node's kind is not allowed" <<<"$p2_err" \
     || fail "rule 2 failed, got: $p2_err"
 
@@ -453,18 +451,14 @@ for n in "${NODES[@]}"; do
     fi
 done
 if [[ -n "$OUTSIDE_NODE" ]]; then
-    set +e
-    p3_err="$(kc patch rv "$VOL" --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/nodes/-\",\"value\":{\"name\":\"$OUTSIDE_NODE\",\"nodeId\":9,\"address\":\"192.0.2.9\",\"kind\":\"Retiring\"}}]" 2>&1)"
-    set -e
+    p3_err="$( (trap - ERR; kc patch rv "$VOL" --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/nodes/-\",\"value\":{\"name\":\"$OUTSIDE_NODE\",\"nodeId\":9,\"address\":\"192.0.2.9\",\"kind\":\"Retiring\"}}]") 2>&1 || true )"
     grep -q "a node can become Retiring only from Replica" <<<"$p3_err" \
         || fail "rule 3 failed, got: $p3_err"
 fi
 
 # 4. Two Retiring nodes
 # Find a replica, try to add second Retiring
-set +e
-p4_err="$(kc patch rv "$VOL" --type=json -p '[{"op":"replace","path":"/spec/nodes/0/kind","value":"Retiring"},{"op":"replace","path":"/spec/nodes/1/kind","value":"Retiring"}]' 2>&1)"
-set -e
+p4_err="$( (trap - ERR; kc patch rv "$VOL" --type=json -p '[{"op":"replace","path":"/spec/nodes/0/kind","value":"Retiring"},{"op":"replace","path":"/spec/nodes/1/kind","value":"Retiring"}]') 2>&1 || true )"
 grep -q "at most one node can be Retiring" <<<"$p4_err" \
     || fail "rule 4 failed, got: $p4_err"
 
