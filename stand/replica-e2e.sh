@@ -368,8 +368,8 @@ edit_count=$(grep -c "^edit:" <<<"$move_out" || true)
 [[ "$edit_count" == 2 ]] || fail "expected exactly 2 edit: lines in move output, got $edit_count"
 
 # Wait for DRBD connections to settle (e.g. Witness transition) before next move
-wait_until 30 "peers of $VOL are not all Connected" \
-    '! rvjp "$VOL" "{range .status.nodes[*].connections[*]}{.state}{\"\n\"}{end}" | grep -qv "^Connected$"'
+wait_until 30 "peers of $VOL still have StandAlone" \
+    '! rvjp "$VOL" "{range .status.nodes[*].connections[*]}{.state}{\"\n\"}{end}" | grep -q "StandAlone"'
 
 # Move onto the witness node
 echo "moving replica from $MOVE_DST onto witness node $wit_after"
