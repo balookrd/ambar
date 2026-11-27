@@ -744,6 +744,29 @@ fn remove_refuses_when_too_few_replicas() {
 }
 
 #[test]
+fn remove_refuses_with_primary_before_too_few_replicas() {
+    let cluster = test_cluster();
+    let spec = sample_spec(vec![
+        member("n1", 0, "192.168.104.1", NodeKind::Replica),
+        member("n2", 1, "192.168.104.2", NodeKind::Replica),
+    ]);
+    let mut status = healthy_status(&spec);
+    status.nodes.iter_mut().find(|n| n.name == "n1").unwrap().role = "Primary".to_string();
+    let finalizers = vec![replica_finalizer("n1"), replica_finalizer("n2")];
+    let view = View {
+        spec: &spec,
+        status: Some(&status),
+        deleting: false,
+        finalizers: &finalizers,
+    };
+
+    assert_eq!(
+        next_remove(&view, "n1", false, &cluster, &[]),
+        Err(ChangeError::Primary("n1".to_string()))
+    );
+}
+
+#[test]
 fn remove_refuses_when_removing_node_is_primary() {
     let cluster = test_cluster();
     let spec = sample_spec(vec![

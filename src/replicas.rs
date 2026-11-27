@@ -443,16 +443,16 @@ pub fn next_remove(
             Ok(Next::Wait(text))
         }
         Some(m) if m.kind == NodeKind::Replica => {
-            let n_replicas = replica_count(&view.spec.nodes);
-            if n_replicas <= 2 {
-                return Err(ChangeError::TooFewReplicas);
-            }
             let is_primary = view
                 .status
                 .and_then(|s| s.nodes.iter().find(|n| n.name == node))
                 .is_some_and(|n| n.role == "Primary");
             if is_primary {
                 return Err(ChangeError::Primary(node.to_string()));
+            }
+            let n_replicas = replica_count(&view.spec.nodes);
+            if n_replicas <= 2 {
+                return Err(ChangeError::TooFewReplicas);
             }
 
             check_r25(view, cluster, Some(node))?;
