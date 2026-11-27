@@ -447,6 +447,13 @@ fn mount_with_options(mounter: &Mounter<'_>, device: &Path, target: &Path, optio
                 found: entry.fstype,
             });
         }
+        let read_only = options.split(',').any(|o| o == "ro");
+        if entry.read_only != read_only {
+            return Err(MountError::Busy {
+                target: target.display().to_string(),
+                source_mounted: format!("{} ({})", entry.source, if entry.read_only { "ro" } else { "rw" }),
+            });
+        }
         return Ok(());
     }
     let target_name = target.to_string_lossy().into_owned();
@@ -993,12 +1000,7 @@ impl NodeService {
     /// Steps 6 to 10 of the stage, after the join.
     async fn stage_after_join(&self, volume: String, staging: PathBuf, options: Option<String>) -> Result<(), Status> {
         self.wait_usable(&volume).await?;
-        let this = self.clone();
-        let name = volume.clone();
-        self.run_detached("NodeStageVolume", &name, async move {
-            this.stage_locked(volume, staging, options).await
-        })
-        .await
+        self.stage_locked(volume, staging, options).await
     }
 
     /// The teardown after a stage that failed for good (module doc), under the
@@ -1142,29 +1144,27 @@ impl Node for NodeService {
             }
             Some(_) => {}
         }
-        let _stage_guard = self.agent.begin_stage(&volume);
-        self.join(&volume).await?;
-        let result = self.stage_after_join(volume.clone(), staging.clone(), options).await;
-        if let Err(status) = &result
-            && is_final(status.code())
-        {
-            let this = self.clone();
-            let name = volume.clone();
-            let undone = self
-                .run_detached("NodeStageVolume", &name, async move {
-                    this.teardown_after_failed_stage(volume, staging).await
-                })
-                .await;
-            if let Err(failure) = undone {
-                (self.log)(&format!(
-                    "ambar-node: NodeStageVolume: volume {name:?}: the membership of this node could not be removed \
+        let this = self.clone();
+        let name = volume.clone();
+        self.run_detached("NodeStageVolume", &name, async move {
+            let _stage_guard = this.agent.begin_stage(&volume);
+            this.join(&volume).await?;
+            let result = this.stage_after_join(volume.clone(), staging.clone(), options).await;
+            if let Err(status) = &result
+                && is_final(status.code())
+                && let Err(failure) = this.teardown_after_failed_stage(volume.clone(), staging).await
+            {
+                (this.log)(&format!(
+                    "ambar-node: NodeStageVolume: volume {volume:?}: the membership of this node could not be removed \
                      after the error {:?}: {}",
                     failure.code(),
                     failure.message()
                 ));
             }
-        }
-        result.map(|()| Response::new(NodeStageVolumeResponse {}))
+            result
+        })
+        .await
+        .map(|()| Response::new(NodeStageVolumeResponse {}))
     }
 
     async fn node_unstage_volume(

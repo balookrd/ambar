@@ -2546,3 +2546,90 @@ async fn stage_skips_mkfs_when_peer_formatted_volume_before_flock_acquired() {
     assert!(e.annotated());
     assert_eq!(e.sim.mounted_at(&e.staging).len(), 1);
 }
+
+#[tokio::test]
+async fn mount_with_options_rejects_mismatched_read_only_mode() {
+    let e = env();
+    fs::create_dir_all(&e.staging).unwrap();
+    let device = e.dev_dir.join(format!("drbd{MINOR}"));
+    e.sim.add_mount(
+        &device.to_string_lossy(),
+        &e.staging.to_string_lossy(),
+        "/",
+        false,
+        None,
+    );
+
+    let staging = e.staging.clone();
+    let dev = device.clone();
+    let err = e
+        .svc
+        .mount_raw(move |m| mount_with_options(m, &dev, &staging, "ro,noatime"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, MountError::Busy { .. }),
+        "expected Busy on ro/rw mismatch, got: {err:?}"
+    );
+    assert!(e.calls(&["mount"]).is_empty());
+
+    // Обратный случай: смонтировано ro, запрашивается rw.
+    let staging_ro = e.staging.with_file_name("staging-ro");
+    fs::create_dir_all(&staging_ro).unwrap();
+    e.sim.add_mount(
+        &device.to_string_lossy(),
+        &staging_ro.to_string_lossy(),
+        "/",
+        true,
+        None,
+    );
+    let dev = device.clone();
+    let target_ro = staging_ro.clone();
+    let err = e
+        .svc
+        .mount_raw(move |m| mount_with_options(m, &dev, &target_ro, "noatime"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, MountError::Busy { .. }),
+        "expected Busy on rw/ro mismatch, got: {err:?}"
+    );
+
+    // Совпадающий режим (ro и ro) — идемпотентный Ok(()).
+    let dev = device.clone();
+    let target_ro = staging_ro.clone();
+    e.svc
+        .mount_raw(move |m| mount_with_options(m, &dev, &target_ro, "ro,noatime"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn node_stage_volume_completes_teardown_when_handler_is_aborted() {
+    let e = env();
+    e.volumes.put(volume_object(VOLUME, MINOR, 7000));
+    e.set_device(Dev::Other("xfs"));
+    e.sim.usable.store(true, SeqCst);
+
+    let guard = e.svc.agent.locks.lock(VOLUME).await;
+    let svc = e.svc.clone();
+    let request = e.stage_request();
+    let handler = tokio::spawn(async move { svc.node_stage_volume(Request::new(request)).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(is_client(&e), "join must have added the node before stage_locked waits");
+
+    // Клиент отменяет gRPC-вызов, пока задача ждёт лок тома.
+    handler.abort();
+    let _ = handler.await;
+
+    drop(guard);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    assert!(
+        !is_client(&e),
+        "teardown_after_failed_stage must still run in detached task after handler abort"
+    );
+    let logs = e.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    assert!(logs[0].contains("NodeStageVolume"), "{logs:?}");
+}
