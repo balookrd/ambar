@@ -408,6 +408,11 @@ impl Drbd<'_> {
     pub fn status(&self, volume: &str) -> Result<Option<ResourceStatus>, DrbdError> {
         let args = ["status", volume, "--json"];
         let out = self.run("drbdsetup", &args)?;
+        if out.code == 10 && out.stderr.contains("No such resource") {
+            // Observed on the stand (P3): querying an absent resource exits
+            // with code 10, `[\n]\n\n` on stdout, and `<vol>: No such resource`.
+            return Ok(None);
+        }
         let all = Self::parse_status_output(&args, out)?;
         Ok(all.into_iter().find(|r| r.name == volume))
     }

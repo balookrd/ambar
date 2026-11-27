@@ -118,6 +118,22 @@ fn status_reports_malformed_json_after_a_successful_exit() {
     assert!(matches!(drbd.status("spike"), Err(DrbdError::Status(_))));
 }
 
+#[test]
+fn status_missing_resource_with_exit_code_10_is_none() {
+    // Recorded on the stand (P3): `drbdsetup status <vol> --json` for a missing
+    // resource exits with code 10, `[\n]\n\n` on stdout, and `<vol>: No such resource` on stderr.
+    let runner = FakeRunner::new(|_, _| out(10, "[\n]\n\n", "spike: No such resource\n"));
+    let drbd = Drbd { runner: &runner };
+    assert_eq!(drbd.status("spike").unwrap(), None);
+
+    let other_err = FakeRunner::new(|_, _| out(10, "", "No valid meta data found\n"));
+    let drbd_err = Drbd { runner: &other_err };
+    assert!(matches!(
+        drbd_err.status("spike"),
+        Err(DrbdError::Command { code: 10, .. })
+    ));
+}
+
 /// Stderr recorded in experiment P7 (1) for a file without metadata.
 const P7_NO_METADATA_STDERR: &str = "No valid meta data found\nCommand 'drbdmeta 1007 v09 /dev/ambar/p7 internal dump-md' terminated with exit code 255\n";
 
