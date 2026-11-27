@@ -10,13 +10,15 @@
 # includes a rebuilt image (step 6).
 #
 # Variables:
-#   IMAGE        agent image, default ambar-drbd:dev (built by image/build.sh)
-#   PULL_POLICY  imagePullPolicy of the agent, default Never: the image is
-#                imported into containerd on every node below
+#   IMAGE         agent image, default ambar-drbd:dev (built by image/build.sh)
+#   PULL_POLICY   imagePullPolicy of the agent, default Never: the image is
+#                 imported into containerd on every node below
+#   VOLUME_GROUP  LVM volume group for backing LVs, default empty (sparse mode)
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 IMAGE="${IMAGE:-ambar-drbd:dev}"
 PULL_POLICY="${PULL_POLICY:-Never}"
+VOLUME_GROUP="${VOLUME_GROUP:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY="$HERE/../deploy"
 DRIVER=ambar.balookrd.github.io
@@ -144,7 +146,15 @@ image_id="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 sed -e "s|^\( *imagePullPolicy:\) AMBAR_IMAGE_PULL_POLICY\$|\1 $PULL_POLICY|" \
     -e "s|^\( *image:\) AMBAR_IMAGE\$|\1 $IMAGE|" \
     "$DEPLOY/daemonset.yaml" \
-    | awk -v id="$image_id" '
+    | awk -v id="$image_id" -v vg="$VOLUME_GROUP" '
+        vg == "" && /^[[:space:]]*- --volume-group=k3s-vg$/ { next }
+        vg == "" && /^[[:space:]]*- name: VOLUME_GROUP$/ { skip_vg_val = 1; next }
+        skip_vg_val && /^[[:space:]]*value: "k3s-vg"$/ { skip_vg_val = 0; next }
+        skip_vg_val { skip_vg_val = 0 }
+        vg != "" {
+            sub(/--volume-group=k3s-vg/, "--volume-group=" vg)
+            sub(/value: "k3s-vg"/, "value: \"" vg "\"")
+        }
         { print }
         /^    metadata:$/ { print "      annotations:"; print "        ambar.balookrd.github.io/image-id: \"" id "\"" }' \
     | kc apply -f -

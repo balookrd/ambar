@@ -269,8 +269,10 @@ deployment_pod() {
 }
 
 deployment_node() {
-    local name="$1"
-    kc get pods -l "deployment=$name" -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true
+    local name="$1" out
+    out="$(kc get pods -l "deployment=$name" \
+        -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.spec.nodeName}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)"
+    printf '%s\n' "${out%%$'\n'*}"
 }
 
 block_drbd_port() {

@@ -231,7 +231,7 @@ echo "volume: $VOL"
 [[ "$(count_kind "$VOL" Replica)" == 2 ]] || fail "$VOL: expected 2 Replica entries, got $(count_kind "$VOL" Replica)"
 [[ "$(count_kind "$VOL" Witness)" == 1 ]] || fail "$VOL: expected 1 Witness entry, got $(count_kind "$VOL" Witness)"
 
-WITNESS_HOST="$(rvjp "$VOL" '{range .spec.nodes[*]}{if eq .kind "Witness"}{.name}{"\n"}{end}' | head -n1)"
+WITNESS_HOST="$(rvjp "$VOL" '{.spec.nodes[?(@.kind=="Witness")].name}' | tr ' ' '\n' | head -n1)"
 [[ -n "$WITNESS_HOST" ]] || fail "$VOL: no Witness node found"
 echo "witness node: $WITNESS_HOST"
 
@@ -278,7 +278,7 @@ echo "recent writer counter log lines: $(echo "$writer_lines" | tr '\n' ' ')"
 step c "c. replica remove $VOL (replica not on $N1)"
 # Pick a replica node that is not dv-1
 REP_TO_REMOVE=""
-for h in $(rvjp "$VOL" '{range .spec.nodes[*]}{if eq .kind "Replica"}{.name}{"\n"}{end}'); do
+for h in $(rvjp "$VOL" '{.spec.nodes[?(@.kind=="Replica")].name}'); do
     if [[ "$h" != "$H1" ]]; then
         REP_TO_REMOVE="$h"
         break
@@ -331,7 +331,7 @@ after_spec="$(members "$VOL")"
 step e "e. replica move $VOL from non-dv-1 replica to outside node"
 # Find current non-H1 replica
 MOVE_SRC=""
-for h in $(rvjp "$VOL" '{range .spec.nodes[*]}{if eq .kind "Replica"}{.name}{"\n"}{end}'); do
+for h in $(rvjp "$VOL" '{.spec.nodes[?(@.kind=="Replica")].name}'); do
     if [[ "$h" != "$H1" ]]; then
         MOVE_SRC="$h"
         break
@@ -349,7 +349,7 @@ done
 [[ -n "$MOVE_SRC" && -n "$MOVE_DST" ]] || fail "cannot find MOVE_SRC ($MOVE_SRC) or MOVE_DST ($MOVE_DST)"
 echo "moving replica from $MOVE_SRC to $MOVE_DST"
 
-wit_before="$(rvjp "$VOL" '{range .spec.nodes[*]}{if eq .kind "Witness"}{.name}{"\n"}{end}' | head -n1)"
+wit_before="$(rvjp "$VOL" '{.spec.nodes[?(@.kind=="Witness")].name}' | tr ' ' '\n' | head -n1)"
 move_start=$SECONDS
 move_out="$(replica_cmd "$N1" move "$VOL" "$MOVE_SRC" "$MOVE_DST")"
 move_duration=$(( SECONDS - move_start ))
@@ -360,7 +360,7 @@ echo "time: replica move took $move_duration s"
 has_member "$VOL" "$H1" Replica || fail "$H1 lost Replica status"
 has_member "$VOL" "$MOVE_DST" Replica || fail "$MOVE_DST is not Replica after move"
 no_member "$VOL" "$MOVE_SRC" Replica || fail "$MOVE_SRC is still Replica after move"
-wit_after="$(rvjp "$VOL" '{range .spec.nodes[*]}{if eq .kind "Witness"}{.name}{"\n"}{end}' | head -n1)"
+wit_after="$(rvjp "$VOL" '{.spec.nodes[?(@.kind=="Witness")].name}' | tr ' ' '\n' | head -n1)"
 [[ "$wit_before" == "$wit_after" ]] || fail "witness changed during move: was $wit_before, now $wit_after"
 
 edit_count=$(grep -c "^edit:" <<<"$move_out" || true)
@@ -390,7 +390,7 @@ echo "2Gi volume: $VOL2"
 
 # Pick source replica not H1, and outside target
 F_SRC=""
-for h in $(rvjp "$VOL2" '{range .spec.nodes[*]}{if eq .kind "Replica"}{.name}{"\n"}{end}'); do
+for h in $(rvjp "$VOL2" '{.spec.nodes[?(@.kind=="Replica")].name}'); do
     if [[ "$h" != "$H1" ]]; then F_SRC="$h"; break; fi
 done
 F_DST=""
