@@ -584,3 +584,54 @@ async fn pod_uses_volume_resolve_caches_pvc_lookups() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn get_cached_reads_from_reflector_cache_when_listed_without_http() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use kube::client::Body;
+    use tonic::codegen::http::{Request, Response, StatusCode};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = calls.clone();
+    let service = tower::service_fn(move |_req: Request<Body>| {
+        let calls_ref = calls_ref.clone();
+        async move {
+            calls_ref.fetch_add(1, Ordering::SeqCst);
+            let body = json!({
+                "apiVersion": "v1",
+                "kind": "Status",
+                "status": "Failure",
+                "reason": "NotFound",
+                "code": 404
+            })
+            .to_string();
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.into_bytes()))
+                    .unwrap(),
+            )
+        }
+    });
+    let kv = KubeVolumes::new(kube::Client::new(service, "default"));
+    let obj = object();
+    {
+        let mut writer = kv.writer.lock().unwrap().take().unwrap();
+        writer.apply_watcher_event(&Event::Apply(obj.clone()));
+    }
+
+    // Пока listed == false, get_cached делает HTTP-запрос.
+    assert!(kv.get_cached("v").await.unwrap().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // После listed == true чтение идёт только из self.cache без HTTP-запросов.
+    kv.listed.store(true, Ordering::SeqCst);
+    let cached = kv.get_cached("v").await.unwrap().expect("cached volume");
+    assert_eq!(cached.metadata.name.as_deref(), Some("v"));
+    assert_eq!(cached.spec, obj.spec);
+    assert!(kv.get_cached("missing").await.unwrap().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

@@ -55,7 +55,20 @@ fn status_finds_the_resource_by_name() {
     let drbd = Drbd { runner: &runner };
     assert_eq!(drbd.status("spike").unwrap().map(|s| s.node_id), Some(0));
     assert_eq!(drbd.status("other").unwrap(), None);
-    assert_eq!(runner.calls()[0], "drbdsetup status --json");
+    assert_eq!(
+        runner.calls(),
+        ["drbdsetup status spike --json", "drbdsetup status other --json"]
+    );
+}
+
+#[test]
+fn all_statuses_queries_all_resources() {
+    let runner = FakeRunner::new(|_, _| out(0, THREE_UPTODATE, ""));
+    let drbd = Drbd { runner: &runner };
+    let all = drbd.all_statuses().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].name, "spike");
+    assert_eq!(runner.calls(), ["drbdsetup status --json"]);
 }
 
 #[test]
@@ -91,7 +104,7 @@ fn status_trusts_the_exit_code_before_stdout() {
     assert_eq!(
         drbd.status("spike"),
         Err(DrbdError::Command {
-            command: "drbdsetup status --json".into(),
+            command: "drbdsetup status spike --json".into(),
             code: 1,
             stderr: "boom".into(),
         })

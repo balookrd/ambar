@@ -2162,7 +2162,7 @@ fn down_without_effect_is_an_error() {
         matches!(&err, ReconcileError::NotApplied { command: "down", volume } if volume == "spike"),
         "{err}"
     );
-    assert_eq!(runner.calls(), ["drbdadm down spike", "drbdsetup status --json"]);
+    assert_eq!(runner.calls(), ["drbdadm down spike", "drbdsetup status spike --json"]);
 }
 
 #[test]

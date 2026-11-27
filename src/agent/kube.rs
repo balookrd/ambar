@@ -9,6 +9,7 @@
 //! | Method | Call |
 //! |---|---|
 //! | `get` | `Api::get_opt` |
+//! | `get_cached` | the reflector cache once the watch has listed once, `get` before that |
 //! | `list` | the reflector cache once the watch has listed once, `Api::list` before that |
 //! | `list_fresh` | `Api::list` with `ListParams::default()` (no `resourceVersion`: a list without it is a consistent read), following `metadata.continue` while the server sets it |
 //! | `create` | `Api::create`; the uid of the stored object is in `Created::New`; HTTP 409 is `Created::Exists` |
@@ -54,7 +55,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
-use kube::runtime::reflector::{self, Store};
+use kube::runtime::reflector::{self, ObjectRef, Store};
 use kube::runtime::watcher::{self, Event};
 use kube::runtime::{WatchStreamExt, watcher as watcher_fn};
 use kube::{Client, Resource};
@@ -107,6 +108,11 @@ pub enum Created {
 #[async_trait]
 pub trait Volumes: Send + Sync {
     async fn get(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError>;
+    /// Reads the volume from the reflector cache once the watch has listed
+    /// once; falls back to `get` before that.
+    async fn get_cached(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError> {
+        self.get(name).await
+    }
     async fn list(&self) -> Result<Vec<ReplicatedVolume>, ApiError>;
     /// Every object as the API server holds it now: a live LIST, never the
     /// watch cache. A caller that decides from the list what is free (the
@@ -628,6 +634,14 @@ impl Objects for KubeVolumes {
 impl Volumes for KubeVolumes {
     async fn get(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError> {
         call(self.api.get_opt(name)).await
+    }
+
+    async fn get_cached(&self, name: &str) -> Result<Option<ReplicatedVolume>, ApiError> {
+        if self.listed.load(Ordering::SeqCst) {
+            let key = ObjectRef::new(name);
+            return Ok(self.cache.get(&key).map(|v| (*v).clone()));
+        }
+        self.get(name).await
     }
 
     async fn list(&self) -> Result<Vec<ReplicatedVolume>, ApiError> {

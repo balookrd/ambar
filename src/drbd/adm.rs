@@ -378,13 +378,10 @@ impl Drbd<'_> {
         self.checked("drbdadm", &["new-current-uuid", "--clear-bitmap", &target])
     }
 
-    /// Status of all resources currently configured in the kernel.
-    pub fn all_statuses(&self) -> Result<Vec<ResourceStatus>, DrbdError> {
-        let args = ["status", "--json"];
-        let out = self.run("drbdsetup", &args)?;
+    fn parse_status_output(args: &[&str], out: Output) -> Result<Vec<ResourceStatus>, DrbdError> {
         if !out.success() {
             return Err(DrbdError::Command {
-                command: command_line("drbdsetup", &args),
+                command: command_line("drbdsetup", args),
                 code: out.code,
                 stderr: out.stderr.trim().to_string(),
             });
@@ -400,9 +397,18 @@ impl Drbd<'_> {
         status::parse(text).map_err(|e| DrbdError::Status(e.to_string()))
     }
 
+    /// Status of all resources currently configured in the kernel.
+    pub fn all_statuses(&self) -> Result<Vec<ResourceStatus>, DrbdError> {
+        let args = ["status", "--json"];
+        let out = self.run("drbdsetup", &args)?;
+        Self::parse_status_output(&args, out)
+    }
+
     /// Status of one resource; `None` when it is not configured in the kernel.
     pub fn status(&self, volume: &str) -> Result<Option<ResourceStatus>, DrbdError> {
-        let all = self.all_statuses()?;
+        let args = ["status", volume, "--json"];
+        let out = self.run("drbdsetup", &args)?;
+        let all = Self::parse_status_output(&args, out)?;
         Ok(all.into_iter().find(|r| r.name == volume))
     }
 

@@ -867,7 +867,7 @@ impl Agent {
         volume: &str,
         peers_snapshot: Option<&[(String, u32, u16)]>,
     ) -> Result<Outcome, AgentError> {
-        let object = self.volumes.get(volume).await?;
+        let object = self.volumes.get_cached(volume).await?;
         let local = self.read_local(volume).await?;
         let task = match &object {
             None => decide(&self.node, volume, None, local),
