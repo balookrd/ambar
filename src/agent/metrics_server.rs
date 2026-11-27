@@ -1,9 +1,10 @@
-//! Lightweight HTTP server for Prometheus metrics (R38).
+//! Lightweight HTTP server for Prometheus metrics (R38) and readiness probe.
 //!
-//! Serves `/metrics` over TCP using Tokio without external HTTP framework overhead.
+//! Serves `/metrics` and `/readyz` over TCP using Tokio without external HTTP framework overhead.
 
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,8 +19,18 @@ pub async fn run_metrics_server(
     provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
+    run_metrics_server_with_ready(addr, provider, Arc::new(AtomicBool::new(true)), shutdown).await
+}
+
+/// Serves Prometheus metrics and `/readyz` readiness probe on the given address until `shutdown` is triggered.
+pub async fn run_metrics_server_with_ready(
+    addr: &str,
+    provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
+    ready: Arc<AtomicBool>,
+    shutdown: CancellationToken,
+) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    serve_listener(listener, provider, shutdown).await
+    serve_listener_with_ready(listener, provider, ready, shutdown).await
 }
 
 pub(crate) async fn serve_listener(
@@ -27,12 +38,39 @@ pub(crate) async fn serve_listener(
     provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
-    serve_listener_with_limit(listener, provider, shutdown, MAX_CONCURRENT_METRICS_CONNECTIONS).await
+    serve_listener_with_ready(listener, provider, Arc::new(AtomicBool::new(true)), shutdown).await
 }
 
+pub(crate) async fn serve_listener_with_ready(
+    listener: TcpListener,
+    provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
+    ready: Arc<AtomicBool>,
+    shutdown: CancellationToken,
+) -> io::Result<()> {
+    serve_listener_with_limit_and_ready(listener, provider, ready, shutdown, MAX_CONCURRENT_METRICS_CONNECTIONS).await
+}
+
+#[cfg(test)]
 pub(crate) async fn serve_listener_with_limit(
     listener: TcpListener,
     provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
+    shutdown: CancellationToken,
+    concurrency_limit: usize,
+) -> io::Result<()> {
+    serve_listener_with_limit_and_ready(
+        listener,
+        provider,
+        Arc::new(AtomicBool::new(true)),
+        shutdown,
+        concurrency_limit,
+    )
+    .await
+}
+
+pub(crate) async fn serve_listener_with_limit_and_ready(
+    listener: TcpListener,
+    provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
+    ready: Arc<AtomicBool>,
     shutdown: CancellationToken,
     concurrency_limit: usize,
 ) -> io::Result<()> {
@@ -51,11 +89,12 @@ pub(crate) async fn serve_listener_with_limit(
                             continue;
                         };
                         let provider = provider.clone();
+                        let ready = ready.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
                             let _ = tokio::time::timeout(
                                 Duration::from_secs(5),
-                                handle_connection(stream, provider),
+                                handle_connection(stream, provider, ready),
                             )
                             .await;
                         });
@@ -73,7 +112,11 @@ pub(crate) async fn serve_listener_with_limit(
     Ok(())
 }
 
-async fn handle_connection(mut stream: TcpStream, provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>) -> io::Result<()> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    provider: Arc<dyn Fn() -> Arc<str> + Send + Sync>,
+    ready: Arc<AtomicBool>,
+) -> io::Result<()> {
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf).await?;
     if n == 0 {
@@ -96,6 +139,17 @@ async fn handle_connection(mut stream: TcpStream, provider: Arc<dyn Fn() -> Arc<
 
     if method != "GET" {
         let resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        stream.write_all(resp.as_bytes()).await?;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
+
+    if path == "/readyz" {
+        let resp = if ready.load(Ordering::Acquire) {
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 6\r\nConnection: close\r\n\r\nready\n"
+        } else {
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 10\r\nConnection: close\r\n\r\nnot ready\n"
+        };
         stream.write_all(resp.as_bytes()).await?;
         let _ = stream.shutdown().await;
         return Ok(());

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::AtomicBool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn send_request(addr: &str, req: &str) -> String {
@@ -168,4 +169,40 @@ async fn shutdown_stops_server() {
 
     shutdown.cancel();
     assert!(server_task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn get_readyz_returns_503_when_not_ready() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let shutdown = CancellationToken::new();
+
+    let provider = Arc::new(|| Arc::from(""));
+    let ready = Arc::new(AtomicBool::new(false));
+    let server_task = tokio::spawn(serve_listener_with_ready(listener, provider, ready, shutdown.clone()));
+
+    let response = send_request(&addr, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(response.ends_with("\r\n\r\nnot ready\n"));
+
+    shutdown.cancel();
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn get_readyz_returns_200_when_ready() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let shutdown = CancellationToken::new();
+
+    let provider = Arc::new(|| Arc::from(""));
+    let ready = Arc::new(AtomicBool::new(true));
+    let server_task = tokio::spawn(serve_listener_with_ready(listener, provider, ready, shutdown.clone()));
+
+    let response = send_request(&addr, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.ends_with("\r\n\r\nready\n"));
+
+    shutdown.cancel();
+    server_task.await.unwrap().unwrap();
 }

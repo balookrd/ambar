@@ -63,21 +63,22 @@ spec:
             - name: metrics
               containerPort: 9770
               protocol: TCP
-          # Ready means the CSI socket exists. The agent binds the socket
-          # concurrently with the reconcile loop and does not wait for the
-          # first pass of the loop: until the agent is ready, NodeStageVolume
-          # answers UNAVAILABLE. The socket is renamed into place when bound,
-          # so a half-created socket is not seen. The probe does not talk to
-          # the socket. A socket file left by a killed
-          # (SIGKILL) agent would make the probe pass early; a normal stop
-          # removes the file.
+          # Ready means the agent has finished its first reconcile listing and
+          # published readiness (`GET /readyz` returns 200 OK; until then it
+          # returns 503 Service Unavailable and NodeStageVolume answers
+          # UNAVAILABLE).
           # There is NO liveness probe on purpose: one reconcile pass may run
           # an external command for up to 120 s, and a liveness restart would
           # cut it in the middle (see terminationGracePeriodSeconds).
           readinessProbe:
-            exec:
-              command: ["test", "-S", "/var/lib/kubelet/plugins/ambar/csi.sock"]
+            httpGet:
+              path: /readyz
+              port: metrics
             periodSeconds: 5
+          resources:
+            requests:
+              cpu: 20m
+              memory: 48Mi
           env:
             - name: NODE_NAME
               valueFrom:
@@ -123,6 +124,10 @@ spec:
           args:
             - --csi-address=/csi/csi.sock
             - --kubelet-registration-path=/var/lib/kubelet/plugins/ambar/csi.sock
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
           volumeMounts:
             - {name: socket-dir, mountPath: /csi}
             - {name: registration-dir, mountPath: /registration}
@@ -148,6 +153,10 @@ spec:
             # UpToDate; the default of 10 s would cancel it.
             - --timeout=90s
             - --default-fstype=ext4
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
           volumeMounts:
             - {name: socket-dir, mountPath: /csi}
       volumes:

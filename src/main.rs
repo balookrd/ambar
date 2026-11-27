@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use ambar::agent::kube::KubeVolumes;
+use ambar::agent::metrics_server::run_metrics_server_with_ready;
 use ambar::agent::nodes::ConfigMapNodes;
 use ambar::agent::run::{Agent, VolumeLocks, preflight};
 use ambar::cli::{self, Cli, Command, ReplicaCommand};
@@ -233,7 +234,14 @@ fn run_agent(
                 result
             },
             async {
-                let result = agent.serve_metrics(&metrics_addr, shutdown.clone()).await;
+                let metrics = agent.metrics.clone();
+                let result = run_metrics_server_with_ready(
+                    &metrics_addr,
+                    Arc::new(move || metrics.get()),
+                    agent.ready.clone(),
+                    shutdown.clone(),
+                )
+                .await;
                 if let Err(ref e) = result {
                     eprintln!("ambar-agent: the metrics server error: {e}");
                 }
