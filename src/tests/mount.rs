@@ -346,10 +346,13 @@ fn unmount_runs_umount_for_a_mount_point() {
 }
 
 #[test]
-fn mkfs_runs_quiet_and_without_discard() {
+fn mkfs_runs_quiet_without_discard_and_lazy_init() {
     with_mounter(MOUNTINFO, 0, |m, r| {
         m.mkfs_ext4(Path::new(DEV)).unwrap();
-        assert_eq!(r.calls(), vec!["mkfs.ext4 -q -E nodiscard /dev/drbd1009"]);
+        assert_eq!(
+            r.calls(),
+            vec!["mkfs.ext4 -q -E nodiscard,lazy_itable_init=0,lazy_journal_init=0 /dev/drbd1009"]
+        );
     });
 }
 

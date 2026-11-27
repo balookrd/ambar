@@ -950,7 +950,7 @@ async fn stage_row8_signature_empty_runs_mkfs_once_then_mount() {
     assert_eq!(
         e.calls(&["mkfs.ext4", "mount"]),
         [
-            format!("mkfs.ext4 -q -E nodiscard {device}"),
+            format!("mkfs.ext4 -q -E nodiscard,lazy_itable_init=0,lazy_journal_init=0 {device}"),
             format!("mount -t ext4 {device} {}", e.staging.display())
         ]
     );

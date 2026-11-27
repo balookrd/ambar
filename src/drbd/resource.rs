@@ -44,7 +44,11 @@ pub fn render(spec: &VolumeSpec, backing_device: &Path) -> String {
         out,
         "    options {{ quorum majority; on-no-quorum io-error; auto-promote yes; }}"
     );
-    let _ = writeln!(out, "    net {{ protocol {protocol}; }}");
+    let _ = writeln!(
+        out,
+        "    net {{ protocol {protocol}; max-buffers 8192; sndbuf-size 0; rcvbuf-size 0; }}"
+    );
+    let _ = writeln!(out, "    disk {{ al-extents 6001; c-max-rate 250M; }}");
     for node in &nodes {
         let disk = if node.diskful {
             format!("disk {}; meta-disk internal;", backing_device.display())

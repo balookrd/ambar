@@ -23,7 +23,8 @@ fn renders_two_copies_and_a_diskless_node_sorted_by_node_id() {
     let expected = "\
 resource spike2 {
     options { quorum majority; on-no-quorum io-error; auto-promote yes; }
-    net { protocol C; }
+    net { protocol C; max-buffers 8192; sndbuf-size 0; rcvbuf-size 0; }
+    disk { al-extents 6001; c-max-rate 250M; }
     on lima-dv-1 {
         node-id 0;
         address ipv4 192.168.104.1:7001;
@@ -52,7 +53,10 @@ fn renders_protocol_a_and_ipv6_addresses() {
         .replace("192.168.104.1", "fd00::1");
     let spec = VolumeSpec::from_json(&json).unwrap();
     let text = render(&spec, Path::new("/dev/ambar/spike2"));
-    assert!(text.contains("    net { protocol A; }\n"), "{text}");
+    assert!(
+        text.contains("    net { protocol A; max-buffers 8192; sndbuf-size 0; rcvbuf-size 0; }\n"),
+        "{text}"
+    );
     assert!(text.contains("        address ipv6 [fd00::1]:7001;\n"), "{text}");
 }
 

@@ -232,14 +232,18 @@ impl Mounter<'_> {
         }
     }
 
-    /// `mkfs.ext4 -q -E nodiscard <device>`. The caller runs it only after
-    /// `signature` returned `Empty`. `nodiscard` limits the damage of a wrong
-    /// decision (no TRIM of the whole device); the discard behaviour through
-    /// DRBD over a loop device was not measured [not measured].
+    /// `mkfs.ext4 -q -E nodiscard,lazy_itable_init=0,lazy_journal_init=0 <device>`.
+    /// The caller runs it only after `signature` returned `Empty`. `nodiscard`
+    /// limits the damage of a wrong decision (no TRIM of the whole device), and
+    /// disabling lazy inode-table / journal initialization avoids background
+    /// `ext4lazyinit` replication traffic over DRBD Protocol C.
     pub fn mkfs_ext4(&self, device: &Path) -> Result<(), MountError> {
         let name = device.to_string_lossy().into_owned();
-        self.run_checked("mkfs.ext4", &["-q", "-E", "nodiscard", &name])
-            .map(|_| ())
+        self.run_checked(
+            "mkfs.ext4",
+            &["-q", "-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", &name],
+        )
+        .map(|_| ())
     }
 
     /// Idempotent: Ok when `target` already has `device` mounted; `Busy` when
