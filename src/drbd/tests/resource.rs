@@ -24,7 +24,6 @@ fn renders_two_copies_and_a_diskless_node_sorted_by_node_id() {
 resource spike2 {
     options { quorum majority; on-no-quorum io-error; auto-promote yes; }
     net { protocol C; max-buffers 8192; sndbuf-size 0; rcvbuf-size 0; }
-    disk { al-extents 6001; c-max-rate 250M; }
     on lima-dv-1 {
         node-id 0;
         address ipv4 192.168.104.1:7001;
